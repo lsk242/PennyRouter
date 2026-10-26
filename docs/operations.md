@@ -10,12 +10,25 @@ cargo run -p pennyrouter-gateway   # serves :3000, PORT=... to override
 curl localhost:3000/health         # {"status":"ok"}
 ```
 
+Settings live in `.env` (copy [`.env.example`](../.env.example)); every
+variable has a sane default so the commands below also work without one.
+
 ```sh
-docker compose -f docker/compose.yaml up --build
+cp -n .env.example .env                 # once; optional
+docker compose up --build               # local dev: builds from source
+```
+
+Server deployment pulls the CI-built image from GitHub Packages and
+never builds — copy one file plus `.env` to the server:
+
+```sh
+docker compose -f compose.prod.yaml pull
+docker compose -f compose.prod.yaml up -d
 ```
 
 CI builds `ghcr.io/lsk242/pennyrouter:latest` and smoke-tests `/health`
-on every PR, and pushes it on merges to main.
+on every PR, and pushes it on merges to main. It also rejects any
+`build:` section in `compose.prod.yaml`, keeping deploys pull-only.
 
 ## Local development
 
@@ -28,9 +41,10 @@ Docker-based local dev (see `docker/`):
 
 ## Configuration
 
-Keep config minimal and env-based. No local key store for now. Anything the
-gateway needs (ports, upstream URLs, sync intervals) must have sane
-defaults so a bare `docker compose up` works.
+Keep config minimal and env-based (`.env`, see [`.env.example`](../.env.example)):
+`PORT` (container port), `HOST_PORT` (published port), `IMAGE` (dev:
+tag for the local build; prod: image to pull). No local key store:
+backend keys travel with requests, never in config or fixtures.
 
 ## Observability
 

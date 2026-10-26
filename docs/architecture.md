@@ -81,7 +81,10 @@ PennyRouter/
     common/               # shared types, config, errors
   tests/                  # integration + load tests
   docs/                   # this folder
-  docker/                 # Dockerfile, compose for local dev
+  compose.yaml            # local dev (builds from source)
+  compose.prod.yaml       # server deploy (pulls GHCR image, no build)
+  .env.example            # settings template (copy to .env)
+  docker/                 # Dockerfile
 ```
 
 Toolchain and crate choices are deferred to Iter 1, not locked here.

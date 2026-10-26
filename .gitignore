@@ -19,6 +19,8 @@ rustc-ice-*.txt
 # Local secrets (keys travel with requests, never in the repo)
 .env
 .env.*
+# ...except the checked-in settings template.
+!.env.example
 
 # RustRover
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can

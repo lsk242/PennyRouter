@@ -1,9 +1,14 @@
+# Local development: builds the image from source and runs it.
+# Usage (from the repo root):
+#   cp -n .env.example .env   # once; optional, defaults work without it
+#   docker compose up --build
 services:
   gateway:
     build:
-      context: ..
+      context: .
       dockerfile: docker/Dockerfile
+    image: ${IMAGE:-pennyrouter:dev}
     ports:
-      - "3000:3000"
+      - "${HOST_PORT:-3000}:${PORT:-3000}"
     environment:
-      PORT: "3000"
+      PORT: ${PORT:-3000}

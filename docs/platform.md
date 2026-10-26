@@ -8,7 +8,10 @@ longer than one iteration.
 
 1. **Docker (now).** Local `docker compose` dev plus a minimal runnable
    image. Unblocked by Iter 1: the gateway exposes `GET /health` so the
-   image has a container check. No cloud yet.
+   image has a container check. Dev compose builds from source; prod
+   compose (`compose.prod.yaml`) deploys by pulling the GHCR
+   image — one file plus `.env` on the server, no build there. No cloud
+   yet.
 2. **First cloud provider (later, TBD).** One provider first (Hetzner,
    AWS, Azure, … — selection deferred). Terraform-managed: VM creation,
    resource allocation, networking, deploy.

@@ -43,6 +43,9 @@ adds value on its own. Detail and acceptance criteria live in
 
 - [x] Docker local dev + minimal image (Dockerfile + compose added in 1a;
       build + `/health` verified locally via `docker build` and compose).
+- [x] Dev/prod compose split with `.env` settings (`compose.yaml`
+      builds locally; `compose.prod.yaml` pulls the `ghcr.io` image
+      with no `build:` section, CI-guarded).
 - [ ] Docker build + push pipeline with `/health` smoke check (workflow
       added in 1a; proves itself on next push to main).
 - [ ] Select first cloud provider (Hetzner / AWS / Azure / … — TBD).

@@ -1,0 +1,14 @@
+# Server deployment: pull-only, never builds. Copy this single file plus
+# your `.env` to the server, then:
+#   docker compose -f compose.prod.yaml pull
+#   docker compose -f compose.prod.yaml up -d
+# The image comes from GitHub Packages (ghcr.io), pushed by CI on every
+# merge to main. No `build:` section on purpose.
+services:
+  gateway:
+    image: ${IMAGE:-ghcr.io/lsk242/pennyrouter:latest}
+    ports:
+      - "${HOST_PORT:-3000}:${PORT:-3000}"
+    environment:
+      PORT: ${PORT:-3000}
+    restart: unless-stopped
