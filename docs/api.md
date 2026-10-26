@@ -31,7 +31,7 @@ default route — never an error.
 
 ## Health check
 
-`GET /health` — no auth, minimal `200 OK` body. Exists for container
+`GET /health` — no auth, `200 OK` with body `{"status":"ok"}`. Exists for container
 orchestration and the Docker build pipeline's smoke check (see
 [platform.md](platform.md)). It is outside the OpenAI-compatible surface.
 

@@ -71,7 +71,7 @@ The gateway stays provider-agnostic — no cloud SDKs on the request path.
 ```text
 PennyRouter/
   README.md  TODO.md  LICENSE  AGENTS.md
-  Cargo.toml              # workspace (Iter 1)
+  Cargo.toml + Cargo.lock  # workspace root
   .github/                # CI workflows, Dependabot
   crates/
     gateway/              # HTTP server, OpenAI compat

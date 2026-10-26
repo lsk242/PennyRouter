@@ -1,9 +1,25 @@
 # Operations
 
+## Run it
+
+Local run needs a Rust toolchain (rustup, stable); the container needs
+only Docker.
+
+```sh
+cargo run -p pennyrouter-gateway   # serves :3000, PORT=... to override
+curl localhost:3000/health         # {"status":"ok"}
+```
+
+```sh
+docker compose -f docker/compose.yaml up --build
+```
+
+CI builds `ghcr.io/lsk242/pennyrouter:latest` and smoke-tests `/health`
+on every PR, and pushes it on merges to main.
+
 ## Local development
 
-Docker-based local dev (images and compose arrive with Iter 1; the `docker/`
-directory is reserved now):
+Docker-based local dev (see `docker/`):
 
 - One command to build and run the gateway locally.
 - A resource-capped profile matching the ~1 CPU / 1 GB target for perf

@@ -10,7 +10,7 @@ itself. No iteration may depend on a later one.
 - Test: tree + link audit — expected files exist, all doc links resolve,
   no source/toolchain files added.
 
-## Iter 0.1 — Safety + platform foundations (this turn)
+## Iter 0.1 — Safety + platform foundations (done)
 
 - Goal: secret scanning, Dependabot, agent conventions, README badges,
   platform track plan, precision-aware comparison notes — still no code.
@@ -19,17 +19,24 @@ itself. No iteration may depend on a later one.
 - Test: workflow configs present and valid YAML; all doc links resolve;
   no source/toolchain files added.
 
-## Iter 1 — Minimal non-streaming passthrough
+## Iter 1a — Health + minimal setup (done)
+
+- Goal: Rust workspace, unauthenticated `GET /health`, Dockerfile,
+  compose file, Docker CI workflow.
+- Value: proves the Rust → Docker → CI chain before any gateway logic;
+  gives the image a container check.
+- Test: `cargo test` passes; `/health` returns `{"status":"ok"}` from
+  the real binary; Docker image build (116MB) + container smoke check
+  passed locally.
+
+## Iter 1b — Non-streaming passthrough
 
 - Goal: `POST /v1/chat/completions` reaches OpenRouter and returns
-  correctly, using the caller-supplied key. Also exposes unauthenticated
-  `GET /health` so the minimal Docker image has a container check.
+  correctly, using the caller-supplied key.
 - Value: a working gateway baseline everything else builds on; the
-  performance-optimization starting point; unblocks the Docker build
-  pipeline.
+  performance-optimization starting point.
 - Test: integration test against a mock backend plus a recorded fixture;
-  response body byte-correct; `/health` returns 200 from the built image;
-  must not import routing or DB code.
+  response body byte-correct; must not import routing or DB code.
 
 ## Iter 2 — Streaming + guards
 
@@ -88,10 +95,11 @@ itself. No iteration may depend on a later one.
 Runs alongside the iterations above; see [platform.md](platform.md).
 Development delivers Docker images, platform delivers deployments.
 
-- **Now:** Docker local dev + minimal image (unblocked by Iter 1's
-  `/health`). CI runs secret scanning + Dependabot.
-- **Gated on Iter 1:** Docker build + push pipeline with `/health`
-  smoke check.
+- **Now:** Docker local dev + minimal image (Dockerfile + compose added
+  in 1a; verified with a local build + `/health` smoke test). CI runs
+  secret scanning + Dependabot.
+- **Docker build + push pipeline:** workflow added in 1a; first executes
+  on next push to main.
 - **Later:** first cloud provider (TBD — Hetzner / AWS / Azure / …),
   Terraform-managed (VMs, resource allocation, networking); then more
   providers. Terraform automation gated on provider selection.

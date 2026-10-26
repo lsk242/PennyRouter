@@ -6,14 +6,16 @@ adds value on its own. Detail and acceptance criteria live in
 
 - [x] **Iter 0 — Repo skeleton + docs.** Value: reviewable
       structure, vision, and plan before any code. Test: tree + link audit.
-- [ ] **Iter 0.1 — Safety + platform foundations.** Secret scanning,
+- [x] **Iter 0.1 — Safety + platform foundations.** Secret scanning,
       Dependabot, agent conventions, README badges, platform track plan,
       precision-aware comparison notes. Test: workflow configs valid;
       links resolve; still no code.
-- [ ] **Iter 1 — Minimal non-streaming passthrough.** `POST
+- [x] **Iter 1a — Health + minimal setup.** Rust workspace, `GET /health`,
+      Dockerfile, compose, Docker CI workflow. Test: `cargo test`,
+      `/health` smoke, and Docker image build all passed locally.
+- [ ] **Iter 1b — Non-streaming passthrough.** `POST
       /v1/chat/completions` → OpenRouter, caller-supplied key, byte-correct
-      response; plus unauthenticated `GET /health` for the container
-      check. Test: integration test against a mock backend + recorded
+      response. Test: integration test against a mock backend + recorded
       fixture; must not depend on any routing or DB code.
 - [ ] **Iter 2 — Streaming + guards.** SSE streaming passthrough, timeouts,
       error mapping, 1M-token guard. Test: chunked fixture streams intact;
@@ -39,9 +41,10 @@ adds value on its own. Detail and acceptance criteria live in
 
 ## Platform track (parallel — see [docs/platform.md](docs/platform.md))
 
-- [ ] Docker local dev + minimal image (unblocked by Iter 1 `/health`).
-- [ ] Docker build + push pipeline with `/health` smoke check (gated on
-      Iter 1).
+- [x] Docker local dev + minimal image (Dockerfile + compose added in 1a;
+      build + `/health` verified locally via `docker build` and compose).
+- [ ] Docker build + push pipeline with `/health` smoke check (workflow
+      added in 1a; proves itself on next push to main).
 - [ ] Select first cloud provider (Hetzner / AWS / Azure / … — TBD).
 - [ ] Terraform-managed deployment: VMs, resource allocation, networking.
 

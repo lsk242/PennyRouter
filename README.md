@@ -13,8 +13,9 @@ local lookup) but the continuously re-ranked provider index behind it, which
 tracks real price, latency, throughput, and availability fluctuations that
 static sort orders miss.
 
-Status: docs and repo skeleton only — no gateway code yet. See
-[TODO.md](TODO.md) for the iteration plan.
+Status: minimal gateway (`GET /health`) + Docker setup in place;
+OpenRouter passthrough not built yet. See [TODO.md](TODO.md) for the
+iteration plan and [Operations](docs/operations.md) to run it.
 
 ## Constraints
 
