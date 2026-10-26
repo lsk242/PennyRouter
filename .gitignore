@@ -22,6 +22,10 @@ rustc-ice-*.txt
 # ...except the checked-in settings template.
 !.env.example
 
+# Load-test evidence (keep the harness, not raw outputs)
+tests/load/results/*
+!tests/load/results/.gitkeep
+
 # RustRover
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
 #  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore

@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "workload": "health_sessions",
+  "base_path": "/health",
+  "expected_body": "{\"status\":\"ok\"}",
+  "think_min_seconds": 0.1,
+  "think_max_seconds": 0.5,
+  "timeout_seconds": 10,
+  "max_error_rate": 0.01,
+  "p99_budget_ms": null,
+  "stages": [
+    {
+      "name": "warmup",
+      "sessions": 10,
+      "duration_seconds": 10
+    },
+    {
+      "name": "s50",
+      "sessions": 50,
+      "duration_seconds": 30
+    },
+    {
+      "name": "s200",
+      "sessions": 200,
+      "duration_seconds": 60
+    }
+  ]
+}

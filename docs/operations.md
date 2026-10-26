@@ -36,7 +36,9 @@ Docker-based local dev (see `docker/`):
 
 - One command to build and run the gateway locally.
 - A resource-capped profile matching the ~1 CPU / 1 GB target for perf
-  runs (Iter 3).
+  runs (`compose.perf.yaml`, full harness in Iter 3).
+- A health-only load scaffold (`tests/load/run.sh`) for session, latency,
+  and resource smoke runs before chat workloads exist.
 - No secrets in the repo: backend keys travel with requests, not config.
 
 ## Configuration

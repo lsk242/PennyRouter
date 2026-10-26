@@ -1,0 +1,13 @@
+# Resource-capped perf profile (Compose override). Use with dev or prod:
+#   docker compose -f compose.yaml -f compose.perf.yaml up --build -d
+#   docker compose -f compose.prod.yaml -f compose.perf.yaml up -d
+# Constrains only the gateway (~1 CPU / 1 GB target). The load generator
+# must run separately and unconstrained so it never becomes the bottleneck.
+# NOTE: `cpus`/`mem_limit` apply to `docker compose up`; the `deploy:`
+# section only applies to Swarm/stack deploys, so it is not used here.
+services:
+  gateway:
+    cpus: 1.0
+    mem_limit: 1g
+    mem_reservation: 512m
+    pids_limit: 256
