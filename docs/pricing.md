@@ -26,4 +26,6 @@ one explicitly later.
 
 Routing must respect model/provider type constraints (modality, context
 limits, ZDR) before comparing price — cheapest among eligible providers,
-never cheapest overall.
+never cheapest overall. Precision counts as a type constraint too: compare
+prices within a precision class, since lower precision can mean lower
+quality at a lower price.

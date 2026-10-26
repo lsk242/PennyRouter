@@ -40,5 +40,7 @@ session.
 - One local lookup per request; no network calls on the routing path.
 - Sticky provider per session (cache preservation beats marginal
   per-request savings).
+- Precision-aware: same model id at different FP resolutions are distinct
+  candidates; never substitute across precision silently.
 - Never fail a request because of routing: on any lookup problem, fall back
   to the default provider.

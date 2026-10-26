@@ -1,5 +1,8 @@
 # PennyRouter
 
+[![Security](https://github.com/lsk242/PennyRouter/actions/workflows/security.yml/badge.svg)](https://github.com/lsk242/PennyRouter/actions/workflows/security.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 > Every token at its best price.
 
 PennyRouter is a blazing-fast, resource-frugal AI gateway. It speaks the
@@ -35,6 +38,7 @@ All documentation lives in [`docs/`](docs/README.md) (Markdown only):
 - [Pricing](docs/pricing.md) — token price model without a classifier.
 - [Performance](docs/performance.md) — budgets and benchmarking.
 - [Operations](docs/operations.md) — Docker dev, config, observability.
+- [Platform](docs/platform.md) — deployment track and delivery pipelines.
 - [Future](docs/future.md) — explicitly deferred ideas.
 
 ## License

@@ -10,14 +10,26 @@ itself. No iteration may depend on a later one.
 - Test: tree + link audit — expected files exist, all doc links resolve,
   no source/toolchain files added.
 
+## Iter 0.1 — Safety + platform foundations (this turn)
+
+- Goal: secret scanning, Dependabot, agent conventions, README badges,
+  platform track plan, precision-aware comparison notes — still no code.
+- Value: the repo is safe to collaborate in (no leaked keys) and the
+  deployment track is defined before the first image exists.
+- Test: workflow configs present and valid YAML; all doc links resolve;
+  no source/toolchain files added.
+
 ## Iter 1 — Minimal non-streaming passthrough
 
 - Goal: `POST /v1/chat/completions` reaches OpenRouter and returns
-  correctly, using the caller-supplied key.
+  correctly, using the caller-supplied key. Also exposes unauthenticated
+  `GET /health` so the minimal Docker image has a container check.
 - Value: a working gateway baseline everything else builds on; the
-  performance-optimization starting point.
+  performance-optimization starting point; unblocks the Docker build
+  pipeline.
 - Test: integration test against a mock backend plus a recorded fixture;
-  response body byte-correct; must not import routing or DB code.
+  response body byte-correct; `/health` returns 200 from the built image;
+  must not import routing or DB code.
 
 ## Iter 2 — Streaming + guards
 
@@ -39,7 +51,7 @@ itself. No iteration may depend on a later one.
 ## Iter 4 — Catalog DB + sync
 
 - Goal: local DB of models/providers, periodically synced from OpenRouter
-  (price, latency, throughput, uptime, ZDR, region, promos).
+  (price, latency, throughput, uptime, ZDR, region, precision, promos).
 - Value: the data foundation routing and ranking need; useful for
   inspection even before routing exists.
 - Test: fixture sync populates the DB; queries return expected rows.
@@ -70,6 +82,19 @@ itself. No iteration may depend on a later one.
   cache-token asymmetry.
 - Test: pricing fixtures (promo active/expired, cache-heavy/mixed) select
   the expected provider.
+
+## Platform track (parallel to development)
+
+Runs alongside the iterations above; see [platform.md](platform.md).
+Development delivers Docker images, platform delivers deployments.
+
+- **Now:** Docker local dev + minimal image (unblocked by Iter 1's
+  `/health`). CI runs secret scanning + Dependabot.
+- **Gated on Iter 1:** Docker build + push pipeline with `/health`
+  smoke check.
+- **Later:** first cloud provider (TBD — Hetzner / AWS / Azure / …),
+  Terraform-managed (VMs, resource allocation, networking); then more
+  providers. Terraform automation gated on provider selection.
 
 ## After Iter 7
 

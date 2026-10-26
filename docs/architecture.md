@@ -52,16 +52,27 @@ usage trends (per app/key) ──► ranker input
   savings.
 - **Caller-supplied keys.** No local secrets to manage; the gateway forwards
   the key from the incoming request.
+- **Same id is not the same offering.** Providers serve one model id at
+  different FP resolutions/quantizations, so comparison happens within a
+  precision class — see [ranking-index.md](ranking-index.md).
 - **Dynamic index schema.** Provider fields (price parts, latency,
-  throughput, uptime, ZDR, region, promos, index score) change often; the
-  catalog must absorb new fields without a redesign.
+  throughput, uptime, ZDR, region, precision, promos, index score) change
+  often; the catalog must absorb new fields without a redesign.
+
+## Platform track
+
+Deployment evolves in parallel to development (see
+[platform.md](platform.md)): Docker images from development, deployments
+from platform. Docker first; cloud providers later, all Terraform-managed.
+The gateway stays provider-agnostic — no cloud SDKs on the request path.
 
 ## Repo layout (target)
 
 ```text
 PennyRouter/
-  README.md  TODO.md  LICENSE
-  Cargo.toml              # workspace (Iter 0/1)
+  README.md  TODO.md  LICENSE  AGENTS.md
+  Cargo.toml              # workspace (Iter 1)
+  .github/                # CI workflows, Dependabot
   crates/
     gateway/              # HTTP server, OpenAI compat
     router/               # routing decisions
@@ -73,4 +84,4 @@ PennyRouter/
   docker/                 # Dockerfile, compose for local dev
 ```
 
-Toolchain and crate choices are deferred to Iter 0/1, not locked here.
+Toolchain and crate choices are deferred to Iter 1, not locked here.

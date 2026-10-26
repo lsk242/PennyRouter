@@ -29,6 +29,12 @@ default route — never an error.
   appropriate HTTP status; the gateway never leaks backend internals beyond
   what the backend itself returns.
 
+## Health check
+
+`GET /health` — no auth, minimal `200 OK` body. Exists for container
+orchestration and the Docker build pipeline's smoke check (see
+[platform.md](platform.md)). It is outside the OpenAI-compatible surface.
+
 ## Compatibility rule
 
 Realtime behavior stays a strict superset of what a direct OpenRouter call

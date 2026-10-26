@@ -11,6 +11,8 @@ Gather everything available, OpenRouter first, other sources later:
 - Price parts (input, output, cache read/write), promos and free windows.
 - Latency, throughput, uptime/availability.
 - Privacy flags (zero data retention), region, model/provider type.
+- Numeric precision / FP resolution (FP8/FP16/BF16/FP32, quantization):
+  the same model id at different precision is not the same offering.
 - Index/score signals where provided.
 
 The field list is dynamic and fluid — sources change constantly, and the
@@ -31,6 +33,14 @@ A periodic background job (AI-assisted) rebuilds the ranking per model:
 Keep per-app (per key) usage trends: which models/providers an application
 actually uses and how they behaved. Trend data feeds the ranker and
 improves defaults for callers that pass no filters.
+
+## Comparability
+
+Same model id does not mean comparable: precision, quantization, and
+provider-specific tuning change quality and effective price. The index
+compares within a precision class and never silently substitutes across
+precision — a cheaper FP8 offer is not automatically "the same model
+cheaper".
 
 ## Realtime guarantee
 
