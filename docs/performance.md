@@ -19,9 +19,18 @@ The product is built from scratch in Rust to be fast on tiny resources.
   before merging.
 - Realtime path stays allocation-lean: parse, one index lookup, forward,
   stream. All heavy work (sync, ranking) is periodic and off-path.
+- Guards account incrementally for very large or streamed payloads; they
+  reject oversize work before contacting the backend.
+- Benchmarks retain fixtures, raw outputs, and binary/config hashes; result
+  files refuse to overwrite existing evidence.
 
 ## Rules
 
 - No network calls on the request path except the single backend forward.
 - No per-request work that can be precomputed into the index.
 - Stream responses; never buffer a full completion to make a decision.
+- Preserve SSE bytes and ordering through the gateway.
+- Bound queue depth and concurrent upstream requests; shed load explicitly.
+- No per-request catalog DB reads; realtime routing uses the in-memory
+  snapshot.
+- Timeouts distinguish connect, first-byte, idle, and total time.

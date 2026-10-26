@@ -27,6 +27,8 @@ A periodic background job (AI-assisted) rebuilds the ranking per model:
 - Treat free/promo pricing as time-boxed facts with expiry, including
   partial discounts; provider-scoped, never assumed global.
 - Emit a stable ordering the realtime path reads with one lookup.
+- Publish an immutable, versioned snapshot atomically, only after the
+  durable catalog writes commit.
 
 ## Trends
 

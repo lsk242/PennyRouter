@@ -48,7 +48,10 @@ backend keys travel with requests, never in config or fixtures.
 
 ## Observability
 
-From Iter 3: structured logs, a latency histogram, and basic counters
-(requests, errors, per-provider selections). Enough to prove the perf
-baseline and to debug routing decisions later (which provider, which
-index version — never request bodies).
+From Iter 3: structured logs with request ID, provider, model, snapshot
+version, latency, and outcome; a latency histogram; and counters for
+requests, upstream errors, guard rejections, fallbacks, and per-provider
+selections. Enough to prove the perf baseline and to debug routing
+decisions later. Never log bodies, prompts, completions, or Authorization
+headers. Later, readiness/snapshot health may complement `/health` without
+changing its liveness contract.
