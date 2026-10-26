@@ -1,0 +1,78 @@
+# Roadmap
+
+Each iteration ships one small layer: testable by itself, valuable by
+itself. No iteration may depend on a later one.
+
+## Iter 0 — Repo skeleton + docs (done)
+
+- Goal: reviewable structure, vision, and plan before any code.
+- Value: the team aligns on direction and iteration slices up front.
+- Test: tree + link audit — expected files exist, all doc links resolve,
+  no source/toolchain files added.
+
+## Iter 1 — Minimal non-streaming passthrough
+
+- Goal: `POST /v1/chat/completions` reaches OpenRouter and returns
+  correctly, using the caller-supplied key.
+- Value: a working gateway baseline everything else builds on; the
+  performance-optimization starting point.
+- Test: integration test against a mock backend plus a recorded fixture;
+  response body byte-correct; must not import routing or DB code.
+
+## Iter 2 — Streaming + guards
+
+- Goal: SSE streaming passthrough, timeouts, upstream error mapping,
+  1M-token guard.
+- Value: real clients (which stream) work; oversized requests fail fast
+  without touching the backend.
+- Test: chunked fixture streams through intact; oversize request rejected
+  pre-backend; backend errors map to sane OpenAI-shaped errors.
+
+## Iter 3 — Observability + perf baseline
+
+- Goal: latency histogram, basic metrics/logs, load harness, 1 CPU / 1 GB
+  Docker profile.
+- Value: every later change can prove it did not regress latency or
+  resource use.
+- Test: load run reporting gateway overhead vs. direct-to-backend.
+
+## Iter 4 — Catalog DB + sync
+
+- Goal: local DB of models/providers, periodically synced from OpenRouter
+  (price, latency, throughput, uptime, ZDR, region, promos).
+- Value: the data foundation routing and ranking need; useful for
+  inspection even before routing exists.
+- Test: fixture sync populates the DB; queries return expected rows.
+
+## Iter 5 — Provider routing
+
+- Goal: model-name suffix filters plus a good default; one fast local
+  lookup; sticky provider per session. See [routing.md](routing.md).
+- Value: callers get cheaper/faster/more-private providers with zero
+  client changes; the default needs no tags.
+- Test: routing unit tests over fixture data; passthrough test with a
+  forced provider; stickiness test keeps the same provider mid-session.
+
+## Iter 6 — Ranking index
+
+- Goal: periodic AI-assisted rebuild of provider ranking, blended with
+  per-app usage trends. See [ranking-index.md](ranking-index.md).
+- Value: routes track realtime fluctuations instead of static sorts;
+  trends beat raw metrics where metrics lag.
+- Test: rebuild from fixtures yields the expected stable ordering;
+  realtime path remains a single lookup (routing tests still pass).
+
+## Iter 7 — Price model v1
+
+- Goal: input/output/cache price abstraction, free/promo windows, generic
+  `openrouter/free` handling — no classifier. See [pricing.md](pricing.md).
+- Value: cheapest-provider selection that survives promo expiry and
+  cache-token asymmetry.
+- Test: pricing fixtures (promo active/expired, cache-heavy/mixed) select
+  the expected provider.
+
+## After Iter 7
+
+Deferred ideas in [future.md](future.md): more backends, parallel fan-out,
+judge models, classifier routing. Each becomes roadmap items only when
+pulled forward deliberately.
