@@ -1,6 +1,9 @@
 # PennyRouter
 
 [![Security](https://github.com/lsk242/PennyRouter/actions/workflows/security.yml/badge.svg)](https://github.com/lsk242/PennyRouter/actions/workflows/security.yml)
+[![Docker](https://github.com/lsk242/PennyRouter/actions/workflows/docker.yml/badge.svg)](https://github.com/lsk242/PennyRouter/actions/workflows/docker.yml)
+[![API: OpenAI compatible](https://img.shields.io/badge/API-OpenAI%20compatible-blue.svg)](docs/api.md)
+[![Rust](https://img.shields.io/badge/built_with-Rust-orange.svg)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 > Every token at its best price.
