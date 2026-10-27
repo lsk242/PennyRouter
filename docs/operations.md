@@ -19,12 +19,23 @@ docker compose up --build               # local dev: builds from source
 ```
 
 Server deployment pulls the CI-built image from GitHub Packages and
-never builds — copy one file plus `.env` to the server:
+never builds — one command copies the pull-only compose file plus a
+generated `.env` to the server, pulls, restarts, and health-checks:
 
 ```sh
-docker compose -f compose.prod.yaml pull
-docker compose -f compose.prod.yaml up -d
+DEPLOY_HOST=user@example.com make deploy   # or ./scripts/deploy.sh
 ```
+
+Deploy settings are env vars (see the header of
+[`scripts/deploy.sh`](../scripts/deploy.sh)): `DEPLOY_HOST` (required),
+`DEPLOY_DIR` (default `pennyrouter`), `HOST_PORT` (default `8003`,
+published on the server), `PORT` (default `3000`, in-container),
+`IMAGE` (default the CI-built `ghcr.io` image), and
+`OPENROUTER_BASE_URL`. `DRY_RUN=1` prints what would run without
+touching the server. Gateway only: `catalog-sync` is a separate
+process on its own host and shares only the versioned DB artifact
+(see [architecture.md](architecture.md)), so it is not part of this
+deploy.
 
 CI builds `ghcr.io/lsk242/pennyrouter:latest` and smoke-tests `/health`
 on every PR, and pushes it on merges to main. It also rejects any
@@ -39,6 +50,10 @@ Docker-based local dev (see `docker/`):
   runs (`compose.perf.yaml`, full harness in Iter 3).
 - A health-only load scaffold (`tests/load/run.sh`) for session, latency,
   and resource smoke runs before chat workloads exist.
+- An overhead comparison harness (`tests/load/compare.sh`): same chat
+  workload against a mock backend directly and through the capped
+  gateway, producing a markdown/JSON report. Re-run it to prove later
+  iterations did not regress the baseline.
 - An opt-in live integration check (`tests/integration/<lang>/`) that
   calls OpenRouter directly and through the gateway, then compares. It
   needs `OPENROUTER_API_KEY` in `.env` (gitignored, never committed) and
@@ -54,12 +69,24 @@ tag for the local build; prod: image to pull), `OPENROUTER_BASE_URL`
 No local key store:
 backend keys travel with requests, never in config or fixtures.
 
+## Guards and timeouts
+
+From Iter 2: request bodies estimating over 1M tokens (~4 MiB at 4
+bytes/token) are rejected with 413 before contacting the backend.
+Upstream budgets are connect 10s, first response 30s, stream idle 60s
+per chunk, and 300s total for buffered responses; timeouts answer 504.
+Upstream JSON errors pass through; anything else is wrapped in an
+OpenAI-shaped error keeping the upstream status. A stalled stream ends
+the client stream — the 200 was already sent, so there is nothing left
+to map it to.
+
 ## Observability
 
-From Iter 3: structured logs with request ID, provider, model, snapshot
-version, latency, and outcome; a latency histogram; and counters for
-requests, upstream errors, guard rejections, fallbacks, and per-provider
-selections. Enough to prove the perf baseline and to debug routing
-decisions later. Never log bodies, prompts, completions, or Authorization
-headers. Later, readiness/snapshot health may complement `/health` without
-changing its liveness contract.
+From Iter 3: every request logs one JSON line to stdout with request ID
+(incoming `x-request-id` or generated, also echoed back), method, route,
+status, latency, and outcome. `GET /metrics` serves Prometheus counters
+(requests by route/status, upstream errors by kind, guard rejections,
+in-flight gauge) plus a latency histogram. Provider, model, and snapshot
+fields join the log line once routing lands. Never log bodies, prompts,
+completions, or Authorization headers. Later, readiness/snapshot health
+may complement `/health` without changing its liveness contract.
