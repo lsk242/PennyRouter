@@ -23,9 +23,9 @@ The product is built from scratch in Rust to be fast on tiny resources.
   reject oversize work before contacting the backend.
 - Benchmarks retain fixtures, raw outputs, and binary/config hashes; result
   files refuse to overwrite existing evidence.
-- A health-only precursor scaffold already exists (`compose.perf.yaml`,
-  `tests/load/`); full chat/streaming workloads and the baseline report
-  land in Iter 3.
+- Chat/streaming workloads and the overhead report landed in Iter 3
+  (`tests/load/compare.sh` + mock backend); the health-only scaffold
+  (`tests/load/run.sh`) remains for session/latency smoke runs.
 
 ## Rules
 

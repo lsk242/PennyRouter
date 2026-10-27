@@ -1,14 +1,17 @@
-# Server deployment: pull-only, never builds. Copy this single file plus
-# your `.env` to the server, then:
+# Server deployment: pull-only, never builds. Deployed by
+# scripts/deploy.sh (or `make deploy`), which copies this single file plus
+# a generated `.env` to the server, then pulls and restarts:
 #   docker compose -f compose.prod.yaml pull
 #   docker compose -f compose.prod.yaml up -d
 # The image comes from GitHub Packages (ghcr.io), pushed by CI on every
-# merge to main. No `build:` section on purpose.
+# merge to main. No `build:` section on purpose (CI-guarded).
+# Gateway only: catalog-sync deploys separately (see docs/architecture.md).
 services:
   gateway:
     image: ${IMAGE:-ghcr.io/lsk242/pennyrouter:latest}
     ports:
-      - "${HOST_PORT:-3000}:${PORT:-3000}"
+      - "${HOST_PORT:-8003}:${PORT:-3000}"
     environment:
       PORT: ${PORT:-3000}
+      OPENROUTER_BASE_URL: ${OPENROUTER_BASE_URL:-https://openrouter.ai}
     restart: unless-stopped

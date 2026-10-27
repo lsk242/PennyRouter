@@ -42,7 +42,7 @@ itself. No iteration may depend on a later one.
   `/health` smoke all passed. Upstream configurable via
   `OPENROUTER_BASE_URL` (default `https://openrouter.ai`).
 
-## Iter 2 — Streaming + guards
+## Iter 2 — Streaming + guards (done)
 
 - Goal: SSE streaming passthrough, timeouts, upstream error mapping,
   1M-token guard.
@@ -50,14 +50,28 @@ itself. No iteration may depend on a later one.
   without touching the backend.
 - Test: chunked fixture streams through intact; oversize request rejected
   pre-backend; backend errors map to sane OpenAI-shaped errors.
+- Landed: `cargo test` (9 passed: health, passthrough, streaming,
+  guards), real-binary smoke (incremental SSE, 413, error wrap), and
+  Docker build + `/health` smoke all passed. Streams key off the
+  upstream content type; budgets are connect 10s / first response 30s /
+  stream idle 60s / buffered total 300s; the token guard estimates
+  bytes/4 and rejects over 1M (~4 MiB) with 413 before contacting the
+  backend.
 
-## Iter 3 — Observability + perf baseline
+## Iter 3 — Observability + perf baseline (done)
 
 - Goal: latency histogram, basic metrics/logs, load harness, 1 CPU / 1 GB
   Docker profile.
 - Value: every later change can prove it did not regress latency or
   resource use.
 - Test: load run reporting gateway overhead vs. direct-to-backend.
+- Landed: `GET /metrics` (Prometheus counters + latency histogram),
+  one JSON log line per request with request ID, and `tests/load/`
+  compare harness (mock backend + chat workload + report). Baseline at
+  20 sessions x 15s against a 20ms mock, gateway under 1 CPU / 1 GB:
+  json p50 overhead +0.26ms / p99 +0.40ms, sse p50 +0.16ms / p99
+  −0.10ms (noise), zero errors over ~3.8k requests per side.
+  `cargo test` (12 passed), fmt, Docker build + smoke all passed.
 
 ## Iter 4 — Catalog sync track
 
@@ -104,7 +118,9 @@ Development delivers Docker images, platform delivers deployments.
 - **Now:** Docker local dev + minimal image (Dockerfile + compose added
   in 1a; verified with a local build + `/health` smoke test), plus a
   dev/prod compose split with `.env` settings (prod pulls the GHCR
-  image, never builds). CI runs secret scanning + Dependabot.
+  image, never builds) and an `scp` server deploy (`scripts/deploy.sh`
+  + `make deploy`, gateway only on host port 8003). CI runs secret
+  scanning + Dependabot.
 - **Docker build + push pipeline:** workflow added in 1a; first executes
   on next push to main.
 - **Later:** first cloud provider (TBD — Hetzner / AWS / Azure / …),
