@@ -1,7 +1,8 @@
-//! Schema v2: fixed core columns + raw JSON payloads + indexed columns.
+//! Schema v3: fixed core columns + raw JSON payloads + indexed columns
+//! (deterministic from Phase 2a, model-judged from Phase 2b).
 
 /// Current schema version, recorded in `sync_meta` on init.
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 
 pub const DDL: &str = "
 CREATE TABLE IF NOT EXISTS models (
@@ -24,6 +25,9 @@ CREATE TABLE IF NOT EXISTS endpoints (
     precision_class   TEXT,
     promo_discount    REAL,
     processed_at      TEXT,
+    quality_tier      TEXT,
+    quality_score     REAL,
+    judged_at         TEXT,
     FOREIGN KEY (model_id) REFERENCES models(model_id)
 );
 CREATE INDEX IF NOT EXISTS idx_endpoints_model ON endpoints(model_id);
@@ -34,6 +38,8 @@ CREATE TABLE IF NOT EXISTS sync_meta (
 ";
 
 /// Indexed columns added after v1: (name, type) pairs for migration.
+/// Migration checks each column's presence, so one list covers v1 and
+/// v2 databases alike.
 pub const ENDPOINT_INDEXED_COLUMNS: &[(&str, &str)] = &[
     ("price_prompt", "REAL"),
     ("price_completion", "REAL"),
@@ -42,6 +48,9 @@ pub const ENDPOINT_INDEXED_COLUMNS: &[(&str, &str)] = &[
     ("precision_class", "TEXT"),
     ("promo_discount", "REAL"),
     ("processed_at", "TEXT"),
+    ("quality_tier", "TEXT"),
+    ("quality_score", "REAL"),
+    ("judged_at", "TEXT"),
 ];
 
 /// Phase 1 layout, kept so the migration test can build a legacy DB.

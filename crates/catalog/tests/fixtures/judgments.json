@@ -1,0 +1,10 @@
+{"judgments": [
+  {"model_id": "openai/gpt-6.1-terra-pro", "provider_name": "OpenAI",
+   "tag": "openai/flex", "quality_tier": "standard", "quality_score": 0.72},
+  {"model_id": "openai/gpt-6.1-terra-pro", "provider_name": "OpenAI",
+   "tag": "openai", "quality_tier": "high", "quality_score": 0.93},
+  {"model_id": "openai/gpt-6.1-terra-pro", "provider_name": "OpenAI",
+   "tag": "openai/fast", "quality_tier": "low", "quality_score": 0.41},
+  {"model_id": "nope/unknown-model", "provider_name": "Nobody",
+   "quality_tier": "high", "quality_score": 1.0}
+]}

@@ -28,10 +28,10 @@ adds value on its own. Detail and acceptance criteria live in
       compare run reported gateway overhead vs. direct-to-mock under load
       (json +0.26ms p50 / +0.40ms p99, sse +0.16ms / −0.10ms, 0 errors);
       `cargo test`, fmt, and Docker build + smoke all passed locally.
-- [ ] **Iter 4 — Catalog sync track.** Separate `catalog-sync` process
+- [x] **Iter 4 — Catalog sync track.** Separate `catalog-sync` process
       delivers a versioned catalog DB artifact (breakdown in
-      [docs/catalog-sync-todo.md](docs/catalog-sync-todo.md)). Test:
-      fixture-produced artifact validates and loads.
+      [docs/catalog-sync-todo.md](docs/catalog-sync-todo.md), all phases
+      done). Test: fixture-produced artifact validates and loads.
 - [ ] **Iter 5 — Provider routing.** Model-name suffix filters (e.g.
       `meta/muse-spark-open/...` tags) plus a good default; one fast local
       lookup; sticky provider per session to preserve cache. Test: routing
@@ -56,8 +56,8 @@ adds value on its own. Detail and acceptance criteria live in
       `ghcr.io` image, restarts, health-checks; gateway only on
       host port 8003. `Makefile` covers current common tasks
       (test/run/dev/build/smoke/load/prod-config).
-- [ ] Docker build + push pipeline with `/health` smoke check (workflow
-      added in 1a; proves itself on next push to main).
+- [x] Docker build + push pipeline with `/health` smoke check (proven
+      green on main across the v0.1.0–v0.6.0 merges, image pushed).
 - [ ] Select first cloud provider (Hetzner / AWS / Azure / … — TBD).
 - [ ] Terraform-managed deployment: VMs, resource allocation, networking.
 

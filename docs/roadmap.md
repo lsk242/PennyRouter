@@ -73,7 +73,7 @@ itself. No iteration may depend on a later one.
   −0.10ms (noise), zero errors over ~3.8k requests per side.
   `cargo test` (12 passed), fmt, Docker build + smoke all passed.
 
-## Iter 4 — Catalog sync track
+## Iter 4 — Catalog sync track (done)
 
 - Goal: a separate `catalog-sync` process (own binary, schedule, host)
   delivers a versioned catalog DB artifact to gateway hosts. Breakdown:
@@ -82,6 +82,9 @@ itself. No iteration may depend on a later one.
   serving evolve independently — they share only the DB artifact.
 - Test: fixture-produced artifact validates and loads; detail in the
   catalog-sync roadmap.
+- Landed: all catalog phases done (gathering, deterministic + AI-assisted
+  processing, containerized deployment with CI gates); versioned artifact
+  publishes, verifies, and loads from fixtures.
 
 ## Iter 5 — Provider routing
 
@@ -121,8 +124,9 @@ Development delivers Docker images, platform delivers deployments.
   image, never builds) and an `scp` server deploy (`scripts/deploy.sh`
   + `make deploy`, gateway only on host port 8003). CI runs secret
   scanning + Dependabot.
-- **Docker build + push pipeline:** workflow added in 1a; first executes
-  on next push to main.
+- **Docker build + push pipeline:** workflow added in 1a; proven green
+  on main (build + push + `/health` smoke) across the v0.1.0–v0.6.0
+  merges.
 - **Later:** first cloud provider (TBD — Hetzner / AWS / Azure / …),
   Terraform-managed (VMs, resource allocation, networking); then more
   providers. Terraform automation gated on provider selection.

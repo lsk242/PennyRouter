@@ -26,6 +26,9 @@ pub struct EndpointRow {
     pub precision_class: Option<String>,
     pub promo_discount: Option<f64>,
     pub processed_at: Option<String>,
+    pub quality_tier: Option<String>,
+    pub quality_score: Option<f64>,
+    pub judged_at: Option<String>,
 }
 
 /// Indexed values distilled from an endpoint payload by processing.
@@ -39,9 +42,17 @@ pub struct EndpointIndex {
     pub processed_at: String,
 }
 
+/// Model-judged signals distilled by judging (Phase 2b).
+pub struct EndpointJudgment {
+    pub quality_tier: Option<String>,
+    pub quality_score: Option<f64>,
+    pub judged_at: String,
+}
+
 const ENDPOINT_COLS: &str = "id, model_id, provider_name, payload, fetched_at,
     price_prompt, price_completion, price_cache_read, price_cache_write,
-    precision_class, promo_discount, processed_at";
+    precision_class, promo_discount, processed_at,
+    quality_tier, quality_score, judged_at";
 
 fn endpoint_row(r: &Row) -> Result<EndpointRow, rusqlite::Error> {
     Ok(EndpointRow {
@@ -57,6 +68,9 @@ fn endpoint_row(r: &Row) -> Result<EndpointRow, rusqlite::Error> {
         precision_class: r.get(9)?,
         promo_discount: r.get(10)?,
         processed_at: r.get(11)?,
+        quality_tier: r.get(12)?,
+        quality_score: r.get(13)?,
+        judged_at: r.get(14)?,
     })
 }
 
@@ -174,6 +188,26 @@ impl Catalog {
         Ok(())
     }
 
+    /// Fill the judgment columns of one endpoint, leaving the payload
+    /// and the deterministic indexed columns alone.
+    pub fn update_endpoint_judgment(
+        &self,
+        id: i64,
+        judgment: &EndpointJudgment,
+    ) -> Result<(), Error> {
+        self.conn.execute(
+            "UPDATE endpoints SET quality_tier = ?1, quality_score = ?2,
+             judged_at = ?3 WHERE id = ?4",
+            params![
+                judgment.quality_tier,
+                judgment.quality_score,
+                judgment.judged_at,
+                id
+            ],
+        )?;
+        Ok(())
+    }
+
     pub fn get_model(&self, model_id: &str) -> Result<Option<ModelRow>, Error> {
         self.conn
             .query_row(
@@ -252,7 +286,7 @@ mod tests {
         catalog.init().unwrap();
         assert_eq!(
             catalog.get_meta("schema_version").unwrap().as_deref(),
-            Some("2")
+            Some("3")
         );
         assert_eq!(catalog.counts().unwrap(), (0, 0));
     }
