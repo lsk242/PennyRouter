@@ -4,7 +4,7 @@
 use axum::{body::Bytes, http::StatusCode, routing::post, Router};
 use pennyrouter_catalog::{
     publish_ranking, rank_catalog, Assist, Catalog, EndpointIndex, EndpointJudgment, EndpointRow,
-    ModelRow, Trends,
+    ModelRow, Promos, Trends,
 };
 use std::{
     net::SocketAddr,
@@ -62,7 +62,7 @@ fn insert_offering(catalog: &Catalog, model: &str, provider: &str, price: f64, t
             ep.id,
             &EndpointIndex {
                 price_prompt: Some(price),
-                price_completion: None,
+                price_completion: Some(price),
                 price_cache_read: None,
                 price_cache_write: None,
                 precision_class: None,
@@ -123,6 +123,8 @@ fn rank_dir(test: &str) -> (std::path::PathBuf, std::path::PathBuf) {
         &catalog,
         &Trends::empty(),
         &Assist::load(&assist_path).unwrap(),
+        &Promos::empty(),
+        "2026-01-01T00:00:00Z",
         "2026-01-01T00:00:00Z",
         None,
     )

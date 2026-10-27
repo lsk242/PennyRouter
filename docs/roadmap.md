@@ -116,7 +116,7 @@ itself. No iteration may depend on a later one.
   gateway serves it with one lookup, falls back to inline sort when
   uncovered, and keeps the last good artifact on rebuild failure.
 
-## Iter 7 — Price model v1
+## Iter 7 — Price model v1 (done)
 
 - Goal: input/output/cache price abstraction, free/promo windows, generic
   `openrouter/free` handling — no classifier. See [pricing.md](pricing.md).
@@ -124,6 +124,11 @@ itself. No iteration may depend on a later one.
   cache-token asymmetry.
 - Test: pricing fixtures (promo active/expired, cache-heavy/mixed) select
   the expected provider.
+- Landed: workload profiles (balanced/cache-heavy/output-heavy) with
+  effective-cost comparison everywhere; time-boxed provider-scoped promo
+  windows evaluated at rebuild (active leads, expired falls back);
+  `openrouter/free` meta-model routes to any free offering and re-routes
+  pins that stopped being free.
 
 ## Platform track (parallel to development)
 

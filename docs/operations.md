@@ -78,10 +78,13 @@ backend keys travel with requests, never in config or fixtures.
 From Iter 6: `catalog-rank` rebuilds the provider ranking offline from
 the catalog DB plus optional trends and recorded AI adjustments, and
 publishes a versioned `ranking-<version>.json` artifact beside the DB.
-The sync container runs it every cycle (`TRENDS`/`ASSIST` inputs
-default to the `/input` fixtures when present). The gateway picks the
-ranking up from its `CATALOG_DB` directory automatically and keeps
-serving the last good one when a rebuild fails or is missing.
+The sync container runs it every cycle (`TRENDS`/`ASSIST`/`PROMOS`
+inputs default to the `/input` fixtures when present). The gateway
+picks the ranking up from its `CATALOG_DB` directory automatically and
+keeps serving the last good one when a rebuild fails or is missing.
+From Iter 7, "cheapest" means effective cost under the balanced
+workload profile (see [pricing.md](pricing.md)), and `openrouter/free`
+routes to any free offering.
 
 ## Guards and timeouts
 

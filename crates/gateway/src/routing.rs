@@ -15,11 +15,17 @@
 //!   wins and every other tag is ignored.
 //! - The default compares within the model's most common precision class
 //!   (ties keep load order) and prefers the best quality tier, then the
-//!   cheapest prompt price. Precision is never substituted silently.
+//!   cheapest effective cost. Precision is never substituted silently.
+//! - "Cheapest" means effective cost under the balanced workload profile
+//!   (see the catalog price model): prompt/completion/cache parts blended,
+//!   catalog promo column applied. Unpriceable offerings sort last.
 //! - A session is (authorization, model). The first decision pins the
 //!   provider (and precision class); later requests in the session keep
 //!   that provider, with orientation tags refining only which of its
 //!   offerings serves. Anonymous requests route fresh every time.
+//! - The `openrouter/free` meta-model routes to any free offering across
+//!   models and rewrites to its backend id; a pin that stopped being free
+//!   re-routes instead of misrouting at full price.
 //! - Any lookup problem falls back to plain passthrough: routing never
 //!   fails a request.
 
@@ -34,9 +40,14 @@ use std::sync::{Mutex, RwLock};
 /// One provider offering of a model, projected from the catalog snapshot.
 #[derive(Debug, Clone)]
 pub struct Offering {
+    pub model_id: String,
     pub provider_name: String,
     pub tag: Option<String>,
     pub price_prompt: Option<f64>,
+    pub price_completion: Option<f64>,
+    pub price_cache_read: Option<f64>,
+    pub price_cache_write: Option<f64>,
+    pub promo_discount: Option<f64>,
     pub precision_class: Option<String>,
     pub quality_tier: Option<String>,
     pub quality_score: Option<f64>,
@@ -94,6 +105,10 @@ const MAX_SESSIONS: usize = 16_384;
 
 /// Header carrying the chosen provider on routed responses.
 pub const PROVIDER_HEADER: &str = "x-pennyrouter-provider";
+
+/// Meta-model: route to any free offering ("optimize for cost including
+/// free tiers"). Rewritten to the chosen offering's backend model id.
+pub const FREE_MODEL: &str = "openrouter/free";
 
 pub struct Router {
     source: PathBuf,
@@ -232,6 +247,14 @@ impl Router {
     /// `None` when the request should pass through untouched.
     pub fn decide(&self, model_field: &str, authorization: Option<&str>) -> Option<Decision> {
         let snapshot = self.snapshot.read().unwrap_or_else(|e| e.into_inner());
+        if model_field == FREE_MODEL || model_field.starts_with(&format!("{FREE_MODEL}/")) {
+            let tags = model_field[FREE_MODEL.len()..]
+                .split('/')
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            return self.decide_free(&snapshot, &tags, authorization);
+        }
         let (model_id, tags) = split_model(&snapshot, model_field)?;
         let offerings = snapshot.models.get(&model_id)?;
         if offerings.is_empty() {
@@ -314,6 +337,90 @@ impl Router {
             orientation,
             sticky: false,
         })
+    }
+
+    /// Route an `openrouter/free` request to any free offering across all
+    /// models. Sessions pin as usual, but a pin whose offering stopped
+    /// being free re-routes instead of misrouting at full price. The
+    /// decision carries the chosen offering's backend model id.
+    fn decide_free(
+        &self,
+        snapshot: &Snapshot,
+        tags: &[String],
+        authorization: Option<&str>,
+    ) -> Option<Decision> {
+        let free: Vec<&Offering> = snapshot
+            .models
+            .values()
+            .flatten()
+            .filter(|o| inline_cost(o) == Some(0.0))
+            .collect();
+        if free.is_empty() {
+            return None;
+        }
+        let orientation = orientation_from(tags);
+        let key = authorization.map(|auth| (auth.to_string(), FREE_MODEL.to_string()));
+        let ranking = self.ranking.read().unwrap_or_else(|e| e.into_inner());
+
+        if let Some(key) = &key {
+            if let Some(pin) = self
+                .sessions
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(key)
+            {
+                let mine: Vec<&Offering> = free
+                    .iter()
+                    .filter(|o| {
+                        o.provider_name == pin.provider && o.precision_class == pin.precision_class
+                    })
+                    .copied()
+                    .collect();
+                let order = ordered(
+                    ranking.as_ref(),
+                    FREE_MODEL,
+                    &pin.precision_class,
+                    orientation,
+                    &mine,
+                );
+                if let Some(pick) = order.into_iter().next() {
+                    if inline_cost(pick) == Some(0.0) {
+                        return Some(free_decision(pick, orientation, true));
+                    }
+                    // Pin stopped being free: fall through and re-route.
+                }
+            }
+        }
+
+        let owned: Vec<Offering> = free.into_iter().cloned().collect();
+        let class = majority_class(&owned)?;
+        let candidates: Vec<&Offering> = owned
+            .iter()
+            .filter(|o| o.precision_class == class)
+            .collect();
+        let order = ordered(
+            ranking.as_ref(),
+            FREE_MODEL,
+            &class,
+            orientation,
+            &candidates,
+        );
+        let pick = order.into_iter().next()?;
+        // Candidates were pre-filtered to free offerings, so the pick is
+        // free by construction.
+        if let Some(key) = key {
+            let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+            if sessions.len() < MAX_SESSIONS {
+                sessions.insert(
+                    key,
+                    Pin {
+                        provider: pick.provider_name.clone(),
+                        precision_class: pick.precision_class.clone(),
+                    },
+                );
+            }
+        }
+        Some(free_decision(pick, orientation, false))
     }
 
     /// Route a buffered chat-completions body: returns the rewritten body
@@ -399,13 +506,44 @@ fn offering_from(ep: &EndpointRow) -> Offering {
         .ok()
         .and_then(|v: serde_json::Value| endpoint_tag(&v).map(str::to_string));
     Offering {
+        model_id: ep.model_id.clone(),
         provider_name: ep.provider_name.clone(),
         tag,
         price_prompt: ep.price_prompt,
+        price_completion: ep.price_completion,
+        price_cache_read: ep.price_cache_read,
+        price_cache_write: ep.price_cache_write,
+        promo_discount: ep.promo_discount,
         precision_class: ep.precision_class.clone(),
         quality_tier: ep.quality_tier.clone(),
         quality_score: ep.quality_score,
     }
+}
+
+/// Free-model decision: the rewritten model is the chosen offering's
+/// backend id, not the meta-model.
+fn free_decision(pick: &Offering, orientation: Orientation, sticky: bool) -> Decision {
+    Decision {
+        model_id: pick.model_id.clone(),
+        provider: pick.provider_name.clone(),
+        tag: pick.tag.clone(),
+        precision_class: pick.precision_class.clone(),
+        orientation,
+        sticky,
+    }
+}
+
+/// Inline effective cost: balanced profile with the catalog discount
+/// column (no promo-window expiry — the ranked path is authoritative).
+fn inline_cost(offering: &Offering) -> Option<f64> {
+    pennyrouter_catalog::effective_cost(
+        offering.price_prompt,
+        offering.price_completion,
+        offering.price_cache_read,
+        offering.price_cache_write,
+        &pennyrouter_catalog::balanced_profile(),
+        offering.promo_discount.unwrap_or(0.0),
+    )
 }
 
 /// Split a raw `model` field into (model id, tags) by longest-prefix
@@ -519,7 +657,7 @@ fn inline_signals(offering: &Offering) -> pennyrouter_catalog::Signals<'_> {
     pennyrouter_catalog::Signals {
         provider: &offering.provider_name,
         tag: offering.tag.as_deref(),
-        price: offering.price_prompt,
+        cost: inline_cost(offering),
         tier: offering.quality_tier.as_deref(),
         score: offering.quality_score,
         error_rate: None,
@@ -532,13 +670,26 @@ mod tests {
     use super::*;
 
     fn offering(provider: &str, price: Option<f64>, tier: Option<&str>) -> Offering {
+        // Completion mirrors prompt so effective cost equals price.
         Offering {
+            model_id: "test/model".to_string(),
             provider_name: provider.to_string(),
             tag: None,
             price_prompt: price,
+            price_completion: price,
+            price_cache_read: None,
+            price_cache_write: None,
+            promo_discount: None,
             precision_class: Some("fp16".to_string()),
             quality_tier: tier.map(str::to_string),
             quality_score: None,
+        }
+    }
+
+    fn priced(model: &str, provider: &str, price: f64, tier: Option<&str>) -> Offering {
+        Offering {
+            model_id: model.to_string(),
+            ..offering(provider, Some(price), tier)
         }
     }
 
@@ -687,6 +838,78 @@ mod tests {
         });
         let d = r.decide("meta/muse-spark/price", None).unwrap();
         assert_eq!(d.provider, "Dear"); // ranked first, New appended
+    }
+
+    #[test]
+    fn free_model_routes_to_free_offerings_across_models() {
+        let router = Router {
+            source: PathBuf::from("test"),
+            snapshot: RwLock::new(Snapshot {
+                models: HashMap::from([
+                    (
+                        "m/one".to_string(),
+                        vec![priced("m/one", "Paid", 5.0, Some("high"))],
+                    ),
+                    (
+                        "m/two".to_string(),
+                        vec![
+                            priced("m/two", "Free", 0.0, Some("standard")),
+                            priced("m/two", "Paid", 1.0, Some("high")),
+                        ],
+                    ),
+                ]),
+                artifact_version: None,
+            }),
+            ranking: RwLock::new(None),
+            sessions: Mutex::new(HashMap::new()),
+        };
+        let d = router.decide("openrouter/free", None).unwrap();
+        assert_eq!(d.provider, "Free");
+        assert_eq!(d.model_id, "m/two"); // rewritten to the backend id
+        assert!(!d.sticky);
+        // Orientation tags still apply.
+        let d = router.decide("openrouter/free/quality", None).unwrap();
+        assert_eq!(d.provider, "Free");
+        assert_eq!(d.orientation, Orientation::Quality);
+    }
+
+    #[test]
+    fn free_model_passes_through_when_nothing_is_free() {
+        let r = router();
+        assert_eq!(r.decide("openrouter/free", None).map(|d| d.provider), None);
+    }
+
+    #[test]
+    fn free_pin_reroutes_when_freeness_lapses() {
+        let router = Router {
+            source: PathBuf::from("test"),
+            snapshot: RwLock::new(Snapshot {
+                models: HashMap::from([(
+                    "m/one".to_string(),
+                    vec![priced("m/one", "Flash", 0.0, Some("standard"))],
+                )]),
+                artifact_version: None,
+            }),
+            ranking: RwLock::new(None),
+            sessions: Mutex::new(HashMap::new()),
+        };
+        let auth = Some("Bearer key");
+        let d = router.decide("openrouter/free", auth).unwrap();
+        assert_eq!(d.provider, "Flash");
+        // Promo expired for Flash; Steadfast is free now.
+        router.swap_snapshot(Snapshot {
+            models: HashMap::from([(
+                "m/one".to_string(),
+                vec![
+                    priced("m/one", "Flash", 4.0, Some("standard")),
+                    priced("m/one", "Steadfast", 0.0, Some("standard")),
+                ],
+            )]),
+            artifact_version: None,
+        });
+        let d = router.decide("openrouter/free", auth).unwrap();
+        assert_eq!(d.provider, "Steadfast");
+        assert!(!d.sticky);
     }
 
     #[test]

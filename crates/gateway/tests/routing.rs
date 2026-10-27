@@ -87,7 +87,7 @@ fn build_db(path: &std::path::Path, alpha_price: f64, beta_price: f64) {
     }
     let index = |price: f64, precision: Option<&str>| EndpointIndex {
         price_prompt: Some(price),
-        price_completion: None,
+        price_completion: Some(price),
         price_cache_read: None,
         price_cache_write: None,
         precision_class: precision.map(str::to_string),
@@ -221,6 +221,111 @@ async fn unknown_model_passes_through_untouched() {
 
     let body =
         r#"{"model":"unknown/model","messages":[{"role":"user","content":"hi"}],"stream":false}"#;
+    let res = reqwest::Client::new()
+        .post(format!("http://{gw}/v1/chat/completions"))
+        .header("authorization", "Bearer K1")
+        .header("content-type", "application/json")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert!(res.headers().get("x-pennyrouter-provider").is_none());
+
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.bodies.len(), 1);
+    assert_eq!(seen.bodies[0], body.as_bytes());
+}
+
+fn build_free_db(path: &std::path::Path) {
+    let _ = std::fs::remove_file(path);
+    let catalog = Catalog::open(path).unwrap();
+    catalog.init().unwrap();
+    for (model, provider, price) in [("acme/paid", "Paid", 2.0), ("acme/freebie", "Zero", 0.0)] {
+        catalog
+            .insert_model(&ModelRow {
+                model_id: model.to_string(),
+                name: "g".to_string(),
+                source: "test".to_string(),
+                payload: "{}".to_string(),
+                fetched_at: "t".to_string(),
+            })
+            .unwrap();
+        catalog
+            .insert_endpoint(&EndpointRow {
+                id: 0,
+                model_id: model.to_string(),
+                provider_name: provider.to_string(),
+                payload: format!(r#"{{"tag": "{provider}"}}"#),
+                fetched_at: "t".to_string(),
+                price_prompt: None,
+                price_completion: None,
+                price_cache_read: None,
+                price_cache_write: None,
+                precision_class: None,
+                promo_discount: None,
+                processed_at: None,
+                quality_tier: None,
+                quality_score: None,
+                judged_at: None,
+            })
+            .unwrap();
+        let ep = catalog.endpoints_for(model).unwrap().pop().unwrap();
+        catalog
+            .update_endpoint_index(
+                ep.id,
+                &EndpointIndex {
+                    price_prompt: Some(price),
+                    price_completion: Some(price),
+                    price_cache_read: None,
+                    price_cache_write: None,
+                    precision_class: None,
+                    promo_discount: None,
+                    processed_at: "t".to_string(),
+                },
+            )
+            .unwrap();
+        catalog
+            .update_endpoint_judgment(
+                ep.id,
+                &EndpointJudgment {
+                    quality_tier: Some("standard".to_string()),
+                    quality_score: None,
+                    judged_at: "t".to_string(),
+                },
+            )
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn free_model_routes_to_free_offering_and_rewrites_model() {
+    let db = scratch_db("free");
+    build_free_db(&db);
+    let router = Arc::new(pennyrouter_gateway::routing::Router::load(&db).unwrap());
+    let seen = Arc::new(Mutex::new(Seen::default()));
+    let mock = spawn_mock(seen.clone()).await;
+    let gw = spawn_gateway(mock, router).await;
+
+    let res = post_chat(gw, "Bearer K1", "openrouter/free").await;
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.headers().get("x-pennyrouter-provider").unwrap(), "Zero");
+
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.bodies.len(), 1);
+    let (model, provider) = upstream_model(&seen.bodies[0]);
+    assert_eq!(model, "acme/freebie"); // meta-model rewritten to backend id
+    assert_eq!(provider["order"], serde_json::json!(["Zero"]));
+}
+
+#[tokio::test]
+async fn free_model_passes_through_when_nothing_is_free() {
+    let seen = Arc::new(Mutex::new(Seen::default()));
+    let mock = spawn_mock(seen.clone()).await;
+    let gw = spawn_gateway(mock, router_for("free-none", 1.0, 5.0)).await;
+
+    let body =
+        r#"{"model":"openrouter/free","messages":[{"role":"user","content":"hi"}],"stream":false}"#;
     let res = reqwest::Client::new()
         .post(format!("http://{gw}/v1/chat/completions"))
         .header("authorization", "Bearer K1")

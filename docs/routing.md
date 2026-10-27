@@ -68,3 +68,8 @@ session.
   or a manifest/DB file directly). Unset or unloadable means plain
   passthrough. The snapshot loads once at startup; `reload`/`swap`
   hooks exist for the ranking job (Iter 6).
+- Cost (Iter 7): "cheapest" compares effective cost under the balanced
+  workload profile (see [pricing.md](pricing.md)), promo column
+  applied; unpriceable offerings sort last. The `openrouter/free`
+  meta-model routes to any zero-cost offering and rewrites to its
+  backend id, re-routing pins that stopped being free.

@@ -42,10 +42,11 @@ adds value on its own. Detail and acceptance criteria live in
       expected stable ordering; realtime path still a single lookup
       (routing tests still pass); `cargo test`, clippy, fmt, Docker
       build + smoke all passed.
-- [ ] **Iter 7 — Price model v1.** Input/output/cache price abstraction,
+- [x] **Iter 7 — Price model v1.** Input/output/cache price abstraction,
       free/promo windows, generic `openrouter/free` handling — no classifier.
       Test: pricing fixtures (promo active/expired, cache-heavy/mixed) select
-      the expected provider.
+      the expected provider; `cargo test`, clippy, fmt, Docker build +
+      smoke all passed.
 
 ## Platform track (parallel — see [docs/platform.md](docs/platform.md))
 

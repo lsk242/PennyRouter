@@ -21,12 +21,14 @@ pub enum RankOrientation {
     Price,
 }
 
-/// Comparable signals for one offering. Trend fields are `None` when no
-/// usage data covers the (model, provider) pair.
+/// Comparable signals for one offering. `cost` is the effective cost
+/// under the balanced workload profile (None when unpriceable).
+/// Trend fields are `None` when no usage data covers the (model,
+/// provider) pair.
 pub struct Signals<'a> {
     pub provider: &'a str,
     pub tag: Option<&'a str>,
-    pub price: Option<f64>,
+    pub cost: Option<f64>,
     pub tier: Option<&'a str>,
     pub score: Option<f64>,
     pub error_rate: Option<f64>,
@@ -55,7 +57,7 @@ fn asc_nulls_last(a: Option<f64>, b: Option<f64>) -> std::cmp::Ordering {
 /// (no evidence of failures); unknown latencies sort after known ones.
 /// Provider and tag break all remaining ties, so rebuilds are stable.
 pub fn compare(a: &Signals, b: &Signals, orientation: RankOrientation) -> std::cmp::Ordering {
-    let price = || asc_nulls_last(a.price, b.price);
+    let price = || asc_nulls_last(a.cost, b.cost);
     let errors = || {
         asc_nulls_last(
             Some(a.error_rate.unwrap_or(0.0)),
@@ -297,12 +299,16 @@ pub struct RankingManifest {
     pub model_count: u64,
 }
 
-/// Rebuild the ranking from a catalog DB plus trends and AI adjustments.
-/// Deterministic: same inputs always produce the same document.
+/// Rebuild the ranking from a catalog DB plus trends, AI adjustments,
+/// and promo windows evaluated at `now` (RFC 3339). Costs use the
+/// balanced workload profile. Deterministic: same inputs always produce
+/// the same document.
 pub fn rank_catalog(
     catalog: &Catalog,
     trends: &Trends,
     assist: &Assist,
+    promos: &crate::price::Promos,
+    now: &str,
     created_at: &str,
     catalog_version: Option<String>,
 ) -> Result<RankingDocument, Error> {
@@ -344,8 +350,8 @@ pub fn rank_catalog(
                 let mut sorted = members.clone();
                 sorted.sort_by(|a, b| {
                     compare(
-                        &signals(&endpoints[*a], trends),
-                        &signals(&endpoints[*b], trends),
+                        &signals(&endpoints[*a], trends, promos, now),
+                        &signals(&endpoints[*b], trends, promos, now),
                         orientation,
                     )
                 });
@@ -373,12 +379,33 @@ pub fn rank_catalog(
     })
 }
 
-fn signals<'a>(ep: &'a crate::store::EndpointRow, trends: &'a Trends) -> Signals<'a> {
+fn signals<'a>(
+    ep: &'a crate::store::EndpointRow,
+    trends: &'a Trends,
+    promos: &crate::price::Promos,
+    now: &str,
+) -> Signals<'a> {
     let trend = trends.get(&ep.model_id, &ep.provider_name);
+    let tag = endpoint_tag_of(ep);
+    let discount = crate::price::resolve_discount(
+        promos,
+        &ep.model_id,
+        &ep.provider_name,
+        tag.as_deref(),
+        ep.promo_discount,
+        now,
+    );
     Signals {
         provider: &ep.provider_name,
         tag: None, // tag identity comes from the payload at entry build
-        price: ep.price_prompt,
+        cost: crate::price::effective_cost(
+            ep.price_prompt,
+            ep.price_completion,
+            ep.price_cache_read,
+            ep.price_cache_write,
+            &crate::price::balanced_profile(),
+            discount,
+        ),
         tier: ep.quality_tier.as_deref(),
         score: ep.quality_score,
         error_rate: trend.and_then(TrendStats::error_rate),
@@ -463,11 +490,11 @@ pub fn load_ranking_doc(path: &Path) -> Result<RankingDocument, Error> {
 mod tests {
     use super::*;
 
-    fn sig<'a>(provider: &'a str, price: Option<f64>, tier: Option<&'a str>) -> Signals<'a> {
+    fn sig<'a>(provider: &'a str, cost: Option<f64>, tier: Option<&'a str>) -> Signals<'a> {
         Signals {
             provider,
             tag: None,
-            price,
+            cost,
             tier,
             score: None,
             error_rate: None,

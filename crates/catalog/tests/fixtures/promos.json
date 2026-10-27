@@ -1,0 +1,8 @@
+{"promos": [
+  {"model_id": "tencent/hy-mt2-1.8b", "provider_name": "Tencent",
+   "discount": 0.5, "starts_at": "2020-01-01T00:00:00Z",
+   "ends_at": "2099-01-01T00:00:00Z"},
+  {"model_id": "openai/gpt-6.1-terra-pro", "provider_name": "OpenAI",
+   "discount": 0.9, "starts_at": "2025-01-01T00:00:00Z",
+   "ends_at": "2025-06-01T00:00:00Z"}
+]}
