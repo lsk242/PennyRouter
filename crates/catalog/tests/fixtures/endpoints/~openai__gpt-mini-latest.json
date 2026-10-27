@@ -1,0 +1,1 @@
+{"data":{"id":"~openai/gpt-mini-latest","name":"OpenAI: GPT Mini Latest","created":1777318471,"description":"This model always redirects to the latest model in the GPT Mini family.","architecture":{"tokenizer":"Router","instruct_type":null,"modality":"text+image+file->text","input_modalities":["file","image","text"],"output_modalities":["text"]},"endpoints":[]}}
