@@ -1,4 +1,5 @@
-//! Catalog DB: schema, store, sync, processing, and artifact publishing.
+//! Catalog DB: schema, store, sync, processing, judging, ranking, and
+//! artifact publishing.
 //!
 //! The catalog sync is a separate process from the gateway; this crate owns
 //! the DB format both sides share. See `docs/catalog-sync-architecture.md`.
@@ -6,6 +7,7 @@
 mod artifact;
 mod judge;
 mod process;
+mod rank;
 mod schema;
 mod store;
 mod sync;
@@ -13,6 +15,11 @@ mod sync;
 pub use artifact::{now_rfc3339, publish, sha256_hex, verify, Manifest};
 pub use judge::{endpoint_tag, run_judging, Judge, JudgeSummary, NullJudge, RecordedJudge};
 pub use process::{run_processing, ProcessSummary};
+pub use rank::{
+    compare as compare_signals, load_ranking_doc, publish_ranking, rank_catalog, verify_ranking,
+    Assist, ClassRanking, RankEntry, RankOrientation, RankingDocument, RankingManifest, Signals,
+    TrendStats, Trends,
+};
 pub use schema::{SCHEMA_VERSION, V1_DDL};
 pub use store::{Catalog, EndpointIndex, EndpointJudgment, EndpointRow, ModelRow};
 pub use sync::{load_endpoints_dir, run_fixture_sync, Summary};

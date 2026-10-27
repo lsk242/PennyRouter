@@ -102,7 +102,7 @@ itself. No iteration may depend on a later one.
   `allow_fallbacks: false`; chosen provider echoed in
   `x-pennyrouter-provider`.
 
-## Iter 6 — Ranking index
+## Iter 6 — Ranking index (done)
 
 - Goal: periodic AI-assisted rebuild of provider ranking, blended with
   per-app usage trends. See [ranking-index.md](ranking-index.md).
@@ -110,6 +110,11 @@ itself. No iteration may depend on a later one.
   trends beat raw metrics where metrics lag.
 - Test: rebuild from fixtures yields the expected stable ordering;
   realtime path remains a single lookup (routing tests still pass).
+- Landed: `catalog-rank` rebuilds a versioned ranking artifact (signals
+  + trend error/latency blend + recorded prefer/avoid adjustments,
+  deterministic bytes) per model/precision-class/orientation; the
+  gateway serves it with one lookup, falls back to inline sort when
+  uncovered, and keeps the last good artifact on rebuild failure.
 
 ## Iter 7 — Price model v1
 

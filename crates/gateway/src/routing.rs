@@ -1,9 +1,11 @@
-//! Provider routing (Iter 5): model suffix filters, a good default, and
-//! sticky providers per session.
+//! Provider routing (Iter 5–6): model suffix filters, a good default,
+//! and sticky providers per session.
 //!
 //! The router loads a catalog DB artifact into an in-memory snapshot at
-//! startup; the request path is one HashMap lookup plus a tiny sort over
-//! that model's offerings — no DB or network on the realtime path.
+//! startup; the request path is one HashMap lookup plus a tiny ordering
+//! step over that model's offerings — no DB or network on the realtime
+//! path. A published ranking artifact (Iter 6), when present, supplies
+//! the ordering; otherwise the same orientation formulas run inline.
 //!
 //! Selection rules (see `docs/routing.md`):
 //! - Split the `model` field by longest-prefix match against known model
@@ -21,7 +23,10 @@
 //! - Any lookup problem falls back to plain passthrough: routing never
 //!   fails a request.
 
-use pennyrouter_catalog::{endpoint_tag, Catalog, EndpointRow, SCHEMA_VERSION};
+use pennyrouter_catalog::{
+    compare_signals, endpoint_tag, load_ranking_doc, verify_ranking, Catalog, EndpointRow,
+    RankOrientation, RankingDocument, SCHEMA_VERSION,
+};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, RwLock};
@@ -93,20 +98,42 @@ pub const PROVIDER_HEADER: &str = "x-pennyrouter-provider";
 pub struct Router {
     source: PathBuf,
     snapshot: RwLock<Snapshot>,
+    ranking: RwLock<Option<RankingDocument>>,
     sessions: Mutex<HashMap<(String, String), Pin>>,
 }
 
 impl Router {
     /// Load a router from a catalog artifact: a directory (newest verified
-    /// manifest wins), a `*.manifest.json` file, or a `.db` file.
+    /// manifest wins), a `*.manifest.json` file, or a `.db` file. A
+    /// directory also picks up the newest verified ranking artifact when
+    /// one exists; without it the router sorts inline.
     pub fn load(path: impl AsRef<Path>) -> Result<Self, RouteError> {
         let path = path.as_ref();
         let snapshot = Self::load_snapshot(path)?;
+        let ranking = Self::discover_ranking(path);
         Ok(Self {
             source: path.to_path_buf(),
             snapshot: RwLock::new(snapshot),
+            ranking: RwLock::new(ranking),
             sessions: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// Load a router with an explicit ranking artifact (directory or
+    /// manifest file). Fails when the ranking is unloadable.
+    pub fn load_with_ranking(
+        catalog_path: impl AsRef<Path>,
+        ranking_path: impl AsRef<Path>,
+    ) -> Result<Self, RouteError> {
+        let router = Self::load(catalog_path)?;
+        let ranking = Self::load_ranking(ranking_path.as_ref())?.ok_or_else(|| {
+            RouteError(format!(
+                "no ranking artifact at {}",
+                ranking_path.as_ref().display()
+            ))
+        })?;
+        *router.ranking.write().unwrap_or_else(|e| e.into_inner()) = Some(ranking);
+        Ok(router)
     }
 
     /// Load a snapshot without building a router (hot-swap input).
@@ -142,17 +169,62 @@ impl Router {
     }
 
     /// Re-resolve the original source and swap the snapshot atomically.
-    /// On failure the last good snapshot keeps serving.
+    /// On failure the last good snapshot keeps serving. The ranking
+    /// refreshes best-effort alongside: a failed refresh keeps the last
+    /// good ranking rather than dropping to inline sort.
     pub fn reload(&self) -> Result<(), RouteError> {
         let snapshot = Self::load_snapshot(&self.source)?;
         self.swap_snapshot(snapshot);
+        if let Some(ranking) = Self::discover_ranking(&self.source) {
+            self.swap_ranking(ranking);
+        }
         Ok(())
     }
 
-    /// Atomically replace the snapshot (ranking rebuild input, Iter 6).
+    /// Atomically replace the snapshot (catalog rebuild input).
     /// Sessions stay pinned; pins whose provider vanished re-route.
     pub fn swap_snapshot(&self, snapshot: Snapshot) {
         *self.snapshot.write().unwrap_or_else(|e| e.into_inner()) = snapshot;
+    }
+
+    /// Atomically replace the ranking (ranking rebuild input).
+    pub fn swap_ranking(&self, ranking: RankingDocument) {
+        *self.ranking.write().unwrap_or_else(|e| e.into_inner()) = Some(ranking);
+    }
+
+    /// Best-effort ranking discovery: a directory yields its newest
+    /// verified ranking, anything else yields nothing.
+    fn discover_ranking(path: &Path) -> Option<RankingDocument> {
+        if !path.is_dir() {
+            return None;
+        }
+        Self::load_ranking(path).ok().flatten()
+    }
+
+    /// Load a ranking from a directory (newest verified manifest) or a
+    /// manifest file. `Ok(None)` means "no ranking here".
+    fn load_ranking(path: &Path) -> Result<Option<RankingDocument>, RouteError> {
+        let manifest_path = if path.is_dir() {
+            match newest_manifest(path, "ranking-")? {
+                Some(p) => p,
+                None => return Ok(None),
+            }
+        } else {
+            path.to_path_buf()
+        };
+        if !verify_ranking(&manifest_path).map_err(|e| RouteError(e.to_string()))? {
+            return Err(RouteError(format!(
+                "ranking hash mismatch: {}",
+                manifest_path.display()
+            )));
+        }
+        let raw = std::fs::read_to_string(&manifest_path).map_err(|e| RouteError(e.to_string()))?;
+        let manifest: pennyrouter_catalog::RankingManifest =
+            serde_json::from_str(&raw).map_err(|e| RouteError(e.to_string()))?;
+        let dir = manifest_path.parent().unwrap_or_else(|| Path::new("."));
+        let doc = load_ranking_doc(&dir.join(&manifest.ranking_file))
+            .map_err(|e| RouteError(e.to_string()))?;
+        Ok(Some(doc))
     }
 
     /// Route one request. `model_field` is the raw `model` value,
@@ -167,6 +239,7 @@ impl Router {
         }
         let orientation = orientation_from(&tags);
         let key = authorization.map(|auth| (auth.to_string(), model_id.clone()));
+        let ranking = self.ranking.read().unwrap_or_else(|e| e.into_inner());
 
         // Sticky path: keep the pinned provider when it still serves.
         if let Some(key) = &key {
@@ -183,16 +256,23 @@ impl Router {
                     })
                     .collect();
                 if !mine.is_empty() {
-                    let pick =
-                        pick(&mine, orientation).or_else(|| pick(&mine, Orientation::Default))?;
-                    return Some(Decision {
-                        model_id,
-                        provider: pick.provider_name.clone(),
-                        tag: pick.tag.clone(),
-                        precision_class: pick.precision_class.clone(),
+                    let order = ordered(
+                        ranking.as_ref(),
+                        &model_id,
+                        &pin.precision_class,
                         orientation,
-                        sticky: true,
-                    });
+                        &mine,
+                    );
+                    if let Some(pick) = order.into_iter().next() {
+                        return Some(Decision {
+                            model_id,
+                            provider: pick.provider_name.clone(),
+                            tag: pick.tag.clone(),
+                            precision_class: pick.precision_class.clone(),
+                            orientation,
+                            sticky: true,
+                        });
+                    }
                 }
                 // Pin unusable (provider/class gone): fall through and
                 // re-route fresh, re-pinning below.
@@ -205,7 +285,15 @@ impl Router {
             .iter()
             .filter(|o| o.precision_class == class)
             .collect();
-        let pick = pick(&candidates, orientation)?;
+        let pick = ordered(
+            ranking.as_ref(),
+            &model_id,
+            &class,
+            orientation,
+            &candidates,
+        )
+        .into_iter()
+        .next()?;
         if let Some(key) = key {
             let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
             if sessions.len() < MAX_SESSIONS {
@@ -256,24 +344,7 @@ impl Router {
 /// newest manifest; manifest files are verified; `.db` files open as-is.
 fn resolve_artifact(path: &Path) -> Result<(PathBuf, Option<String>), RouteError> {
     if path.is_dir() {
-        let mut manifests: Vec<(String, PathBuf)> = Vec::new();
-        let entries = std::fs::read_dir(path)
-            .map_err(|e| RouteError(format!("read {}: {e}", path.display())))?;
-        for entry in entries {
-            let entry = entry.map_err(|e| RouteError(e.to_string()))?;
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if name.starts_with("catalog-") && name.ends_with(".manifest.json") {
-                let raw =
-                    std::fs::read_to_string(entry.path()).map_err(|e| RouteError(e.to_string()))?;
-                let manifest: pennyrouter_catalog::Manifest = serde_json::from_str(&raw)
-                    .map_err(|e| RouteError(format!("parse {}: {e}", entry.path().display())))?;
-                manifests.push((manifest.created_at.clone(), entry.path()));
-            }
-        }
-        manifests.sort();
-        let manifest_path = manifests
-            .pop()
-            .map(|(_, p)| p)
+        let manifest_path = newest_manifest(path, "catalog-")?
             .ok_or_else(|| RouteError(format!("no catalog manifest in {}", path.display())))?;
         return resolve_manifest(&manifest_path);
     }
@@ -281,6 +352,32 @@ fn resolve_artifact(path: &Path) -> Result<(PathBuf, Option<String>), RouteError
         Some("json") => resolve_manifest(path),
         _ => Ok((path.to_path_buf(), None)),
     }
+}
+
+/// Newest `<prefix>*.manifest.json` in a directory by `created_at`.
+/// Both catalog and ranking manifests carry that field.
+fn newest_manifest(dir: &Path, prefix: &str) -> Result<Option<PathBuf>, RouteError> {
+    let mut manifests: Vec<(String, PathBuf)> = Vec::new();
+    let entries =
+        std::fs::read_dir(dir).map_err(|e| RouteError(format!("read {}: {e}", dir.display())))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| RouteError(e.to_string()))?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with(prefix) && name.ends_with(".manifest.json") {
+            let raw =
+                std::fs::read_to_string(entry.path()).map_err(|e| RouteError(e.to_string()))?;
+            let manifest: serde_json::Value = serde_json::from_str(&raw)
+                .map_err(|e| RouteError(format!("parse {}: {e}", entry.path().display())))?;
+            let created_at = manifest
+                .get("created_at")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            manifests.push((created_at, entry.path()));
+        }
+    }
+    manifests.sort();
+    Ok(manifests.pop().map(|(_, p)| p))
 }
 
 fn resolve_manifest(manifest_path: &Path) -> Result<(PathBuf, Option<String>), RouteError> {
@@ -365,43 +462,69 @@ fn majority_class(offerings: &[Offering]) -> Option<Option<String>> {
     best.map(|(class, _)| class)
 }
 
-fn tier_rank(tier: Option<&str>) -> u8 {
-    match tier {
-        Some("high") => 3,
-        Some("standard") => 2,
-        Some("low") => 1,
-        _ => 0,
+fn rank_orientation(orientation: Orientation) -> RankOrientation {
+    match orientation {
+        Orientation::Default => RankOrientation::Default,
+        Orientation::Price => RankOrientation::Price,
+        Orientation::Quality => RankOrientation::Quality,
     }
 }
 
-/// Best offering first: price sorts by prompt price, quality by tier
-/// then score, default by tier then price. Missing values sort last.
-fn pick<'a>(candidates: &[&'a Offering], orientation: Orientation) -> Option<&'a Offering> {
+/// Order candidates best-first: the published ranking when it covers
+/// (model, class), otherwise the same orientation formulas applied
+/// inline to snapshot signals (no trends). Ranked entries that no
+/// longer exist are skipped; live offerings missing from the ranking
+/// append at the end, so a stale ranking never drops an offering.
+fn ordered<'o>(
+    ranking: Option<&RankingDocument>,
+    model_id: &str,
+    class: &Option<String>,
+    orientation: Orientation,
+    candidates: &[&'o Offering],
+) -> Vec<&'o Offering> {
+    if let Some(entries) = ranking
+        .and_then(|r| r.models.get(model_id))
+        .and_then(|classes| classes.iter().find(|c| &c.class == class))
+        .map(|class_ranking| match orientation {
+            Orientation::Default => &class_ranking.default,
+            Orientation::Price => &class_ranking.price,
+            Orientation::Quality => &class_ranking.quality,
+        })
+    {
+        let mut order: Vec<&Offering> = Vec::with_capacity(candidates.len());
+        let mut rest: Vec<&Offering> = candidates.to_vec();
+        for entry in entries {
+            if let Some(pos) = rest
+                .iter()
+                .position(|o| o.provider_name == entry.provider && o.tag == entry.tag)
+            {
+                order.push(rest.remove(pos));
+            }
+        }
+        order.extend(rest);
+        return order;
+    }
     let mut sorted: Vec<&Offering> = candidates.to_vec();
     sorted.sort_by(|a, b| {
-        let price_ord = |a: &Offering, b: &Offering| match (a.price_prompt, b.price_prompt) {
-            (Some(x), Some(y)) => x.total_cmp(&y),
-            (Some(_), None) => std::cmp::Ordering::Less,
-            (None, Some(_)) => std::cmp::Ordering::Greater,
-            (None, None) => std::cmp::Ordering::Equal,
-        };
-        let quality_ord = |a: &Offering, b: &Offering| {
-            tier_rank(b.quality_tier.as_deref())
-                .cmp(&tier_rank(a.quality_tier.as_deref()))
-                .then_with(|| match (b.quality_score, a.quality_score) {
-                    (Some(x), Some(y)) => x.total_cmp(&y),
-                    (Some(_), None) => std::cmp::Ordering::Less,
-                    (None, Some(_)) => std::cmp::Ordering::Greater,
-                    (None, None) => std::cmp::Ordering::Equal,
-                })
-        };
-        match orientation {
-            Orientation::Price => price_ord(a, b),
-            Orientation::Quality => quality_ord(a, b),
-            Orientation::Default => quality_ord(a, b).then_with(|| price_ord(a, b)),
-        }
+        compare_signals(
+            &inline_signals(a),
+            &inline_signals(b),
+            rank_orientation(orientation),
+        )
     });
-    sorted.into_iter().next()
+    sorted
+}
+
+fn inline_signals(offering: &Offering) -> pennyrouter_catalog::Signals<'_> {
+    pennyrouter_catalog::Signals {
+        provider: &offering.provider_name,
+        tag: offering.tag.as_deref(),
+        price: offering.price_prompt,
+        tier: offering.quality_tier.as_deref(),
+        score: offering.quality_score,
+        error_rate: None,
+        latency_ms: None,
+    }
 }
 
 #[cfg(test)]
@@ -442,8 +565,38 @@ mod tests {
         Router {
             source: PathBuf::from("test"),
             snapshot: RwLock::new(snapshot()),
+            ranking: RwLock::new(None),
             sessions: Mutex::new(HashMap::new()),
         }
+    }
+
+    fn ranked_router() -> Router {
+        use pennyrouter_catalog::{ClassRanking, RankEntry};
+        let entry = |provider: &str| RankEntry {
+            provider: provider.to_string(),
+            tag: None,
+        };
+        // Price order deliberately disagrees with inline sort (Dear
+        // first despite being dearer); default/quality agree with it.
+        // A stale Ghost entry must be skipped, never served.
+        let ranking = RankingDocument {
+            created_at: "t".to_string(),
+            catalog_version: None,
+            models: [(
+                "meta/muse-spark".to_string(),
+                vec![ClassRanking {
+                    class: Some("fp16".to_string()),
+                    default: vec![entry("Dear"), entry("Ghost"), entry("Cheap")],
+                    price: vec![entry("Dear"), entry("Cheap")],
+                    quality: vec![entry("Dear"), entry("Cheap")],
+                }],
+            )]
+            .into_iter()
+            .collect(),
+        };
+        let router = router();
+        router.swap_ranking(ranking);
+        router
     }
 
     #[test]
@@ -496,6 +649,44 @@ mod tests {
         let d = r.decide("meta/muse-spark/price", None).unwrap();
         assert_eq!(d.provider, "Cheap");
         assert_eq!(d.orientation, Orientation::Price);
+    }
+
+    #[test]
+    fn published_ranking_overrides_inline_sort() {
+        let r = ranked_router();
+        // Inline price order would pick Cheap; the ranking prefers Dear.
+        let d = r.decide("meta/muse-spark/price", None).unwrap();
+        assert_eq!(d.provider, "Dear");
+        // Stale Ghost entry skipped, never served.
+        let d = r.decide("meta/muse-spark", None).unwrap();
+        assert_eq!(d.provider, "Dear");
+    }
+
+    #[test]
+    fn unranked_models_fall_back_to_inline_sort() {
+        let r = ranked_router();
+        // meta/muse-spark-open is absent from the ranking: inline sort.
+        let d = r.decide("meta/muse-spark-open/price", None).unwrap();
+        assert_eq!(d.provider, "Solo");
+    }
+
+    #[test]
+    fn unranked_offerings_append_instead_of_dropping() {
+        let r = ranked_router();
+        // New offering since the rebuild: still routable, after ranked ones.
+        r.swap_snapshot(Snapshot {
+            models: HashMap::from([(
+                "meta/muse-spark".to_string(),
+                vec![
+                    offering("Cheap", Some(1.0), Some("low")),
+                    offering("Dear", Some(9.0), Some("high")),
+                    offering("New", Some(0.5), Some("low")),
+                ],
+            )]),
+            artifact_version: None,
+        });
+        let d = r.decide("meta/muse-spark/price", None).unwrap();
+        assert_eq!(d.provider, "Dear"); // ranked first, New appended
     }
 
     #[test]

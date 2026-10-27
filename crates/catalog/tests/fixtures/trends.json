@@ -1,0 +1,11 @@
+{"trends": [
+  {"app": "demo-app", "model_id": "openai/gpt-6.1-terra-pro",
+   "provider_name": "OpenAI", "requests": 1000, "errors": 20,
+   "avg_latency_ms": 150.0},
+  {"app": "other-app", "model_id": "openai/gpt-6.1-terra-pro",
+   "provider_name": "OpenAI", "requests": 500, "errors": 10,
+   "avg_latency_ms": null},
+  {"app": "demo-app", "model_id": "tencent/hy-mt2-1.8b",
+   "provider_name": "Tencent", "requests": 100, "errors": 0,
+   "avg_latency_ms": 40.0}
+]}

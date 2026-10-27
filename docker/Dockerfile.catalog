@@ -1,7 +1,8 @@
-# Catalog sync image: catalog-sync + catalog-process (no gateway).
-# The sync container writes versioned DB artifacts to /catalog (a shared
-# volume the gateway mounts read-only) from input JSON at /input (ro).
-# One cycle by default; set SYNC_INTERVAL>0 to loop on a schedule.
+# Catalog sync image: catalog-sync + catalog-process + catalog-rank (no
+# gateway). The sync container writes versioned DB and ranking artifacts
+# to /catalog (a shared volume the gateway mounts read-only) from input
+# JSON at /input (ro). One cycle by default; set SYNC_INTERVAL>0 to loop
+# on a schedule.
 FROM rust:1-bookworm AS builder
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
@@ -13,6 +14,7 @@ RUN useradd -m app
 COPY docker/catalog-entrypoint.sh /usr/local/bin/catalog-entrypoint
 COPY --from=builder /app/target/release/catalog-sync /usr/local/bin/catalog-sync
 COPY --from=builder /app/target/release/catalog-process /usr/local/bin/catalog-process
+COPY --from=builder /app/target/release/catalog-rank /usr/local/bin/catalog-rank
 RUN chmod +x /usr/local/bin/catalog-entrypoint \
  && mkdir -p /catalog /input && chown app:app /catalog
 USER app

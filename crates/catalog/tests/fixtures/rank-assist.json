@@ -1,0 +1,6 @@
+{"adjustments": [
+  {"model_id": "tencent/hy-mt2-1.8b", "provider_name": "Tencent",
+   "action": "prefer", "reason": "fixture format example; single offering, no reorder"},
+  {"model_id": "nope/unknown-model", "provider_name": "Nobody",
+   "action": "avoid", "reason": "unknown records are ignored"}
+]}
