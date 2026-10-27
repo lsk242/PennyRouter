@@ -104,7 +104,9 @@ Development delivers Docker images, platform delivers deployments.
 - **Now:** Docker local dev + minimal image (Dockerfile + compose added
   in 1a; verified with a local build + `/health` smoke test), plus a
   dev/prod compose split with `.env` settings (prod pulls the GHCR
-  image, never builds). CI runs secret scanning + Dependabot.
+  image, never builds) and an `scp` server deploy (`scripts/deploy.sh`
+  + `make deploy`, gateway only on host port 8003). CI runs secret
+  scanning + Dependabot.
 - **Docker build + push pipeline:** workflow added in 1a; first executes
   on next push to main.
 - **Later:** first cloud provider (TBD — Hetzner / AWS / Azure / …),

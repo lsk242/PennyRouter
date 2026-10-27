@@ -47,6 +47,11 @@ adds value on its own. Detail and acceptance criteria live in
 - [x] Dev/prod compose split with `.env` settings (`compose.yaml`
       builds locally; `compose.prod.yaml` pulls the `ghcr.io` image
       with no `build:` section, CI-guarded).
+- [x] `scp` server deploy (`scripts/deploy.sh` + `make deploy`):
+      ships pull-only prod compose + generated `.env`, pulls the
+      `ghcr.io` image, restarts, health-checks; gateway only on
+      host port 8003. `Makefile` covers current common tasks
+      (test/run/dev/build/smoke/load/prod-config).
 - [ ] Docker build + push pipeline with `/health` smoke check (workflow
       added in 1a; proves itself on next push to main).
 - [ ] Select first cloud provider (Hetzner / AWS / Azure / … — TBD).
