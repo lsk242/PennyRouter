@@ -12,9 +12,11 @@ longer than one iteration.
    compose (`compose.prod.yaml`) deploys by pulling the GHCR
    image — one file plus `.env` on the server, no build there. No cloud
    yet.
-2. **First cloud provider (later, TBD).** One provider first (Hetzner,
-   AWS, Azure, … — selection deferred). Terraform-managed: VM creation,
-   resource allocation, networking, deploy.
+2. **First cloud provider (now): Hetzner.** Selected from the
+   six-provider comparison ([cloud-providers.md](cloud-providers.md)).
+   Terraform-managed (`terraform/hetzner`): CCX13 VM, primary IPv4,
+   private network, firewall, Caddy TLS + pull-only gateway deploy
+   via cloud-init. CI checks formatting and validates the config.
 3. **More providers.** Same Terraform patterns extended; provider choice
    per environment, never hardcoded in app code.
 
@@ -36,7 +38,7 @@ longer than one iteration.
   minimal gateway (with `/health`) exists to build an image from. When
   enabled: build, push tagged image, smoke-check `/health` from the
   built image.
-- **Later:** Terraform plan/apply automation per environment, gated on
-  the first provider selection.
+- **Now:** Terraform fmt + validate in CI for `terraform/hetzner`.
+- **Later:** Terraform plan/apply automation per environment.
 
 See [operations.md](operations.md) for local Docker dev and observability.

@@ -62,8 +62,11 @@ adds value on its own. Detail and acceptance criteria live in
       (test/run/dev/build/smoke/load/prod-config).
 - [x] Docker build + push pipeline with `/health` smoke check (proven
       green on main across the v0.1.0–v0.6.0 merges, image pushed).
-- [ ] Select first cloud provider (Hetzner / AWS / Azure / … — TBD).
-- [ ] Terraform-managed deployment: VMs, resource allocation, networking.
+- [x] Select first cloud provider: Hetzner (see
+      [docs/cloud-providers.md](docs/cloud-providers.md)).
+- [x] Terraform-managed deployment (`terraform/hetzner`): CCX13 VM,
+      primary IPv4, private network, firewall, Caddy TLS + pull-only
+      gateway via cloud-init; CI runs fmt + validate.
 
 Deferred (see [docs/future.md](docs/future.md), not committed): additional
 backends, parallel fan-out (fastest/all/judge), traffic review via a local or

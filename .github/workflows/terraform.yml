@@ -1,0 +1,19 @@
+name: Terraform
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  validate:
+    name: fmt + validate (hetzner)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - name: Check formatting
+        run: terraform -chdir=terraform/hetzner fmt -check -recursive
+      - name: Init without backend
+        run: terraform -chdir=terraform/hetzner init -backend=false -input=false
+      - name: Validate
+        run: terraform -chdir=terraform/hetzner validate
