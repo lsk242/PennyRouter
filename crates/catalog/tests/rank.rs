@@ -5,7 +5,8 @@ mod common;
 use common::{fixtures_dir, synced_db};
 use pennyrouter_catalog::{
     load_ranking_doc, publish_ranking, rank_catalog, run_judging, run_processing, verify_ranking,
-    Assist, Catalog, EndpointIndex, EndpointJudgment, EndpointRow, ModelRow, RecordedJudge, Trends,
+    Assist, Catalog, EndpointIndex, EndpointJudgment, EndpointRow, ModelRow, Promos, RecordedJudge,
+    Trends,
 };
 
 const STAMP: &str = "2026-03-04T05:06:07Z";
@@ -34,10 +35,13 @@ fn fixture_rebuild_yields_expected_stable_ordering() {
     let catalog = Catalog::open(&db).unwrap();
     let trends = Trends::load(&fixtures_dir().join("trends.json")).unwrap();
     let assist = Assist::load(&fixtures_dir().join("rank-assist.json")).unwrap();
+    let promos = Promos::load(&fixtures_dir().join("promos.json")).unwrap();
     let doc = rank_catalog(
         &catalog,
         &trends,
         &assist,
+        &promos,
+        STAMP,
         STAMP,
         Some("cat-v1".to_string()),
     )
@@ -75,8 +79,26 @@ fn rebuild_is_deterministic_and_publish_idempotent() {
     let (_dir, db) = ranked_inputs("deterministic");
     let catalog = Catalog::open(&db).unwrap();
     let trends = Trends::load(&fixtures_dir().join("trends.json")).unwrap();
-    let doc1 = rank_catalog(&catalog, &trends, &Assist::empty(), STAMP, None).unwrap();
-    let doc2 = rank_catalog(&catalog, &trends, &Assist::empty(), STAMP, None).unwrap();
+    let doc1 = rank_catalog(
+        &catalog,
+        &trends,
+        &Assist::empty(),
+        &Promos::empty(),
+        STAMP,
+        STAMP,
+        None,
+    )
+    .unwrap();
+    let doc2 = rank_catalog(
+        &catalog,
+        &trends,
+        &Assist::empty(),
+        &Promos::empty(),
+        STAMP,
+        STAMP,
+        None,
+    )
+    .unwrap();
     assert_eq!(
         serde_json::to_string(&doc1).unwrap(),
         serde_json::to_string(&doc2).unwrap()
@@ -172,13 +194,109 @@ fn trends_break_signal_ties() {
         trends.get("syn/tie", "Drop").unwrap().error_rate(),
         Some(0.9)
     );
-    let doc = rank_catalog(&catalog, &trends, &Assist::empty(), STAMP, None).unwrap();
+    let doc = rank_catalog(
+        &catalog,
+        &trends,
+        &Assist::empty(),
+        &Promos::empty(),
+        STAMP,
+        STAMP,
+        None,
+    )
+    .unwrap();
     let class = &doc.models["syn/tie"][0];
     assert_eq!(class.class, None);
     for orientation in [&class.default, &class.price, &class.quality] {
         let providers: Vec<&str> = orientation.iter().map(|e| e.provider.as_str()).collect();
         assert_eq!(providers, ["Keep", "Drop"]);
     }
+}
+
+#[test]
+fn promo_active_leads_and_expired_falls_back() {
+    let dir = common::scratch("rank-promos");
+    let db = dir.join("promo.db");
+    let _ = std::fs::remove_file(&db);
+    let catalog = Catalog::open(&db).unwrap();
+    catalog.init().unwrap();
+    catalog
+        .insert_model(&ModelRow {
+            model_id: "syn/promo".to_string(),
+            name: "Promo".to_string(),
+            source: "test".to_string(),
+            payload: "{}".to_string(),
+            fetched_at: "t".to_string(),
+        })
+        .unwrap();
+    for (provider, price) in [("Full", 1.0), ("Promo", 4.0)] {
+        catalog
+            .insert_endpoint(&EndpointRow {
+                id: 0,
+                model_id: "syn/promo".to_string(),
+                provider_name: provider.to_string(),
+                payload: format!(r#"{{"tag": "{provider}"}}"#),
+                fetched_at: "t".to_string(),
+                price_prompt: None,
+                price_completion: None,
+                price_cache_read: None,
+                price_cache_write: None,
+                precision_class: None,
+                promo_discount: None,
+                processed_at: None,
+                quality_tier: None,
+                quality_score: None,
+                judged_at: None,
+            })
+            .unwrap();
+        let ep = catalog.endpoints_for("syn/promo").unwrap().pop().unwrap();
+        catalog
+            .update_endpoint_index(
+                ep.id,
+                &EndpointIndex {
+                    price_prompt: Some(price),
+                    price_completion: Some(price),
+                    price_cache_read: None,
+                    price_cache_write: None,
+                    precision_class: None,
+                    promo_discount: None,
+                    processed_at: "t".to_string(),
+                },
+            )
+            .unwrap();
+    }
+    let promos_path = dir.join("promos.json");
+    std::fs::write(
+        &promos_path,
+        r#"{"promos": [
+            {"model_id": "syn/promo", "provider_name": "Promo",
+             "discount": 0.9, "starts_at": "2026-01-01T00:00:00Z",
+             "ends_at": "2026-02-01T00:00:00Z"}
+        ]}"#,
+    )
+    .unwrap();
+    let promos = Promos::load(&promos_path).unwrap();
+    let leaders = |now: &str| {
+        let doc = rank_catalog(
+            &catalog,
+            &Trends::empty(),
+            &Assist::empty(),
+            &promos,
+            now,
+            STAMP,
+            None,
+        )
+        .unwrap();
+        doc.models["syn/promo"][0]
+            .price
+            .iter()
+            .map(|e| e.provider.clone())
+            .collect::<Vec<_>>()
+    };
+    // Active window: Promo at 10% of 4.0 beats Full at 1.0.
+    assert_eq!(leaders("2026-01-15T00:00:00Z"), ["Promo", "Full"]);
+    // Expired (and before start): Full leads again — no misrouting.
+    assert_eq!(leaders("2026-03-01T00:00:00Z"), ["Full", "Promo"]);
+    assert_eq!(leaders("2025-12-01T00:00:00Z"), ["Full", "Promo"]);
 }
 
 #[test]
@@ -212,7 +330,16 @@ fn assist_prefer_and_avoid_override_signals() {
     )
     .unwrap();
     let assist = Assist::load(&assist_path).unwrap();
-    let doc = rank_catalog(&catalog, &Trends::empty(), &assist, STAMP, None).unwrap();
+    let doc = rank_catalog(
+        &catalog,
+        &Trends::empty(),
+        &assist,
+        &Promos::empty(),
+        STAMP,
+        STAMP,
+        None,
+    )
+    .unwrap();
     let class = &doc.models["syn/tie"][0];
     // Keep leads even the price ordering despite Drop being cheaper.
     for orientation in [&class.default, &class.price, &class.quality] {
@@ -220,7 +347,16 @@ fn assist_prefer_and_avoid_override_signals() {
         assert_eq!(providers, ["Keep", "Drop"]);
     }
     // Without assist, price leads with Drop.
-    let plain = rank_catalog(&catalog, &Trends::empty(), &Assist::empty(), STAMP, None).unwrap();
+    let plain = rank_catalog(
+        &catalog,
+        &Trends::empty(),
+        &Assist::empty(),
+        &Promos::empty(),
+        STAMP,
+        STAMP,
+        None,
+    )
+    .unwrap();
     let providers: Vec<&str> = plain.models["syn/tie"][0]
         .price
         .iter()

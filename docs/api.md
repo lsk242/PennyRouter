@@ -22,6 +22,8 @@ The `model` field carries the OpenRouter model plus optional suffix filters
 default route — never an error. From Iter 5, routed requests are
 forwarded with the stripped model id plus a forced `provider.order`,
 and responses carry the chosen provider in `x-pennyrouter-provider`.
+From Iter 7, `openrouter/free` routes to any free offering (rewritten
+to its backend id) or passes through untouched when nothing is free.
 
 ## Limits
 
