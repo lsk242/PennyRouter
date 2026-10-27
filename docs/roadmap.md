@@ -55,13 +55,15 @@ itself. No iteration may depend on a later one.
   resource use.
 - Test: load run reporting gateway overhead vs. direct-to-backend.
 
-## Iter 4 — Catalog DB + sync
+## Iter 4 — Catalog sync track
 
-- Goal: local DB of models/providers, periodically synced from OpenRouter
-  (price, latency, throughput, uptime, ZDR, region, precision, promos).
-- Value: the data foundation routing and ranking need; useful for
-  inspection even before routing exists.
-- Test: fixture sync populates the DB; queries return expected rows.
+- Goal: a separate `catalog-sync` process (own binary, schedule, host)
+  delivers a versioned catalog DB artifact to gateway hosts. Breakdown:
+  [catalog-sync-roadmap.md](catalog-sync-roadmap.md).
+- Value: the data foundation routing and ranking need; gathering and
+  serving evolve independently — they share only the DB artifact.
+- Test: fixture-produced artifact validates and loads; detail in the
+  catalog-sync roadmap.
 
 ## Iter 5 — Provider routing
 

@@ -23,10 +23,10 @@ adds value on its own. Detail and acceptance criteria live in
 - [ ] **Iter 3 — Observability + perf baseline.** Latency histogram, basic
       metrics/logs, load harness, 1 CPU / 1 GB Docker profile. Test: report
       gateway overhead vs. direct-to-backend under load.
-- [ ] **Iter 4 — Catalog DB + sync.** Local DB of models/providers synced
-      from OpenRouter (price, latency, throughput, uptime, ZDR, region,
-      precision, promos). Test: fixture sync populates DB; queries return
-      expected rows.
+- [ ] **Iter 4 — Catalog sync track.** Separate `catalog-sync` process
+      delivers a versioned catalog DB artifact (breakdown in
+      [docs/catalog-sync-todo.md](docs/catalog-sync-todo.md)). Test:
+      fixture-produced artifact validates and loads.
 - [ ] **Iter 5 — Provider routing.** Model-name suffix filters (e.g.
       `meta/muse-spark-open/...` tags) plus a good default; one fast local
       lookup; sticky provider per session to preserve cache. Test: routing
