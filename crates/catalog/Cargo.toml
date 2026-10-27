@@ -1,0 +1,21 @@
+[package]
+name = "pennyrouter-catalog"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "catalog-sync"
+path = "src/main.rs"
+
+[lib]
+name = "pennyrouter_catalog"
+path = "src/lib.rs"
+
+[dependencies]
+# SQLite via the bundled amalgamation: no system library needed, so the
+# sync binary stays free of sqlite build deps.
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+time = { version = "0.3", features = ["formatting"] }
