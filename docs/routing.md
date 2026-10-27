@@ -44,3 +44,27 @@ session.
   candidates; never substitute across precision silently.
 - Never fail a request because of routing: on any lookup problem, fall back
   to the default provider.
+
+## Status (Iter 5)
+
+- Model/tag split by longest-prefix match against known model ids;
+  unknown models pass through untouched.
+- Orientations: `price`/`low_cost`/`cost`/`cheap` (cheapest prompt
+  price), `quality`/`best` (best tier, then score). First recognized
+  orientation wins; `privacy`, `speed`/`latency`/`throughput`, and
+  region hints parse but are ignored until the index carries those
+  signals — as are unknown tags.
+- Default: best quality tier, then cheapest prompt price, within the
+  model's most common precision class.
+- Session = (`Authorization`, model). The first decision pins the
+  provider and class; later requests keep the provider, with
+  orientation tags refining only which of its offerings serves.
+  Anonymous requests route fresh every time. A vanished pin re-routes.
+- Enforcement: `model` is stripped to the backend id and the request
+  gains `provider: {"order": [<chosen>], "allow_fallbacks": false}` —
+  never silently pay another provider. The choice is echoed in the
+  `x-pennyrouter-provider` response header.
+- Source: `CATALOG_DB` (directory takes the newest verified manifest,
+  or a manifest/DB file directly). Unset or unloadable means plain
+  passthrough. The snapshot loads once at startup; `reload`/`swap`
+  hooks exist for the ranking job (Iter 6).

@@ -85,6 +85,14 @@ impl Catalog {
         Ok(Self { conn })
     }
 
+    /// Open an existing DB read-only: never creates, migrates, or locks
+    /// for writing. The gateway serving path uses this against the
+    /// shared artifact.
+    pub fn open_read_only(path: &Path) -> Result<Self, Error> {
+        let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        Ok(Self { conn })
+    }
+
     /// Create tables if missing, migrate older DBs, record the schema
     /// version. Idempotent. Required before any other call.
     pub fn init(&self) -> Result<(), Error> {

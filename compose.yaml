@@ -19,6 +19,7 @@ services:
     environment:
       PORT: ${PORT:-3000}
       OPENROUTER_BASE_URL: ${OPENROUTER_BASE_URL:-https://openrouter.ai}
+      CATALOG_DB: ${CATALOG_DB:-/catalog}
     volumes:
       - catalog-data:/catalog:ro
   catalog-sync:

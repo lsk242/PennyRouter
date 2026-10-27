@@ -1,6 +1,6 @@
 [package]
 name = "pennyrouter-gateway"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2021"
 
 [[bin]]
@@ -20,6 +20,9 @@ futures-util = "0.3"
 # Upstream forwarder. rustls (bundled roots) keeps the Docker image free of
 # OpenSSL build deps and system CA installs.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+# Routing snapshot format (Iter 5): the gateway reads the catalog DB
+# artifact the sync process publishes.
+pennyrouter-catalog = { path = "../catalog" }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

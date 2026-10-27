@@ -19,7 +19,9 @@ configuration exists for now.
 
 The `model` field carries the OpenRouter model plus optional suffix filters
 (see [routing.md](routing.md)). Unknown or absent filters fall back to the
-default route — never an error.
+default route — never an error. From Iter 5, routed requests are
+forwarded with the stripped model id plus a forced `provider.order`,
+and responses carry the chosen provider in `x-pennyrouter-provider`.
 
 ## Limits
 

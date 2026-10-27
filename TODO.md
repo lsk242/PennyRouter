@@ -32,10 +32,11 @@ adds value on its own. Detail and acceptance criteria live in
       delivers a versioned catalog DB artifact (breakdown in
       [docs/catalog-sync-todo.md](docs/catalog-sync-todo.md), all phases
       done). Test: fixture-produced artifact validates and loads.
-- [ ] **Iter 5 — Provider routing.** Model-name suffix filters (e.g.
+- [x] **Iter 5 — Provider routing.** Model-name suffix filters (e.g.
       `meta/muse-spark-open/...` tags) plus a good default; one fast local
       lookup; sticky provider per session to preserve cache. Test: routing
-      unit tests + passthrough with forced provider; default needs no tags.
+      unit tests + passthrough with forced provider; default needs no tags;
+      `cargo test`, clippy, fmt, and Docker build + smoke all passed.
 - [ ] **Iter 6 — Ranking index.** Periodic AI-assisted rebuild of provider
       ranking + per-app usage trends. Test: rebuild from fixtures yields the
       expected stable ordering; realtime path still a single lookup.
