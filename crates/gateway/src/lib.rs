@@ -17,6 +17,7 @@ use std::{
 };
 
 mod metrics;
+pub mod routing;
 
 pub use metrics::{Metrics, Route, UpstreamErrorKind};
 
@@ -63,13 +64,14 @@ async fn health() -> Json<Health> {
 }
 
 /// Shared gateway state: where chat completions are forwarded upstream,
-// plus shared metrics.
+// plus shared metrics and the optional provider router.
 #[derive(Clone)]
 pub struct AppState {
     upstream_base_url: String,
     client: reqwest::Client,
     timeouts: Timeouts,
     metrics: Arc<Metrics>,
+    router: Option<Arc<routing::Router>>,
 }
 
 impl AppState {
@@ -88,15 +90,34 @@ impl AppState {
             client,
             timeouts,
             metrics: Arc::new(Metrics::new()),
+            router: None,
         }
     }
 
+    /// State with provider routing: recognized models are rewritten to
+    /// the stripped model id with a forced provider.
+    pub fn with_router(mut self, router: Arc<routing::Router>) -> Self {
+        self.router = Some(router);
+        self
+    }
+
     /// State for the real server: upstream from `OPENROUTER_BASE_URL`,
-    /// defaulting to OpenRouter.
+    /// defaulting to OpenRouter; routing from `CATALOG_DB` when set and
+    /// loadable, otherwise plain passthrough.
     pub fn from_env() -> Self {
         let base = std::env::var("OPENROUTER_BASE_URL")
             .unwrap_or_else(|_| "https://openrouter.ai".to_string());
-        Self::new(base)
+        let state = Self::new(base);
+        match std::env::var("CATALOG_DB") {
+            Err(_) => state,
+            Ok(path) => match routing::Router::load(&path) {
+                Ok(router) => state.with_router(Arc::new(router)),
+                Err(e) => {
+                    eprintln!("gateway: routing disabled ({e}), passing through");
+                    state
+                }
+            },
+        }
     }
 }
 
@@ -168,9 +189,9 @@ async fn metrics_handler(State(state): State<AppState>) -> Response {
         .into_response()
 }
 
-/// Chat completions passthrough: forward the request untouched, then either
-/// stream an SSE response through chunk-by-chunk or return a buffered
-/// response byte-for-byte. No routing or DB reads.
+/// Chat completions: guard, optionally route (stripped model + forced
+/// provider), then forward; streams pass chunk-by-chunk, buffered
+/// responses byte-for-byte.
 async fn chat_completions(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -212,6 +233,32 @@ async fn chat_completions(
         buffered
     };
 
+    // Routing rewrites recognized requests; anything unrecognized (or no
+    // router configured) forwards untouched.
+    let (forwarded_body, provider) = match &state.router {
+        Some(router) => match router.route_request(&headers, &buffered) {
+            Some((rewritten, decision)) => (rewritten, Some(decision.provider)),
+            None => (buffered, None),
+        },
+        None => (buffered, None),
+    };
+    let mut response = forward_chat_completions(&state, &headers, forwarded_body).await;
+    if let Some(provider) = provider {
+        if let Ok(value) = provider.parse() {
+            response
+                .headers_mut()
+                .insert(routing::PROVIDER_HEADER, value);
+        }
+    }
+    response
+}
+
+/// Forward one buffered body upstream and map the response.
+async fn forward_chat_completions(
+    state: &AppState,
+    headers: &HeaderMap,
+    body: Vec<u8>,
+) -> Response {
     let url = format!("{}/v1/chat/completions", state.upstream_base_url);
     let mut forwarded = reqwest::header::HeaderMap::new();
     for (name, value) in headers.iter() {
@@ -223,12 +270,7 @@ async fn chat_completions(
     }
     let upstream = match tokio::time::timeout(
         state.timeouts.first_chunk,
-        state
-            .client
-            .post(url)
-            .headers(forwarded)
-            .body(buffered)
-            .send(),
+        state.client.post(url).headers(forwarded).body(body).send(),
     )
     .await
     {

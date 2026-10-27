@@ -86,7 +86,7 @@ itself. No iteration may depend on a later one.
   processing, containerized deployment with CI gates); versioned artifact
   publishes, verifies, and loads from fixtures.
 
-## Iter 5 — Provider routing
+## Iter 5 — Provider routing (done)
 
 - Goal: model-name suffix filters plus a good default; one fast local
   lookup; sticky provider per session. See [routing.md](routing.md).
@@ -94,6 +94,13 @@ itself. No iteration may depend on a later one.
   client changes; the default needs no tags.
 - Test: routing unit tests over fixture data; passthrough test with a
   forced provider; stickiness test keeps the same provider mid-session.
+- Landed: in-memory snapshot from the catalog artifact (longest-prefix
+  model split; price/quality orientations; best-tier-then-cheapest
+  default within the majority precision class; (authorization, model)
+  sessions pin the provider; unknown models pass through untouched).
+  Forced provider via OpenRouter `provider.order` with
+  `allow_fallbacks: false`; chosen provider echoed in
+  `x-pennyrouter-provider`.
 
 ## Iter 6 — Ranking index
 
