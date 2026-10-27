@@ -39,13 +39,19 @@ Docker-based local dev (see `docker/`):
   runs (`compose.perf.yaml`, full harness in Iter 3).
 - A health-only load scaffold (`tests/load/run.sh`) for session, latency,
   and resource smoke runs before chat workloads exist.
+- An opt-in live integration check (`tests/integration/<lang>/`) that
+  calls OpenRouter directly and through the gateway, then compares. It
+  needs `OPENROUTER_API_KEY` in `.env` (gitignored, never committed) and
+  a running gateway; without a key it skips. Never runs in CI.
 - No secrets in the repo: backend keys travel with requests, not config.
 
 ## Configuration
 
 Keep config minimal and env-based (`.env`, see [`.env.example`](../.env.example)):
 `PORT` (container port), `HOST_PORT` (published port), `IMAGE` (dev:
-tag for the local build; prod: image to pull). No local key store:
+tag for the local build; prod: image to pull), `OPENROUTER_BASE_URL`
+(upstream for chat completions, default `https://openrouter.ai`).
+No local key store:
 backend keys travel with requests, never in config or fixtures.
 
 ## Observability

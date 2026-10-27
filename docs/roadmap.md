@@ -29,7 +29,7 @@ itself. No iteration may depend on a later one.
   the real binary; Docker image build (116MB) + container smoke check
   passed locally.
 
-## Iter 1b — Non-streaming passthrough
+## Iter 1b — Non-streaming passthrough (done)
 
 - Goal: `POST /v1/chat/completions` reaches OpenRouter and returns
   correctly, using the caller-supplied key.
@@ -37,6 +37,10 @@ itself. No iteration may depend on a later one.
   performance-optimization starting point.
 - Test: integration test against a mock backend plus a recorded fixture;
   response body byte-correct; must not import routing or DB code.
+- Landed: `cargo test` (health + 2 passthrough tests), real-binary smoke
+  (`/health` OK, OpenAI-shaped 502 on dead upstream), and Docker build +
+  `/health` smoke all passed. Upstream configurable via
+  `OPENROUTER_BASE_URL` (default `https://openrouter.ai`).
 
 ## Iter 2 — Streaming + guards
 

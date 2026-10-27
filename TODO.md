@@ -13,10 +13,11 @@ adds value on its own. Detail and acceptance criteria live in
 - [x] **Iter 1a — Health + minimal setup.** Rust workspace, `GET /health`,
       Dockerfile, compose, Docker CI workflow. Test: `cargo test`,
       `/health` smoke, and Docker image build all passed locally.
-- [ ] **Iter 1b — Non-streaming passthrough.** `POST
+- [x] **Iter 1b — Non-streaming passthrough.** `POST
       /v1/chat/completions` → OpenRouter, caller-supplied key, byte-correct
-      response. Test: integration test against a mock backend + recorded
-      fixture; must not depend on any routing or DB code.
+      response. Test: mock-backend integration + fixture byte-equality,
+      `cargo test`, real-binary smoke, and Docker build + `/health` smoke
+      all passed locally; no routing or DB code involved.
 - [ ] **Iter 2 — Streaming + guards.** SSE streaming passthrough, timeouts,
       error mapping, 1M-token guard. Test: chunked fixture streams intact;
       oversize request rejected before touching the backend.
