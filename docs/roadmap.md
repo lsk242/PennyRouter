@@ -144,9 +144,12 @@ Development delivers Docker images, platform delivers deployments.
 - **Docker build + push pipeline:** workflow added in 1a; proven green
   on main (build + push + `/health` smoke) across the v0.1.0–v0.6.0
   merges.
-- **Later:** first cloud provider (TBD — Hetzner / AWS / Azure / …),
-  Terraform-managed (VMs, resource allocation, networking); then more
-  providers. Terraform automation gated on provider selection.
+- **First cloud provider (done):** Hetzner, selected from the
+  six-provider comparison. Terraform-managed (`terraform/hetzner`):
+  CCX13 VM, primary IPv4, private network, firewall, Caddy TLS +
+  pull-only gateway via cloud-init; CI validates fmt + config.
+- **Later:** more providers on the same patterns; Terraform
+  plan/apply automation per environment.
 
 ## After Iter 7
 

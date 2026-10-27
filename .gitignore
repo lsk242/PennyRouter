@@ -26,6 +26,13 @@ rustc-ice-*.txt
 tests/load/results/*
 !tests/load/results/.gitkeep
 
+# Terraform: local state, vars, and plugin cache (state may carry secrets)
+*.tfstate
+*.tfstate.*
+*.tfvars
+.terraform/
+terraform/*/terraform.tfvars
+
 # RustRover
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
 #  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore

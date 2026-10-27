@@ -1,0 +1,59 @@
+#cloud-config
+# Gateway bootstrap: Docker + pull-only gateway compose, with Caddy in
+# front when a domain is set. Rendered by Terraform templatefile:
+# dollar-brace and percent-brace interpolate — plain shell $(...)
+# passes through untouched (this file avoids literal dollar-braces).
+package_update: true
+packages:
+  - ca-certificates
+  - curl
+  - gnupg
+
+write_files:
+  - path: /opt/pennyrouter/compose.yaml
+    permissions: "0644"
+    content: |
+      name: pennyrouter
+      services:
+        gateway:
+          image: ${gateway_image}
+          restart: unless-stopped
+          ports:
+            - "%{ if domain != "" }127.0.0.1:${host_port}:3000%{ else }${host_port}:3000%{ endif }"
+          environment:
+            PORT: "3000"
+            OPENROUTER_BASE_URL: ${openrouter_base_url}
+      %{ if domain != "" }
+        caddy:
+          image: caddy:2-alpine
+          restart: unless-stopped
+          ports:
+            - "80:80"
+            - "443:443"
+          volumes:
+            - ./Caddyfile:/etc/caddy/Caddyfile:ro
+            - caddy-data:/data
+      volumes:
+        caddy-data:
+      %{ endif }
+  - path: /opt/pennyrouter/Caddyfile
+    permissions: "0644"
+    content: |
+      ${domain} {
+              reverse_proxy gateway:3000
+      %{ if acme_email != "" }       tls ${acme_email}
+      %{ endif }}
+
+runcmd:
+  # Docker from the official repo (Ubuntu's docker.io lags behind).
+  - install -m 0755 -d /etc/apt/keyrings
+  - curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+  - chmod a+r /etc/apt/keyrings/docker.asc
+  - echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo $VERSION_CODENAME) stable" > /etc/apt/sources.list.d/docker.list
+  - apt-get update -y
+  - apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+  - systemctl enable --now docker
+  # Pull (never build) and start the stack, then wait for /health.
+  - cd /opt/pennyrouter && docker compose pull
+  - cd /opt/pennyrouter && docker compose up -d
+  - for i in $(seq 1 30); do curl -fsS http://localhost:${host_port}/health && break || sleep 2; done

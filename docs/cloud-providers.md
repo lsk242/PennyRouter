@@ -1,8 +1,8 @@
 # Cloud provider comparison
 
-Input to the "select first cloud provider" platform decision (still
-TBD — this doc compares, it does not choose). Detail per provider in
-`terraform/<provider>/options.md`.
+Input to the "select first cloud provider" platform decision.
+**Selected: Hetzner** (first deployment in `terraform/hetzner`).
+Detail per provider in `terraform/<provider>/options.md`.
 
 ## Minimal specs
 
