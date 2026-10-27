@@ -1,16 +1,24 @@
 use axum::{
     body::{Body, Bytes},
-    extract::State,
+    extract::{Request, State},
     http::{
         header::{CONTENT_LENGTH, CONTENT_TYPE, HOST},
         HeaderMap, StatusCode,
     },
+    middleware::{self, Next},
     response::{IntoResponse, Json, Response},
     routing::{get, post},
     Router,
 };
 use serde::Serialize;
-use std::time::Duration;
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
+
+mod metrics;
+
+pub use metrics::{Metrics, Route, UpstreamErrorKind};
 
 /// Token guard (Iter 2): requests estimating over 1M tokens are rejected
 /// before touching the backend. The estimate is bytes/4, the standard rough
@@ -54,12 +62,14 @@ async fn health() -> Json<Health> {
     Json(Health { status: "ok" })
 }
 
-/// Shared gateway state: where chat completions are forwarded upstream.
+/// Shared gateway state: where chat completions are forwarded upstream,
+// plus shared metrics.
 #[derive(Clone)]
 pub struct AppState {
     upstream_base_url: String,
     client: reqwest::Client,
     timeouts: Timeouts,
+    metrics: Arc<Metrics>,
 }
 
 impl AppState {
@@ -77,6 +87,7 @@ impl AppState {
             upstream_base_url: base.trim_end_matches('/').to_string(),
             client,
             timeouts,
+            metrics: Arc::new(Metrics::new()),
         }
     }
 
@@ -94,10 +105,67 @@ pub fn app() -> Router {
 }
 
 pub fn app_with_state(state: AppState) -> Router {
+    let metrics = state.metrics.clone();
     Router::new()
         .route("/health", get(health))
+        .route("/metrics", get(metrics_handler))
         .route("/v1/chat/completions", post(chat_completions))
+        .layer(middleware::from_fn_with_state(metrics, track))
         .with_state(state)
+}
+
+/// Observability middleware (Iter 3): request ID, latency histogram,
+/// per-status counts, and one JSON log line per request.
+async fn track(State(metrics): State<Arc<Metrics>>, request: Request, next: Next) -> Response {
+    let route = Route::from_path(request.uri().path());
+    let method = request.method().to_string();
+    let request_id = request
+        .headers()
+        .get("x-request-id")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("{:x}", metrics.next_request_id()));
+    let _in_flight = metrics.in_flight_guard();
+    let start = Instant::now();
+    let mut response = next.run(request).await;
+    let latency = start.elapsed();
+    let status = response.status().as_u16();
+    metrics.observe(route, status, latency);
+    if let Ok(value) = request_id.parse() {
+        response.headers_mut().insert("x-request-id", value);
+    }
+    println!(
+        "{}",
+        serde_json::json!({
+            "request_id": request_id,
+            "method": method,
+            "route": route.label(),
+            "status": status,
+            "latency_ms": (latency.as_secs_f64() * 1000.0 * 1000.0).round() / 1000.0,
+            "outcome": outcome(status),
+        })
+    );
+    response
+}
+
+fn outcome(status: u16) -> &'static str {
+    match status {
+        200..=299 => "ok",
+        413 => "guard_rejection",
+        502 => "upstream_error",
+        504 => "upstream_timeout",
+        400..=499 => "client_error",
+        _ => "error",
+    }
+}
+
+async fn metrics_handler(State(state): State<AppState>) -> Response {
+    (
+        StatusCode::OK,
+        [("content-type", "text/plain; version=0.0.4")],
+        state.metrics.render(),
+    )
+        .into_response()
 }
 
 /// Chat completions passthrough: forward the request untouched, then either
@@ -127,6 +195,7 @@ async fn chat_completions(
                 }
             };
             if buffered.len() + data.len() > MAX_REQUEST_BYTES {
+                state.metrics.guard_rejected();
                 return error_response(
                     StatusCode::PAYLOAD_TOO_LARGE,
                     "invalid_request_error",
@@ -164,13 +233,19 @@ async fn chat_completions(
     .await
     {
         Ok(Ok(res)) => res,
-        Ok(Err(_)) => return bad_gateway(),
-        Err(_) => return gateway_timeout(),
+        Ok(Err(_)) => {
+            state.metrics.upstream_error(UpstreamErrorKind::Transport);
+            return bad_gateway();
+        }
+        Err(_) => {
+            state.metrics.upstream_error(UpstreamErrorKind::Timeout);
+            return gateway_timeout();
+        }
     };
     let status =
         StatusCode::from_u16(upstream.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
     if !status.is_success() {
-        return upstream_error(status, upstream, state.timeouts.total).await;
+        return upstream_error(status, upstream, state.timeouts.total, &state.metrics).await;
     }
     let is_stream = upstream
         .headers()
@@ -178,12 +253,15 @@ async fn chat_completions(
         .and_then(|value| value.to_str().ok())
         .is_some_and(|content_type| content_type.contains("text/event-stream"));
     if is_stream {
-        return stream_response(status, upstream, state.timeouts.idle);
+        return stream_response(status, upstream, state.timeouts.idle, state.metrics.clone());
     }
     let content_type = upstream.headers().get(CONTENT_TYPE).cloned();
     let bytes = match tokio::time::timeout(state.timeouts.total, upstream.bytes()).await {
         Ok(Ok(bytes)) => bytes,
-        _ => return gateway_timeout(),
+        _ => {
+            state.metrics.upstream_error(UpstreamErrorKind::Timeout);
+            return gateway_timeout();
+        }
     };
     let mut response = Response::builder().status(status);
     if let Some(content_type) = content_type {
@@ -197,13 +275,27 @@ async fn chat_completions(
 /// SSE passthrough: forward each chunk as it arrives, preserving bytes and
 /// order. A stalled or broken stream ends the client stream — the status was
 /// already sent, so there is nothing left to map it to.
-fn stream_response(status: StatusCode, upstream: reqwest::Response, idle: Duration) -> Response {
-    let stream = futures_util::stream::unfold(upstream, move |mut res| async move {
-        match tokio::time::timeout(idle, res.chunk()).await {
-            Ok(Ok(Some(bytes))) => Some((Ok::<Bytes, reqwest::Error>(bytes), res)),
-            _ => None,
-        }
-    });
+fn stream_response(
+    status: StatusCode,
+    upstream: reqwest::Response,
+    idle: Duration,
+    metrics: Arc<Metrics>,
+) -> Response {
+    let stream =
+        futures_util::stream::unfold((upstream, metrics), move |(mut res, metrics)| async move {
+            match tokio::time::timeout(idle, res.chunk()).await {
+                Ok(Ok(Some(bytes))) => Some((Ok::<Bytes, reqwest::Error>(bytes), (res, metrics))),
+                Err(_) => {
+                    metrics.upstream_error(UpstreamErrorKind::Timeout);
+                    None
+                }
+                Ok(Err(_)) => {
+                    metrics.upstream_error(UpstreamErrorKind::Transport);
+                    None
+                }
+                Ok(Ok(None)) => None,
+            }
+        });
     Response::builder()
         .status(status)
         .header(CONTENT_TYPE, "text/event-stream")
@@ -217,10 +309,19 @@ async fn upstream_error(
     status: StatusCode,
     upstream: reqwest::Response,
     total: Duration,
+    metrics: &Metrics,
 ) -> Response {
+    metrics.upstream_error(if status.is_client_error() {
+        UpstreamErrorKind::Status4xx
+    } else {
+        UpstreamErrorKind::Status5xx
+    });
     let bytes = match tokio::time::timeout(total, upstream.bytes()).await {
         Ok(Ok(bytes)) => bytes,
-        _ => return gateway_timeout(),
+        _ => {
+            metrics.upstream_error(UpstreamErrorKind::Timeout);
+            return gateway_timeout();
+        }
     };
     if serde_json::from_slice::<serde_json::Value>(&bytes)
         .ok()
