@@ -39,6 +39,10 @@ Docker-based local dev (see `docker/`):
   runs (`compose.perf.yaml`, full harness in Iter 3).
 - A health-only load scaffold (`tests/load/run.sh`) for session, latency,
   and resource smoke runs before chat workloads exist.
+- An opt-in live integration check (`tests/integration/<lang>/`) that
+  calls OpenRouter directly and through the gateway, then compares. It
+  needs `OPENROUTER_API_KEY` in `.env` (gitignored, never committed) and
+  a running gateway; without a key it skips. Never runs in CI.
 - No secrets in the repo: backend keys travel with requests, not config.
 
 ## Configuration
