@@ -45,6 +45,11 @@ All documentation lives in [`docs/`](docs/README.md) (Markdown only):
 - [Platform](docs/platform.md) — deployment track and delivery pipelines.
 - [Future](docs/future.md) — explicitly deferred ideas.
 
+## Releases
+
+Every merge to `main` ships as a Git tag `v0.<minor>.0` (starting at
+`v0.1.0`); all workspace crates share that version.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
