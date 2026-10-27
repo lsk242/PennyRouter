@@ -51,8 +51,9 @@ This is a proposal to confirm in review, not a locked choice.
 
 Each publish is a versioned artifact: DB file plus version and checksum.
 Gateway hosts fetch (or receive) the artifact, verify it, and swap it in
-atomically; a failed or stale sync never breaks serving. Initial
-delivery can be a local file copy; remote hosts later.
+atomically; a failed or stale sync never breaks serving. Local delivery
+is a mounted volume (`catalog-data`) the gateway mounts read-only;
+remote hosts later.
 
 ## Operations
 
@@ -61,6 +62,19 @@ delivery can be a local file copy; remote hosts later.
   (Gateway request keys still travel with requests; the sync needs none
   of them.)
 - Never serves gateway traffic; never shares a process with the gateway.
+
+## Deployment
+
+- Image: `docker/Dockerfile.catalog` ships `catalog-sync` and
+  `catalog-process` on debian-slim. One cycle by default; set
+  `SYNC_INTERVAL` (seconds) to loop on a schedule.
+- Local compose (`compose.yaml`): the `catalog-sync` service writes to
+  the shared `catalog-data` volume, which the gateway mounts read-only.
+  Input is the fixture tree mounted at `/input` until live fetching
+  lands. Prod compose stays gateway-only; remote catalog delivery is a
+  later step.
+- CI (`rust.yml`): workspace test/fmt/clippy gate plus a catalog image
+  build with a one-shot sync smoke test.
 
 ## Repo layout
 

@@ -2,6 +2,8 @@
 # Usage (from the repo root):
 #   cp -n .env.example .env   # once; optional, defaults work without it
 #   docker compose up --build
+# The catalog-sync service writes versioned DB artifacts to the shared
+# catalog-data volume, which the gateway mounts read-only.
 services:
   gateway:
     build:
@@ -10,6 +12,27 @@ services:
     image: ${IMAGE:-pennyrouter:dev}
     ports:
       - "${HOST_PORT:-3000}:${PORT:-3000}"
+    # Lets the container reach host-run mocks (perf comparison) via
+    # http://host.docker.internal:<port>. Harmless for normal dev.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       PORT: ${PORT:-3000}
       OPENROUTER_BASE_URL: ${OPENROUTER_BASE_URL:-https://openrouter.ai}
+    volumes:
+      - catalog-data:/catalog:ro
+  catalog-sync:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.catalog
+    image: ${CATALOG_IMAGE:-pennyrouter-catalog:dev}
+    volumes:
+      - catalog-data:/catalog
+      # Fixture input until live fetching lands.
+      - ./crates/catalog/tests/fixtures:/input:ro
+    environment:
+      SYNC_INTERVAL: ${SYNC_INTERVAL:-3600}
+    restart: unless-stopped
+
+volumes:
+  catalog-data:

@@ -1,0 +1,133 @@
+//! Phase 2a: deterministic processing fills indexed columns from payloads.
+
+mod common;
+
+use common::{fixtures_dir, synced_db};
+use pennyrouter_catalog::{publish, run_processing, verify, Catalog};
+use std::fs;
+
+const PROCESSED_AT: &str = "2026-01-02T03:04:05Z";
+
+fn processed_db(test: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    let (dir, db) = synced_db(test);
+    let catalog = Catalog::open(&db).unwrap();
+    let summary = run_processing(&catalog, PROCESSED_AT).unwrap();
+    assert_eq!(summary.processed, 4);
+    drop(catalog);
+    (dir, db)
+}
+
+#[test]
+fn processing_fills_expected_indexed_values() {
+    let (_dir, db) = processed_db("values");
+    let catalog = Catalog::open(&db).unwrap();
+
+    // File order preserved (ORDER BY id).
+    let eps = catalog.endpoints_for("openai/gpt-6.1-terra-pro").unwrap();
+    assert_eq!(eps.len(), 3);
+    assert_eq!(eps[0].price_prompt, Some(0.0000005));
+    assert_eq!(eps[0].price_completion, Some(0.0000025));
+    assert_eq!(eps[0].price_cache_read, Some(0.000000025));
+    assert_eq!(eps[0].price_cache_write, Some(0.000000625));
+    assert_eq!(eps[0].precision_class.as_deref(), Some("unknown"));
+    assert_eq!(eps[0].promo_discount, Some(0.0));
+    assert_eq!(eps[0].processed_at.as_deref(), Some(PROCESSED_AT));
+    // Second offering carries different prices.
+    assert_eq!(eps[1].price_prompt, Some(0.000001));
+
+    // fp8 quantization maps to the fp8 class; absent cache prices stay NULL.
+    let tencent = &catalog.endpoints_for("tencent/hy-mt2-1.8b").unwrap()[0];
+    assert_eq!(tencent.price_prompt, Some(0.000000044));
+    assert_eq!(tencent.price_completion, Some(0.000000177));
+    assert_eq!(tencent.price_cache_read, None);
+    assert_eq!(tencent.price_cache_write, None);
+    assert_eq!(tencent.precision_class.as_deref(), Some("fp8"));
+
+    // Raw payloads preserved: stored JSON still matches the fixture.
+    let fixture: serde_json::Value = serde_json::from_slice(
+        &fs::read(fixtures_dir().join("endpoints/openai__gpt-6.1-terra-pro.json")).unwrap(),
+    )
+    .unwrap();
+    let stored: serde_json::Value = serde_json::from_str(&eps[0].payload).unwrap();
+    assert_eq!(stored, fixture["data"]["endpoints"][0]);
+}
+
+#[test]
+fn processing_is_idempotent() {
+    let (_dir, db) = processed_db("idempotent");
+    let catalog = Catalog::open(&db).unwrap();
+    let summary = run_processing(&catalog, "2026-06-06T06:06:06Z").unwrap();
+    assert_eq!(summary.processed, 4);
+    assert_eq!(catalog.counts().unwrap(), (3, 4));
+    let eps = catalog.endpoints_for("openai/gpt-6.1-terra-pro").unwrap();
+    assert_eq!(eps[0].price_prompt, Some(0.0000005));
+    assert_eq!(eps[0].processed_at.as_deref(), Some("2026-06-06T06:06:06Z"));
+}
+
+#[test]
+fn migration_v1_to_v2_preserves_data() {
+    use rusqlite::{params, Connection};
+
+    // Legacy v1 layout, as Phase 1 created it.
+    let dir = common::scratch("migrate");
+    let db = dir.join("v1.db");
+    {
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(pennyrouter_catalog::V1_DDL).unwrap();
+        conn.execute(
+            "INSERT INTO models (model_id, name, source, payload, fetched_at)
+             VALUES (?1, 'n', 'openrouter', '{}', 't')",
+            params!["m/id"],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO endpoints (model_id, provider_name, payload, fetched_at)
+             VALUES (?1, 'p', '{}', 't')",
+            params!["m/id"],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_meta (key, value) VALUES ('schema_version', '1')",
+            [],
+        )
+        .unwrap();
+    }
+
+    // Open migrates: indexed columns exist and start NULL, data intact.
+    let catalog = Catalog::open(&db).unwrap();
+    catalog.init().unwrap();
+    let eps = catalog.endpoints_for("m/id").unwrap();
+    assert_eq!(eps.len(), 1);
+    assert_eq!(eps[0].price_prompt, None);
+    assert_eq!(eps[0].precision_class, None);
+    assert_eq!(eps[0].processed_at, None);
+    assert_eq!(
+        catalog.get_meta("schema_version").unwrap().as_deref(),
+        Some("2")
+    );
+
+    // Processing works on the migrated DB.
+    run_processing(&catalog, PROCESSED_AT).unwrap();
+    let eps = catalog.endpoints_for("m/id").unwrap();
+    assert_eq!(eps[0].price_prompt, None); // '{}' has no pricing
+    assert_eq!(eps[0].precision_class.as_deref(), Some("unknown"));
+    assert_eq!(eps[0].processed_at.as_deref(), Some(PROCESSED_AT));
+}
+
+#[test]
+fn sync_process_publish_pipeline() {
+    // The composition `--process` performs: published artifact verifies
+    // and carries indexed values.
+    let (dir, db) = synced_db("pipeline");
+    let catalog = Catalog::open(&db).unwrap();
+    run_processing(&catalog, PROCESSED_AT).unwrap();
+    drop(catalog);
+    let out = dir.join("out");
+    let (db_path, manifest_path, _) = publish(&db, &out, "openrouter", 3, 4).unwrap();
+    assert!(verify(&manifest_path).unwrap());
+    let catalog = Catalog::open(&db_path).unwrap();
+    catalog.init().unwrap();
+    let eps = catalog.endpoints_for("openai/gpt-6.1-terra-pro").unwrap();
+    assert_eq!(eps[0].price_prompt, Some(0.0000005));
+    assert_eq!(eps[0].processed_at.as_deref(), Some(PROCESSED_AT));
+}

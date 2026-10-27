@@ -18,12 +18,16 @@ adds value on its own. Detail and acceptance criteria live in
       response. Test: mock-backend integration + fixture byte-equality,
       `cargo test`, real-binary smoke, and Docker build + `/health` smoke
       all passed locally; no routing or DB code involved.
-- [ ] **Iter 2 — Streaming + guards.** SSE streaming passthrough, timeouts,
-      error mapping, 1M-token guard. Test: chunked fixture streams intact;
-      oversize request rejected before touching the backend.
-- [ ] **Iter 3 — Observability + perf baseline.** Latency histogram, basic
-      metrics/logs, load harness, 1 CPU / 1 GB Docker profile. Test: report
-      gateway overhead vs. direct-to-backend under load.
+- [x] **Iter 2 — Streaming + guards.** SSE streaming passthrough, timeouts,
+      error mapping, 1M-token guard. Test: chunked fixture streams intact
+      (byte-equality + incremental delivery + idle cutoff); oversize
+      rejected pre-backend; errors mapped; `cargo test`, real-binary smoke,
+      and Docker build + `/health` smoke all passed locally.
+- [x] **Iter 3 — Observability + perf baseline.** Latency histogram, basic
+      metrics/logs, load harness, 1 CPU / 1 GB Docker profile. Test:
+      compare run reported gateway overhead vs. direct-to-mock under load
+      (json +0.26ms p50 / +0.40ms p99, sse +0.16ms / −0.10ms, 0 errors);
+      `cargo test`, fmt, and Docker build + smoke all passed locally.
 - [ ] **Iter 4 — Catalog sync track.** Separate `catalog-sync` process
       delivers a versioned catalog DB artifact (breakdown in
       [docs/catalog-sync-todo.md](docs/catalog-sync-todo.md)). Test:

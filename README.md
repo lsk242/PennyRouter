@@ -46,6 +46,11 @@ All documentation lives in [`docs/`](docs/README.md) (Markdown only):
 - [Cloud providers](docs/cloud-providers.md) — price/feature comparison.
 - [Future](docs/future.md) — explicitly deferred ideas.
 
+## Releases
+
+Every merge to `main` ships as a Git tag `v0.<minor>.0` (starting at
+`v0.1.0`); all workspace crates share that version.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
