@@ -45,7 +45,9 @@ Docker-based local dev (see `docker/`):
 
 Keep config minimal and env-based (`.env`, see [`.env.example`](../.env.example)):
 `PORT` (container port), `HOST_PORT` (published port), `IMAGE` (dev:
-tag for the local build; prod: image to pull). No local key store:
+tag for the local build; prod: image to pull), `OPENROUTER_BASE_URL`
+(upstream for chat completions, default `https://openrouter.ai`).
+No local key store:
 backend keys travel with requests, never in config or fixtures.
 
 ## Observability
