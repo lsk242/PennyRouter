@@ -10,6 +10,10 @@ services:
     image: ${IMAGE:-pennyrouter:dev}
     ports:
       - "${HOST_PORT:-3000}:${PORT:-3000}"
+    # Lets the container reach host-run mocks (perf comparison) via
+    # http://host.docker.internal:<port>. Harmless for normal dev.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       PORT: ${PORT:-3000}
       OPENROUTER_BASE_URL: ${OPENROUTER_BASE_URL:-https://openrouter.ai}
