@@ -18,9 +18,11 @@ adds value on its own. Detail and acceptance criteria live in
       response. Test: mock-backend integration + fixture byte-equality,
       `cargo test`, real-binary smoke, and Docker build + `/health` smoke
       all passed locally; no routing or DB code involved.
-- [ ] **Iter 2 — Streaming + guards.** SSE streaming passthrough, timeouts,
-      error mapping, 1M-token guard. Test: chunked fixture streams intact;
-      oversize request rejected before touching the backend.
+- [x] **Iter 2 — Streaming + guards.** SSE streaming passthrough, timeouts,
+      error mapping, 1M-token guard. Test: chunked fixture streams intact
+      (byte-equality + incremental delivery + idle cutoff); oversize
+      rejected pre-backend; errors mapped; `cargo test`, real-binary smoke,
+      and Docker build + `/health` smoke all passed locally.
 - [ ] **Iter 3 — Observability + perf baseline.** Latency histogram, basic
       metrics/logs, load harness, 1 CPU / 1 GB Docker profile. Test: report
       gateway overhead vs. direct-to-backend under load.
