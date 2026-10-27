@@ -54,6 +54,17 @@ tag for the local build; prod: image to pull), `OPENROUTER_BASE_URL`
 No local key store:
 backend keys travel with requests, never in config or fixtures.
 
+## Guards and timeouts
+
+From Iter 2: request bodies estimating over 1M tokens (~4 MiB at 4
+bytes/token) are rejected with 413 before contacting the backend.
+Upstream budgets are connect 10s, first response 30s, stream idle 60s
+per chunk, and 300s total for buffered responses; timeouts answer 504.
+Upstream JSON errors pass through; anything else is wrapped in an
+OpenAI-shaped error keeping the upstream status. A stalled stream ends
+the client stream — the 200 was already sent, so there is nothing left
+to map it to.
+
 ## Observability
 
 From Iter 3: structured logs with request ID, provider, model, snapshot

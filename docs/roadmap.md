@@ -42,7 +42,7 @@ itself. No iteration may depend on a later one.
   `/health` smoke all passed. Upstream configurable via
   `OPENROUTER_BASE_URL` (default `https://openrouter.ai`).
 
-## Iter 2 — Streaming + guards
+## Iter 2 — Streaming + guards (done)
 
 - Goal: SSE streaming passthrough, timeouts, upstream error mapping,
   1M-token guard.
@@ -50,6 +50,13 @@ itself. No iteration may depend on a later one.
   without touching the backend.
 - Test: chunked fixture streams through intact; oversize request rejected
   pre-backend; backend errors map to sane OpenAI-shaped errors.
+- Landed: `cargo test` (9 passed: health, passthrough, streaming,
+  guards), real-binary smoke (incremental SSE, 413, error wrap), and
+  Docker build + `/health` smoke all passed. Streams key off the
+  upstream content type; budgets are connect 10s / first response 30s /
+  stream idle 60s / buffered total 300s; the token guard estimates
+  bytes/4 and rejects over 1M (~4 MiB) with 413 before contacting the
+  backend.
 
 ## Iter 3 — Observability + perf baseline
 
