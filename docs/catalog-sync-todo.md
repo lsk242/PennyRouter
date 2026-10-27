@@ -15,3 +15,7 @@ milestones stay in [../TODO.md](../TODO.md).
 - [ ] **Phase 2b — Processing (AI-assisted).** Model-judged signals fill
       further indexed columns. Test: recorded-output fixtures yield
       expected values; no live model calls in tests.
+- [x] **Phase 3 — Local deployment.** Containerized scheduled sync with
+      volume-shared artifact (gateway read-only) + CI gates. Test:
+      image builds; one-shot smoke publishes a readable artifact;
+      compose renders.

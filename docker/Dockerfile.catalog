@@ -1,0 +1,23 @@
+# Catalog sync image: catalog-sync + catalog-process (no gateway).
+# The sync container writes versioned DB artifacts to /catalog (a shared
+# volume the gateway mounts read-only) from input JSON at /input (ro).
+# One cycle by default; set SYNC_INTERVAL>0 to loop on a schedule.
+FROM rust:1-bookworm AS builder
+WORKDIR /app
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+RUN cargo build --release -p pennyrouter-catalog
+
+FROM debian:bookworm-slim
+RUN useradd -m app
+COPY docker/catalog-entrypoint.sh /usr/local/bin/catalog-entrypoint
+COPY --from=builder /app/target/release/catalog-sync /usr/local/bin/catalog-sync
+COPY --from=builder /app/target/release/catalog-process /usr/local/bin/catalog-process
+RUN chmod +x /usr/local/bin/catalog-entrypoint \
+ && mkdir -p /catalog /input && chown app:app /catalog
+USER app
+ENV MODELS=/input/models.json \
+    ENDPOINTS_DIR=/input/endpoints \
+    OUT_DIR=/catalog \
+    SYNC_INTERVAL=0
+CMD ["/usr/local/bin/catalog-entrypoint"]

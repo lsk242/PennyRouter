@@ -3,7 +3,7 @@
 mod common;
 
 use common::{fixtures_dir, synced_db};
-use pennyrouter_catalog::{run_processing, Catalog};
+use pennyrouter_catalog::{publish, run_processing, verify, Catalog};
 use std::fs;
 
 const PROCESSED_AT: &str = "2026-01-02T03:04:05Z";
@@ -111,5 +111,23 @@ fn migration_v1_to_v2_preserves_data() {
     let eps = catalog.endpoints_for("m/id").unwrap();
     assert_eq!(eps[0].price_prompt, None); // '{}' has no pricing
     assert_eq!(eps[0].precision_class.as_deref(), Some("unknown"));
+    assert_eq!(eps[0].processed_at.as_deref(), Some(PROCESSED_AT));
+}
+
+#[test]
+fn sync_process_publish_pipeline() {
+    // The composition `--process` performs: published artifact verifies
+    // and carries indexed values.
+    let (dir, db) = synced_db("pipeline");
+    let catalog = Catalog::open(&db).unwrap();
+    run_processing(&catalog, PROCESSED_AT).unwrap();
+    drop(catalog);
+    let out = dir.join("out");
+    let (db_path, manifest_path, _) = publish(&db, &out, "openrouter", 3, 4).unwrap();
+    assert!(verify(&manifest_path).unwrap());
+    let catalog = Catalog::open(&db_path).unwrap();
+    catalog.init().unwrap();
+    let eps = catalog.endpoints_for("openai/gpt-6.1-terra-pro").unwrap();
+    assert_eq!(eps[0].price_prompt, Some(0.0000005));
     assert_eq!(eps[0].processed_at.as_deref(), Some(PROCESSED_AT));
 }

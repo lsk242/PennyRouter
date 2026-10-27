@@ -4,26 +4,33 @@
 //! response body and `--endpoints-dir` holds one `GET
 //! /models/{id}/endpoints` body per model, named `<id with '/' as
 //! '__'>.json`. Live fetching plugs in later.
+//!
+//! `--process` fills the indexed columns on the work DB before publish,
+//! so the artifact ships with processing applied.
 
-use pennyrouter_catalog::{load_endpoints_dir, now_rfc3339, publish, run_fixture_sync, Catalog};
+use pennyrouter_catalog::{
+    load_endpoints_dir, now_rfc3339, publish, run_fixture_sync, run_processing, Catalog,
+};
 use std::fs;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 fn usage() -> &'static str {
-    "usage: catalog-sync --models <models.json> --endpoints-dir <dir> --out <dir>"
+    "usage: catalog-sync --models <models.json> --endpoints-dir <dir> --out <dir> [--process]"
 }
 
 struct Args {
     models: PathBuf,
     endpoints_dir: PathBuf,
     out: PathBuf,
+    process: bool,
 }
 
 fn parse_args(argv: &[String]) -> Result<Args, String> {
     let mut models = None;
     let mut endpoints_dir = None;
     let mut out = None;
+    let mut process = false;
     let mut it = argv.iter().skip(1);
     while let Some(arg) = it.next() {
         let (key, inline) = match arg.split_once('=') {
@@ -43,6 +50,12 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
             "--models" => models = Some(PathBuf::from(value("--models")?)),
             "--endpoints-dir" => endpoints_dir = Some(PathBuf::from(value("--endpoints-dir")?)),
             "--out" => out = Some(PathBuf::from(value("--out")?)),
+            "--process" => {
+                if inline.is_some() {
+                    return Err("--process takes no value".to_string());
+                }
+                process = true;
+            }
             "--help" | "-h" => return Err("help".to_string()),
             other => return Err(format!("unknown flag: {other}")),
         }
@@ -51,6 +64,7 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
         models: models.ok_or_else(|| "--models is required".to_string())?,
         endpoints_dir: endpoints_dir.ok_or_else(|| "--endpoints-dir is required".to_string())?,
         out: out.ok_or_else(|| "--out is required".to_string())?,
+        process,
     })
 }
 
@@ -82,6 +96,9 @@ fn run() -> Result<(), String> {
         &fetched_at,
     )
     .map_err(|e| e.to_string())?;
+    if args.process {
+        run_processing(&catalog, &fetched_at).map_err(|e| e.to_string())?;
+    }
     drop(catalog);
     let (_db, manifest_path, manifest) = publish(
         &work_db,
@@ -94,9 +111,10 @@ fn run() -> Result<(), String> {
     let _ = fs::remove_file(&work_db);
 
     println!(
-        "synced {} models, {} endpoints -> {} (version {})",
+        "synced {} models, {} endpoints{} -> {} (version {})",
         summary.model_count,
         summary.endpoint_count,
+        if args.process { " (processed)" } else { "" },
         manifest_path.display(),
         manifest.version
     );

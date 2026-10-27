@@ -33,7 +33,18 @@ one. Gateway-side milestones stay in [roadmap.md](roadmap.md).
 - Test: fixtures with recorded model outputs yield the expected indexed
   values; no live model calls in tests.
 
+## Phase 3 — Local deployment
+
+- Goal: the sync runs containerized on a schedule, sharing its DB
+  artifact with the gateway through a mounted volume (gateway
+  read-only); CI gates the Rust workspace and the catalog image.
+- Value: the deployment shape is proven early — image, schedule,
+  volume contract — before live data and gateway consumption land.
+- Test: catalog image builds; one-shot container publishes an artifact
+  a read-only mount can see; compose file renders.
+
 ## Later
 
-Additional sources beyond OpenRouter, scheduling/ops hardening, and
-retention policy — pulled forward deliberately, never by default.
+Additional sources beyond OpenRouter, live fetching, remote artifact
+delivery, retention policy — pulled forward deliberately, never by
+default.
