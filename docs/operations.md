@@ -67,9 +67,21 @@ Keep config minimal and env-based (`.env`, see [`.env.example`](../.env.example)
 tag for the local build; prod: image to pull), `OPENROUTER_BASE_URL`
 (upstream for chat completions, default `https://openrouter.ai`),
 `CATALOG_DB` (catalog artifact for routing: directory, manifest, or DB
-file — unset means plain passthrough).
+file — unset means plain passthrough). A directory also serves the
+newest verified ranking artifact when one exists (see
+[ranking-index.md](ranking-index.md)).
 No local key store:
 backend keys travel with requests, never in config or fixtures.
+
+## Ranking
+
+From Iter 6: `catalog-rank` rebuilds the provider ranking offline from
+the catalog DB plus optional trends and recorded AI adjustments, and
+publishes a versioned `ranking-<version>.json` artifact beside the DB.
+The sync container runs it every cycle (`TRENDS`/`ASSIST` inputs
+default to the `/input` fixtures when present). The gateway picks the
+ranking up from its `CATALOG_DB` directory automatically and keeps
+serving the last good one when a rebuild fails or is missing.
 
 ## Guards and timeouts
 

@@ -37,9 +37,11 @@ adds value on its own. Detail and acceptance criteria live in
       lookup; sticky provider per session to preserve cache. Test: routing
       unit tests + passthrough with forced provider; default needs no tags;
       `cargo test`, clippy, fmt, and Docker build + smoke all passed.
-- [ ] **Iter 6 — Ranking index.** Periodic AI-assisted rebuild of provider
+- [x] **Iter 6 — Ranking index.** Periodic AI-assisted rebuild of provider
       ranking + per-app usage trends. Test: rebuild from fixtures yields the
-      expected stable ordering; realtime path still a single lookup.
+      expected stable ordering; realtime path still a single lookup
+      (routing tests still pass); `cargo test`, clippy, fmt, Docker
+      build + smoke all passed.
 - [ ] **Iter 7 — Price model v1.** Input/output/cache price abstraction,
       free/promo windows, generic `openrouter/free` handling — no classifier.
       Test: pricing fixtures (promo active/expired, cache-heavy/mixed) select

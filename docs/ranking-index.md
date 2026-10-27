@@ -48,3 +48,31 @@ cheaper".
 
 Ranking work never happens per request. If the ranker lags or fails, the
 router keeps serving the last good index.
+
+## Status (Iter 6)
+
+- `catalog-rank --db <catalog.db> --out <dir> [--trends <t.json>]
+  [--assist <a.json>]` rebuilds the ranking offline and publishes
+  `ranking-<version>.json` + manifest sidecar (content-hash versioned,
+  hash-verified on load, like the catalog artifact).
+- Ordering per model, precision class, and orientation (default/price/
+  quality). Formulas, best-first: default = tier, error rate, price,
+  latency; price = price, error rate, tier, latency; quality = tier,
+  score, error rate, price; provider/tag break ties so rebuilds are
+  byte-stable. Unknown error rates count as zero; unknown latencies
+  sort after known ones.
+- Trends file: per-app `{app, model_id, provider_name, requests,
+  errors, avg_latency_ms}` records aggregated per (model, provider).
+  Live traffic collection is future work — the file is the interface.
+- Assist file: recorded `{model_id, provider_name, action:
+  prefer|avoid, reason}` overrides (no live model calls); prefer
+  floats a provider to the front of its group, avoid sinks it.
+  Unknown records are ignored, never an error.
+- Gateway: `CATALOG_DB` directories auto-load the newest verified
+  ranking; uncovered models fall back to the same formulas inline;
+  stale entries are skipped and new offerings append, so a stale
+  ranking never drops a live offering. `reload`/`swap_ranking` rotate
+  artifacts without dropping the last good one.
+- Promo/free expiry stays out: the ranker reads `promo_discount` as a
+  plain fact; time-boxed promo semantics land with the price model
+  (Iter 7).
