@@ -43,6 +43,7 @@ All documentation lives in [`docs/`](docs/README.md) (Markdown only):
 - [Performance](docs/performance.md) — budgets and benchmarking.
 - [Operations](docs/operations.md) — Docker dev, config, observability.
 - [Platform](docs/platform.md) — deployment track and delivery pipelines.
+- [Cloud providers](docs/cloud-providers.md) — price/feature comparison.
 - [Future](docs/future.md) — explicitly deferred ideas.
 
 ## Releases
