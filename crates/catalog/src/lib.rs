@@ -4,15 +4,17 @@
 //! the DB format both sides share. See `docs/catalog-sync-architecture.md`.
 
 mod artifact;
+mod judge;
 mod process;
 mod schema;
 mod store;
 mod sync;
 
 pub use artifact::{now_rfc3339, publish, sha256_hex, verify, Manifest};
+pub use judge::{endpoint_tag, run_judging, Judge, JudgeSummary, NullJudge, RecordedJudge};
 pub use process::{run_processing, ProcessSummary};
 pub use schema::{SCHEMA_VERSION, V1_DDL};
-pub use store::{Catalog, EndpointIndex, EndpointRow, ModelRow};
+pub use store::{Catalog, EndpointIndex, EndpointJudgment, EndpointRow, ModelRow};
 pub use sync::{load_endpoints_dir, run_fixture_sync, Summary};
 
 use std::fmt;

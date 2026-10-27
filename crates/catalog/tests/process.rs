@@ -65,7 +65,7 @@ fn processing_is_idempotent() {
 }
 
 #[test]
-fn migration_v1_to_v2_preserves_data() {
+fn migration_v1_to_current_preserves_data() {
     use rusqlite::{params, Connection};
 
     // Legacy v1 layout, as Phase 1 created it.
@@ -101,9 +101,12 @@ fn migration_v1_to_v2_preserves_data() {
     assert_eq!(eps[0].price_prompt, None);
     assert_eq!(eps[0].precision_class, None);
     assert_eq!(eps[0].processed_at, None);
+    assert_eq!(eps[0].quality_tier, None);
+    assert_eq!(eps[0].quality_score, None);
+    assert_eq!(eps[0].judged_at, None);
     assert_eq!(
         catalog.get_meta("schema_version").unwrap().as_deref(),
-        Some("2")
+        Some("3")
     );
 
     // Processing works on the migrated DB.

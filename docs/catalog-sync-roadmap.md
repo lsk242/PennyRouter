@@ -25,13 +25,17 @@ one. Gateway-side milestones stay in [roadmap.md](roadmap.md).
 - Test: processing fixtures yield the expected indexed values; raw
   payloads preserved.
 
-## Phase 2b — Processing (AI-assisted)
+## Phase 2b — Processing (AI-assisted) (done)
 
 - Goal: model-judged signals (e.g. quality flags) fill further indexed
   columns behind the hook Phase 2a establishes.
 - Value: judgment-based facts that pure extraction cannot produce.
 - Test: fixtures with recorded model outputs yield the expected indexed
   values; no live model calls in tests.
+- Landed: `Judge` trait + `RecordedJudge` (validated JSON: tier
+  high/standard/low, score 0–1, tag-narrowed matching) fill
+  `quality_tier`/`quality_score`/`judged_at` (schema v3) via
+  `catalog-process --judge`; `cargo test`, clippy, and fmt pass.
 
 ## Phase 3 — Local deployment
 

@@ -12,7 +12,7 @@ milestones stay in [../TODO.md](../TODO.md).
       into fixed indexed columns with pure-code extraction (normalized
       price parts, precision class, promo discount). Test: processing
       fixtures yield expected indexed values; raw payloads preserved.
-- [ ] **Phase 2b — Processing (AI-assisted).** Model-judged signals fill
+- [x] **Phase 2b — Processing (AI-assisted).** Model-judged signals fill
       further indexed columns. Test: recorded-output fixtures yield
       expected values; no live model calls in tests.
 - [x] **Phase 3 — Local deployment.** Containerized scheduled sync with
