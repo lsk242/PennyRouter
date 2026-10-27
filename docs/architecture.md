@@ -24,7 +24,8 @@ client
 Off the realtime path:
 
 ```text
-catalog sync (periodic) ──► raw provider/model data ──► durable local DB
+catalog-sync process (own schedule, own host) ──► catalog DB file ──► ship to gateway host(s)
+gateway host: atomic DB swap ──► snapshot rebuild ──► atomic in-memory publication
 ranker (periodic, AI-assisted) ──► ranked snapshot ──► atomic in-memory publication
 usage trends (per app/key) ──► ranker input
 ```
@@ -37,10 +38,15 @@ usage trends (per app/key) ──► ranker input
 - **Router**: pure decision function — model + filters + session stickiness
   in, provider out. Must stay a single cheap lookup against an immutable
   in-memory snapshot.
-- **Catalog**: durable local DB of models/providers plus the periodic sync
-  from OpenRouter (later other sources). Fields stay dynamic/fluid as
-  sources change. Background workers publish snapshots; requests do not
-  query the DB directly.
+- **Catalog**: durable local DB of models/providers on each gateway host,
+  written only by the catalog-sync process and read by periodic jobs
+  only. Requests never query the DB directly — they read the in-memory
+  snapshot.
+- **Catalog sync**: a separate process with its own binary, schedule, and
+  host — it may run on a different machine entirely. It writes the
+  catalog DB and ships it to each gateway host as a versioned artifact.
+  It serves no traffic; the gateway never writes the catalog. Detail:
+  [catalog-sync-architecture.md](catalog-sync-architecture.md).
 - **Ranker**: periodic job that rebuilds the ranked index with AI assistance,
   blending live metrics with usage trends. Publishes versioned snapshots
   atomically. Never on the realtime path.
@@ -59,6 +65,11 @@ usage trends (per app/key) ──► ranker input
   explicit; overload sheds load instead of growing memory without limit.
 - **Durable writes publish after commit.** Catalog updates become visible
   through a new snapshot only after the durable writes commit.
+- **Sync and gateway share nothing but the DB file.** The sync process and
+  the gateway deploy and scale independently; the versioned DB artifact is
+  their only contract. The gateway atomically swaps in each new copy and
+  rebuilds its snapshot, so a failed or stale sync never breaks serving —
+  the last good copy keeps working.
 - **Sticky provider per session.** Switching providers mid-session drops
   prompt cache, which dominates cost — stickiness beats marginal per-request
   savings.
@@ -88,7 +99,7 @@ PennyRouter/
   crates/
     gateway/              # HTTP server, OpenAI compat
     router/               # routing decisions
-    catalog/              # DB + sync
+    catalog/              # DB schema/queries + catalog-sync process
     ranker/               # periodic ranking job
     common/               # shared types, config, errors
   tests/                  # integration + load tests

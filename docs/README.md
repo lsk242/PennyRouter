@@ -13,3 +13,6 @@ All product documentation lives here, Markdown only.
 - [operations.md](operations.md) — Docker dev, config, observability.
 - [platform.md](platform.md) — deployment track and delivery pipelines.
 - [future.md](future.md) — explicitly deferred ideas.
+- [catalog-sync-architecture.md](catalog-sync-architecture.md) — sync process design, schema, DB contract.
+- [catalog-sync-roadmap.md](catalog-sync-roadmap.md) — phased sync plan.
+- [catalog-sync-todo.md](catalog-sync-todo.md) — sync iteration checklist.
