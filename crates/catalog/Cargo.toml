@@ -19,3 +19,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 time = { version = "0.3", features = ["formatting"] }
+
+[dev-dependencies]
+# Migration test builds a legacy v1 DB directly.
+rusqlite = { version = "0.37", features = ["bundled"] }

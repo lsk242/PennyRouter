@@ -94,6 +94,13 @@ pub fn run_fixture_sync(
                 })?;
             catalog.insert_endpoint(&EndpointRow {
                 id: 0,
+                price_prompt: None,
+                price_completion: None,
+                price_cache_read: None,
+                price_cache_write: None,
+                precision_class: None,
+                promo_discount: None,
+                processed_at: None,
                 model_id: model_id.clone(),
                 provider_name: provider.to_string(),
                 payload: serde_json::to_string(e)?,

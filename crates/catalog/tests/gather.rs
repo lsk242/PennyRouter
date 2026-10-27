@@ -3,42 +3,10 @@
 //! Fixtures are trimmed real OpenRouter API shapes (`GET /models` plus one
 //! `GET /models/{id}/endpoints` body per model) and contain no secrets.
 
-use pennyrouter_catalog::{
-    load_endpoints_dir, now_rfc3339, publish, run_fixture_sync, verify, Catalog,
-};
-use std::fs;
-use std::path::PathBuf;
+mod common;
 
-const MODELS: &[u8] = include_bytes!("fixtures/models.json");
-
-fn fixtures_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests")
-        .join("fixtures")
-}
-
-fn scratch(test: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("catalog-test-{test}-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
-    dir
-}
-
-fn synced_db(test: &str) -> (PathBuf, PathBuf) {
-    let dir = scratch(test);
-    let db = dir.join("work.db");
-    let catalog = Catalog::open(&db).unwrap();
-    catalog.init().unwrap();
-    let endpoints = load_endpoints_dir(&fixtures_dir().join("endpoints")).unwrap();
-    assert_eq!(endpoints.len(), 3);
-    let fetched_at = now_rfc3339().unwrap();
-    let summary =
-        run_fixture_sync(&catalog, MODELS, &endpoints, "openrouter", &fetched_at).unwrap();
-    assert_eq!(summary.model_count, 3);
-    assert_eq!(summary.endpoint_count, 4);
-    drop(catalog);
-    (dir, db)
-}
+use common::synced_db;
+use pennyrouter_catalog::{publish, run_fixture_sync, verify, Catalog};
 
 #[test]
 fn fixture_sync_populates_expected_rows() {
@@ -98,15 +66,23 @@ fn artifact_publish_verifies() {
 fn resync_mirrors_source_without_duplicates() {
     let (_dir, db) = synced_db("resync");
     let catalog = Catalog::open(&db).unwrap();
-    let endpoints = load_endpoints_dir(&fixtures_dir().join("endpoints")).unwrap();
-    let fetched_at = now_rfc3339().unwrap();
-    run_fixture_sync(&catalog, MODELS, &endpoints, "openrouter", &fetched_at).unwrap();
+    let endpoints =
+        pennyrouter_catalog::load_endpoints_dir(&common::fixtures_dir().join("endpoints")).unwrap();
+    let fetched_at = pennyrouter_catalog::now_rfc3339().unwrap();
+    run_fixture_sync(
+        &catalog,
+        common::MODELS,
+        &endpoints,
+        "openrouter",
+        &fetched_at,
+    )
+    .unwrap();
     assert_eq!(catalog.counts().unwrap(), (3, 4));
 }
 
 #[test]
 fn sync_rejects_malformed_input() {
-    let dir = scratch("malformed");
+    let dir = common::scratch("malformed");
     let catalog = Catalog::open(&dir.join("work.db")).unwrap();
     catalog.init().unwrap();
     assert!(run_fixture_sync(&catalog, b"not json", &[], "openrouter", "t").is_err());

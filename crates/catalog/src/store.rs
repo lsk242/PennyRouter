@@ -1,8 +1,8 @@
 //! SQLite store: open/init, inserts, and read queries.
 
-use crate::schema::{DDL, SCHEMA_VERSION};
+use crate::schema::{DDL, ENDPOINT_INDEXED_COLUMNS, SCHEMA_VERSION};
 use crate::Error;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, Row};
 use std::path::Path;
 
 pub struct ModelRow {
@@ -19,6 +19,45 @@ pub struct EndpointRow {
     pub provider_name: String,
     pub payload: String,
     pub fetched_at: String,
+    pub price_prompt: Option<f64>,
+    pub price_completion: Option<f64>,
+    pub price_cache_read: Option<f64>,
+    pub price_cache_write: Option<f64>,
+    pub precision_class: Option<String>,
+    pub promo_discount: Option<f64>,
+    pub processed_at: Option<String>,
+}
+
+/// Indexed values distilled from an endpoint payload by processing.
+pub struct EndpointIndex {
+    pub price_prompt: Option<f64>,
+    pub price_completion: Option<f64>,
+    pub price_cache_read: Option<f64>,
+    pub price_cache_write: Option<f64>,
+    pub precision_class: Option<String>,
+    pub promo_discount: Option<f64>,
+    pub processed_at: String,
+}
+
+const ENDPOINT_COLS: &str = "id, model_id, provider_name, payload, fetched_at,
+    price_prompt, price_completion, price_cache_read, price_cache_write,
+    precision_class, promo_discount, processed_at";
+
+fn endpoint_row(r: &Row) -> Result<EndpointRow, rusqlite::Error> {
+    Ok(EndpointRow {
+        id: r.get(0)?,
+        model_id: r.get(1)?,
+        provider_name: r.get(2)?,
+        payload: r.get(3)?,
+        fetched_at: r.get(4)?,
+        price_prompt: r.get(5)?,
+        price_completion: r.get(6)?,
+        price_cache_read: r.get(7)?,
+        price_cache_write: r.get(8)?,
+        precision_class: r.get(9)?,
+        promo_discount: r.get(10)?,
+        processed_at: r.get(11)?,
+    })
 }
 
 pub struct Catalog {
@@ -32,11 +71,49 @@ impl Catalog {
         Ok(Self { conn })
     }
 
-    /// Create tables if missing; record the schema version. Idempotent.
+    /// Create tables if missing, migrate older DBs, record the schema
+    /// version. Idempotent. Required before any other call.
     pub fn init(&self) -> Result<(), Error> {
         self.conn.execute_batch(DDL)?;
+        self.migrate()?;
+        Ok(())
+    }
+
+    /// Bring an older DB to the current schema. Idempotent.
+    fn migrate(&self) -> Result<(), Error> {
+        let stored = self.get_meta("schema_version")?;
+        let version: u32 = match stored {
+            Some(v) => v.parse().map_err(|_| {
+                Error::Schema(format!("unparseable schema_version in sync_meta: {v:?}"))
+            })?,
+            // Fresh DB: DDL is already current.
+            None => SCHEMA_VERSION,
+        };
+        if version > SCHEMA_VERSION {
+            return Err(Error::Schema(format!(
+                "db schema v{version} is newer than this binary (v{SCHEMA_VERSION})"
+            )));
+        }
+        // Table/column names are internal constants, never user input.
+        for (name, ty) in ENDPOINT_INDEXED_COLUMNS {
+            if !self.has_column("endpoints", name)? {
+                self.conn
+                    .execute_batch(&format!("ALTER TABLE endpoints ADD COLUMN {name} {ty}"))?;
+            }
+        }
         self.set_meta("schema_version", &SCHEMA_VERSION.to_string())?;
         Ok(())
+    }
+
+    fn has_column(&self, table: &str, column: &str) -> Result<bool, Error> {
+        let mut stmt = self.conn.prepare(&format!("PRAGMA table_info({table})"))?;
+        let names = stmt.query_map([], |r| r.get::<_, String>(1))?;
+        for name in names {
+            if name? == column {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// Insert or replace: re-syncs overwrite, never duplicate.
@@ -55,7 +132,8 @@ impl Catalog {
         Ok(())
     }
 
-    /// Plain insert: endpoints carry a surrogate key because one provider
+    /// Plain insert of the core columns (indexed columns stay NULL until
+    /// processing): endpoints carry a surrogate key because one provider
     /// can serve a model several ways (e.g. `openai` vs `openai/flex` tags).
     /// Syncs replace per model via `delete_endpoints_for` first.
     pub fn insert_endpoint(&self, row: &EndpointRow) -> Result<(), Error> {
@@ -72,6 +150,26 @@ impl Catalog {
         self.conn.execute(
             "DELETE FROM endpoints WHERE model_id = ?1",
             params![model_id],
+        )?;
+        Ok(())
+    }
+
+    /// Fill the indexed columns of one endpoint, leaving the payload alone.
+    pub fn update_endpoint_index(&self, id: i64, index: &EndpointIndex) -> Result<(), Error> {
+        self.conn.execute(
+            "UPDATE endpoints SET price_prompt = ?1, price_completion = ?2,
+             price_cache_read = ?3, price_cache_write = ?4, precision_class = ?5,
+             promo_discount = ?6, processed_at = ?7 WHERE id = ?8",
+            params![
+                index.price_prompt,
+                index.price_completion,
+                index.price_cache_read,
+                index.price_cache_write,
+                index.precision_class,
+                index.promo_discount,
+                index.processed_at,
+                id
+            ],
         )?;
         Ok(())
     }
@@ -97,19 +195,18 @@ impl Catalog {
     }
 
     pub fn endpoints_for(&self, model_id: &str) -> Result<Vec<EndpointRow>, Error> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, model_id, provider_name, payload, fetched_at
-             FROM endpoints WHERE model_id = ?1 ORDER BY id",
-        )?;
-        let rows = stmt.query_map(params![model_id], |r| {
-            Ok(EndpointRow {
-                id: r.get(0)?,
-                model_id: r.get(1)?,
-                provider_name: r.get(2)?,
-                payload: r.get(3)?,
-                fetched_at: r.get(4)?,
-            })
-        })?;
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {ENDPOINT_COLS} FROM endpoints WHERE model_id = ?1 ORDER BY id"
+        ))?;
+        let rows = stmt.query_map(params![model_id], endpoint_row)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Error::from)
+    }
+
+    pub fn all_endpoints(&self) -> Result<Vec<EndpointRow>, Error> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {ENDPOINT_COLS} FROM endpoints ORDER BY id"
+        ))?;
+        let rows = stmt.query_map([], endpoint_row)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Error::from)
     }
 
@@ -155,7 +252,7 @@ mod tests {
         catalog.init().unwrap();
         assert_eq!(
             catalog.get_meta("schema_version").unwrap().as_deref(),
-            Some("1")
+            Some("2")
         );
         assert_eq!(catalog.counts().unwrap(), (0, 0));
     }
