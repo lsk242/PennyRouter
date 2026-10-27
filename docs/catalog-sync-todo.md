@@ -8,7 +8,10 @@ milestones stay in [../TODO.md](../TODO.md).
       into the DB (fixed core columns + JSON payload) and publishes a
       versioned artifact. Test: fixture sync → expected rows; artifact
       has version and checksum.
-- [ ] **Phase 2 — Processing.** AI-assisted job distills payloads into
-      fixed indexed columns (normalized prices, precision class, quality
-      signals). Test: processing fixtures yield expected indexed values;
-      raw payloads preserved.
+- [x] **Phase 2a — Processing (deterministic).** Job distills payloads
+      into fixed indexed columns with pure-code extraction (normalized
+      price parts, precision class, promo discount). Test: processing
+      fixtures yield expected indexed values; raw payloads preserved.
+- [ ] **Phase 2b — Processing (AI-assisted).** Model-judged signals fill
+      further indexed columns. Test: recorded-output fixtures yield
+      expected values; no live model calls in tests.
