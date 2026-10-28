@@ -1,0 +1,32 @@
+# Dev deployment: both services, pull-only, never builds. Deployed by
+# scripts/deploy.sh like prod but with this file, its own directory,
+# and its own host port (defaults: prod 3000, dev 8003):
+#   COMPOSE_FILE=compose.dev.yaml DEPLOY_DIR=/opt/stacks/pennyrouter-dev \
+#     HOST_PORT=8003 ./scripts/deploy.sh
+# Both images come from GitHub Packages (ghcr.io), pushed by CI on every
+# merge to main. No `build:` section on purpose (CI-guarded). The
+# catalog-sync image carries its fixture input baked in, so no checkout
+# is needed on the server; it writes versioned DB artifacts to the
+# shared catalog-data volume, which the gateway mounts read-only.
+services:
+  gateway:
+    image: ${IMAGE:-ghcr.io/lsk242/pennyrouter:latest}
+    ports:
+      - "${HOST_PORT:-8003}:${PORT:-3000}"
+    environment:
+      PORT: ${PORT:-3000}
+      OPENROUTER_BASE_URL: ${OPENROUTER_BASE_URL:-https://openrouter.ai/api}
+      CATALOG_DB: /catalog
+    volumes:
+      - catalog-data:/catalog:ro
+    restart: unless-stopped
+  catalog-sync:
+    image: ${CATALOG_IMAGE:-ghcr.io/lsk242/pennyrouter-catalog:latest}
+    volumes:
+      - catalog-data:/catalog
+    environment:
+      SYNC_INTERVAL: ${SYNC_INTERVAL:-3600}
+    restart: unless-stopped
+
+volumes:
+  catalog-data:

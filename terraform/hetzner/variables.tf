@@ -77,13 +77,13 @@ variable "gateway_image" {
 variable "host_port" {
   description = "Published gateway port (bound to localhost when TLS is on)."
   type        = number
-  default     = 8003
+  default     = 3000
 }
 
 variable "openrouter_base_url" {
   description = "Upstream base URL for chat completions."
   type        = string
-  default     = "https://openrouter.ai"
+  default     = "https://openrouter.ai/api"
 }
 
 variable "enable_backups" {

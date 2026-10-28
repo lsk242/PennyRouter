@@ -26,9 +26,17 @@ generated `.env` to the server, pulls, restarts, and health-checks:
 DEPLOY_HOST=user@example.com make deploy   # or ./scripts/deploy.sh
 ```
 
+A dev deployment ships both services (gateway + catalog-sync) from
+the same pull-only images under its own directory and host port:
+
+```sh
+COMPOSE_FILE=compose.dev.yaml DEPLOY_DIR=/opt/stacks/pennyrouter-dev \
+  HOST_PORT=8003 DEPLOY_HOST=user@example.com ./scripts/deploy.sh
+```
+
 Deploy settings are env vars (see the header of
 [`scripts/deploy.sh`](../scripts/deploy.sh)): `DEPLOY_HOST` (required),
-`DEPLOY_DIR` (default `pennyrouter`), `HOST_PORT` (default `8003`,
+`DEPLOY_DIR` (default `pennyrouter`), `HOST_PORT` (default `3000`,
 published on the server), `PORT` (default `3000`, in-container),
 `IMAGE` (default the CI-built `ghcr.io` image), and
 `OPENROUTER_BASE_URL`. `DRY_RUN=1` prints what would run without

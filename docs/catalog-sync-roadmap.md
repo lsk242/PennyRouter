@@ -47,8 +47,40 @@ one. Gateway-side milestones stay in [roadmap.md](roadmap.md).
 - Test: catalog image builds; one-shot container publishes an artifact
   a read-only mount can see; compose file renders.
 
+## Phase 4 — Judge backends: Baseten + Modal (planned)
+
+- Goal: add the first live `Judge` backends behind the trait Phase 2b
+  establishes: models served on Baseten (OpenAI-compatible chat at
+  `https://inference.baseten.co/v1`, hackathon model
+  `meta-models/muse-spark-open-1026`) and Modal (endpoint shape TBD
+  from its docs). They judge OpenRouter catalog offerings into the
+  same indexed columns (`quality_tier`/`quality_score`/`judged_at`)
+  — OpenRouter stays the only catalog source; Baseten/Modal are
+  processing LLMs, not onboarded sources.
+- Value: real model judgments replace hand-written recordings in
+  production while tests stay offline and deterministic; the catalog
+  proves pluggable judge backends early, before the index needs them.
+- Test: recorded-output fixtures still yield the expected indexed
+  values with no live model calls; each live backend ships a
+  recorded fixture plus a redacted config guide; live calls are
+  explicit opt-in via env keys only (never in config, fixtures, or
+  repo); workspace gates pass.
+- Steps:
+  - Baseten judge: request/response shape, prompt + output
+    validation (tier high/standard/low, score 0–1), recorded
+    fixture, redacted config guide in `docs/` if setup is needed.
+  - Modal judge from its docs (endpoint shape, models, auth);
+    same recorded fixture → validation → test flow; config guide
+    if setup is needed.
+  - Backend selection for `catalog-process` (recorded stays the
+    default; live backends are explicit opt-in); same-input
+    determinism per the `Judge` contract.
+- Not in this phase: new catalog sources (no Baseten/Modal
+  model/endpoint rows), gateway use (single OpenRouter upstream
+  unchanged), multi-backend routing (still deferred, see
+  [future.md](future.md)).
+
 ## Later
 
-Additional sources beyond OpenRouter, live fetching, remote artifact
-delivery, retention policy — pulled forward deliberately, never by
-default.
+Further sources, live fetching, remote artifact delivery, retention
+policy — pulled forward deliberately, never by default.

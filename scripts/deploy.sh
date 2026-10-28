@@ -10,13 +10,15 @@
 # docs/architecture.md); it is not part of this deploy.
 #
 # Configuration (all via environment):
-#   DEPLOY_HOST          Required. ssh target, e.g. user@example.com.
-#   DEPLOY_DIR           Remote directory. Default: pennyrouter (in $HOME).
+#   DEPLOY_HOST          ssh target, e.g. user@example.com. Default: apps.lan.
+#   DEPLOY_DIR           Remote directory. Default: /opt/stacks/pennyrouter.
 #   COMPOSE_FILE         Local compose file to ship. Default: compose.prod.yaml.
 #                        Must be pull-only (no `build:` section, CI-enforced).
+#   REMOTE_COMPOSE       Name on the server. Default: compose.yaml, so plain
+#                        `docker compose` finds it without -f.
 #   DEPLOY_ENV_FILE      Optional. Copy this local file as the remote `.env`
 #                        instead of generating one from the vars below.
-#   HOST_PORT            Published port on the server. Default: 8003.
+#   HOST_PORT            Published port on the server. Default: 3000.
 #   PORT                 Container port. Default: 3000.
 #   IMAGE                Image to pull. Default: ghcr.io/lsk242/pennyrouter:latest.
 #   OPENROUTER_BASE_URL  Upstream base URL. Default: https://openrouter.ai/api.
@@ -31,13 +33,10 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
-if [[ -z "${DEPLOY_HOST:-}" ]]; then
-  echo "error: set DEPLOY_HOST=user@server (e.g. DEPLOY_HOST=user@example.com $0)" >&2
-  exit 2
-fi
-DEPLOY_DIR="${DEPLOY_DIR:-pennyrouter}"
-COMPOSE_FILE="${COMPOSE_FILE:-compose.prod.yaml}"
-HOST_PORT="${HOST_PORT:-8003}"
+DEPLOY_HOST="${DEPLOY_HOST:-apps.lan}"
+DEPLOY_DIR="${DEPLOY_DIR:-/opt/stacks/pennyrouter}"
+COMPOSE_FILE="${COMPOSE_FILE:-compose.dev.yaml}"
+HOST_PORT="${HOST_PORT:-3000}"
 PORT="${PORT:-3000}"
 IMAGE="${IMAGE:-ghcr.io/lsk242/pennyrouter:latest}"
 OPENROUTER_BASE_URL="${OPENROUTER_BASE_URL:-https://openrouter.ai/api}"
@@ -58,7 +57,7 @@ if grep -Eq '^[[:space:]]*build:' "$SRC"; then
   exit 1
 fi
 
-REMOTE_COMPOSE="$(basename "$COMPOSE_FILE")"
+REMOTE_COMPOSE="${REMOTE_COMPOSE:-compose.yaml}"
 ENV_FILE=""
 cleanup() {
   if [[ -n "$ENV_FILE" && -z "${DEPLOY_ENV_FILE:-}" ]]; then

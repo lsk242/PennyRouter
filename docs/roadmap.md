@@ -82,9 +82,10 @@ itself. No iteration may depend on a later one.
   serving evolve independently — they share only the DB artifact.
 - Test: fixture-produced artifact validates and loads; detail in the
   catalog-sync roadmap.
-- Landed: all catalog phases done (gathering, deterministic + AI-assisted
+- Landed: catalog phases 1–3 done (gathering, deterministic + AI-assisted
   processing, containerized deployment with CI gates); versioned artifact
-  publishes, verifies, and loads from fixtures.
+  publishes, verifies, and loads from fixtures. Phase 4 (live judge
+  backends) is planned in [catalog-sync-roadmap.md](catalog-sync-roadmap.md).
 
 ## Iter 5 — Provider routing (done)
 
@@ -154,7 +155,7 @@ Development delivers Docker images, platform delivers deployments.
   in 1a; verified with a local build + `/health` smoke test), plus a
   dev/prod compose split with `.env` settings (prod pulls the GHCR
   image, never builds) and an `scp` server deploy (`scripts/deploy.sh`
-  + `make deploy`, gateway only on host port 8003). CI runs secret
+  + `make deploy`, gateway only on host port 3000). CI runs secret
   scanning + Dependabot.
 - **Docker build + push pipeline:** workflow added in 1a; proven green
   on main (build + push + `/health` smoke) across the v0.1.0–v0.6.0

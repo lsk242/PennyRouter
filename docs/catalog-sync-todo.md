@@ -19,3 +19,9 @@ milestones stay in [../TODO.md](../TODO.md).
       volume-shared artifact (gateway read-only) + CI gates. Test:
       image builds; one-shot smoke publishes a readable artifact;
       compose renders.
+- [ ] **Phase 4 — Judge backends: Baseten + Modal.** Live
+      `Judge` backends behind the Phase 2b trait (Baseten + Modal
+      models judging OpenRouter offerings); recorded-output fixtures
+      stay the test path. Test: recorded fixtures yield expected
+      values with no live calls; live backends opt-in via env keys
+      only; gates pass.

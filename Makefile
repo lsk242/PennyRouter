@@ -19,7 +19,7 @@ help: ## Show this help.
 	@echo "  smoke        curl /health on the local gateway  [HOST_PORT=3000]"
 	@echo "  load         tests/load/run.sh (health-only scaffold)"
 	@echo "  prod-config  validate compose.prod.yaml renders"
-	@echo "  deploy       ./scripts/deploy.sh  [DEPLOY_HOST required, HOST_PORT=8003]"
+	@echo "  deploy       ./scripts/deploy.sh  [DEPLOY_HOST required, HOST_PORT=3000]"
 
 test: ## Run unit + integration tests.
 	cargo test
