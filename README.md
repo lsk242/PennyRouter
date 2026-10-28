@@ -16,9 +16,11 @@ local lookup) but the continuously re-ranked provider index behind it, which
 tracks real price, latency, throughput, and availability fluctuations that
 static sort orders miss.
 
-Status: minimal gateway (`GET /health`) + Docker setup in place;
-OpenRouter passthrough not built yet. See [TODO.md](TODO.md) for the
-iteration plan and [Operations](docs/operations.md) to run it.
+Status: gateway complete through Iter 7 — OpenAI-compatible
+passthrough (JSON + SSE streaming), provider routing, ranking index,
+and price model, with Docker and Terraform (Hetzner) deploys. See
+[TODO.md](TODO.md) for the iteration plan and
+[Operations](docs/operations.md) to run it.
 
 ## Constraints
 
