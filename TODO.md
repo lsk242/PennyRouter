@@ -30,9 +30,8 @@ adds value on its own. Detail and acceptance criteria live in
       `cargo test`, fmt, and Docker build + smoke all passed locally.
 - [x] **Iter 4 — Catalog sync track.** Separate `catalog-sync` process
       delivers a versioned catalog DB artifact (breakdown in
-      [docs/catalog-sync-todo.md](docs/catalog-sync-todo.md), phases 1–3
-      done; phase 4 planned). Test: fixture-produced artifact validates
-      and loads.
+      [docs/catalog-sync-todo.md](docs/catalog-sync-todo.md), all phases
+      done). Test: fixture-produced artifact validates and loads.
 - [x] **Iter 5 — Provider routing.** Model-name suffix filters (e.g.
       `meta/muse-spark-open/...` tags) plus a good default; one fast local
       lookup; sticky provider per session to preserve cache. Test: routing

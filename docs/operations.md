@@ -80,7 +80,13 @@ file — unset means plain passthrough). A directory also serves the
 newest verified ranking artifact when one exists (see
 [ranking-index.md](ranking-index.md)).
 No local key store:
-backend keys travel with requests, never in config or fixtures.
+backend keys travel with requests, never in config or fixtures. The
+one exception is catalog judging (Phase 4): the offline
+`catalog-process --judge-backend baseten|modal` reads judge keys from
+the environment (`BASETEN_API_KEY`, `MODAL_JUDGE_URL`, `MODAL_KEY_ID`,
+`MODAL_KEY_SECRET` — see [`.env.example`](../.env.example)). The
+gateway never reads them; without them judging stays on recorded
+fixtures. Never commit real values.
 
 ## Ranking
 

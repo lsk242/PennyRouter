@@ -2,20 +2,20 @@
 //!
 //! Deterministic extraction (Phase 2a), then model-judged signals from a
 //! recorded-output file when `--judge` is passed (Phase 2b, no live model
-//! calls) or from a live backend with `--judge-backend baseten` (Phase 4,
-//! key from `BASETEN_API_KEY`). Migrates older DBs on open.
+//! calls) or from a live backend with `--judge-backend baseten|modal`
+//! (Phase 4, keys from the environment). Migrates older DBs on open.
 //! NOTE: run before publish — processing a published artifact afterwards
 //! would invalidate its manifest hash.
 
 use pennyrouter_catalog::{
-    now_rfc3339, run_judging, run_processing, BasetenJudge, Catalog, RecordedJudge,
+    now_rfc3339, run_judging, run_processing, BasetenJudge, Catalog, ModalJudge, RecordedJudge,
 };
 use std::fs;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 fn usage() -> &'static str {
-    "usage: catalog-process --db <catalog.db> [--judge <judgments.json> | --judge-backend baseten]"
+    "usage: catalog-process --db <catalog.db> [--judge <judgments.json> | --judge-backend baseten|modal]"
 }
 
 struct Args {
@@ -73,15 +73,19 @@ fn run() -> Result<(), String> {
     if fs::metadata(&args.db).is_err() {
         return Err(format!("db not found: {}", args.db.display()));
     }
-    // Validate the live backend (and its key) before doing any work.
-    let live_judge = match &args.judge_backend {
+    // Validate the live backend (and its keys) before doing any work.
+    // Boxed: the backends are different types behind one `Judge` trait.
+    let live_judge: Option<Box<dyn pennyrouter_catalog::Judge>> = match &args.judge_backend {
         None => None,
-        Some(backend) if backend == "baseten" => {
-            Some(BasetenJudge::from_env().map_err(|e| e.to_string())?)
+        Some(backend) if backend == "baseten" => Some(Box::new(
+            BasetenJudge::from_env().map_err(|e| e.to_string())?,
+        )),
+        Some(backend) if backend == "modal" => {
+            Some(Box::new(ModalJudge::from_env().map_err(|e| e.to_string())?))
         }
         Some(backend) => {
             return Err(format!(
-                "unknown --judge-backend: {backend} (supported: baseten)"
+                "unknown --judge-backend: {backend} (supported: baseten, modal)"
             ));
         }
     };
@@ -96,7 +100,7 @@ fn run() -> Result<(), String> {
         args.db.display()
     );
     if let Some(judge) = &live_judge {
-        let summary = run_judging(&catalog, judge, &stamp).map_err(|e| e.to_string())?;
+        let summary = run_judging(&catalog, judge.as_ref(), &stamp).map_err(|e| e.to_string())?;
         println!(
             "judged {} endpoints ({} matched) in {}",
             summary.judged,

@@ -1,0 +1,6 @@
+{"judgments": [
+  {"model_id": "openai/gpt-6.1-terra-pro", "provider_name": "OpenAI",
+   "tag": "openai/fast", "quality_tier": "standard", "quality_score": 0.77},
+  {"model_id": "tencent/hy-mt2-1.8b", "provider_name": "Tencent",
+   "quality_tier": "high", "quality_score": 0.88}
+]}

@@ -85,7 +85,8 @@ itself. No iteration may depend on a later one.
 - Landed: catalog phases 1–3 done (gathering, deterministic + AI-assisted
   processing, containerized deployment with CI gates); versioned artifact
   publishes, verifies, and loads from fixtures. Phase 4 (live judge
-  backends) is planned in [catalog-sync-roadmap.md](catalog-sync-roadmap.md).
+  backends: Baseten + Modal) landed — see
+  [catalog-sync-roadmap.md](catalog-sync-roadmap.md).
 
 ## Iter 5 — Provider routing (done)
 

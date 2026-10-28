@@ -47,7 +47,7 @@ one. Gateway-side milestones stay in [roadmap.md](roadmap.md).
 - Test: catalog image builds; one-shot container publishes an artifact
   a read-only mount can see; compose file renders.
 
-## Phase 4 — Judge backends: Baseten + Modal (planned)
+## Phase 4 — Judge backends: Baseten + Modal (done)
 
 - Goal: add the first live `Judge` backends behind the trait Phase 2b
   establishes: models served on Baseten (OpenAI-compatible chat at
@@ -79,6 +79,13 @@ one. Gateway-side milestones stay in [roadmap.md](roadmap.md).
   model/endpoint rows), gateway use (single OpenRouter upstream
   unchanged), multi-backend routing (still deferred, see
   [future.md](future.md)).
+- Landed: `BasetenJudge` + `ModalJudge` behind the Phase 2b trait over
+  a shared OpenAI-chat core (temperature 0, JSON-object replies, same
+  tier/score validation as recorded); `catalog-process
+  --judge-backend baseten|modal` with recorded still the default;
+  recorded fixtures per backend; live smoke judged 4/4 fixture
+  endpoints on each backend with real varied verdicts; `cargo test`,
+  clippy, and fmt pass.
 
 ## Later
 

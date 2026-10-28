@@ -7,6 +7,8 @@
 mod artifact;
 mod judge;
 mod judge_baseten;
+mod judge_modal;
+mod judge_openai;
 mod price;
 mod process;
 mod rank;
@@ -17,6 +19,7 @@ mod sync;
 pub use artifact::{now_rfc3339, publish, sha256_hex, verify, Manifest};
 pub use judge::{endpoint_tag, run_judging, Judge, JudgeSummary, NullJudge, RecordedJudge};
 pub use judge_baseten::BasetenJudge;
+pub use judge_modal::ModalJudge;
 pub use price::{
     balanced_profile, builtin_profiles, effective_cost, resolve_discount, Promos, WorkloadProfile,
 };

@@ -2,7 +2,7 @@
 //!
 //! Phase 2b plugs behind the same per-endpoint update hook Phase 2a
 //! establishes. The recorded judge reads model outputs from a JSON file
-//! (no live model calls); live judges (`BasetenJudge`, later Modal)
+//! (no live model calls); live judges (`BasetenJudge`, `ModalJudge`)
 //! implement the same trait without touching the store.
 
 use crate::store::{Catalog, EndpointJudgment};
