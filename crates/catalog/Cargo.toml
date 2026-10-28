@@ -12,6 +12,10 @@ name = "pennyrouter_catalog"
 path = "src/lib.rs"
 
 [dependencies]
+# Live judge backends (Phase 4). rustls (bundled roots) keeps the catalog
+# image free of OpenSSL build deps; the blocking client suits the offline
+# batch with no async runtime in this crate.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "blocking", "json"] }
 # SQLite via the bundled amalgamation: no system library needed, so the
 # sync binary stays free of sqlite build deps.
 rusqlite = { version = "0.37", features = ["bundled"] }

@@ -6,6 +6,7 @@
 
 mod artifact;
 mod judge;
+mod judge_baseten;
 mod price;
 mod process;
 mod rank;
@@ -15,6 +16,7 @@ mod sync;
 
 pub use artifact::{now_rfc3339, publish, sha256_hex, verify, Manifest};
 pub use judge::{endpoint_tag, run_judging, Judge, JudgeSummary, NullJudge, RecordedJudge};
+pub use judge_baseten::BasetenJudge;
 pub use price::{
     balanced_profile, builtin_profiles, effective_cost, resolve_discount, Promos, WorkloadProfile,
 };
@@ -30,7 +32,8 @@ pub use sync::{load_endpoints_dir, run_fixture_sync, Summary};
 
 use std::fmt;
 
-/// Catalog error: sqlite, IO, JSON, time, schema, or malformed input.
+/// Catalog error: sqlite, IO, JSON, time, schema, malformed input, or
+/// live-judge failures (transport vs. backend behavior).
 #[derive(Debug)]
 pub enum Error {
     Sqlite(rusqlite::Error),
@@ -39,6 +42,8 @@ pub enum Error {
     TimeFormat(time::error::Format),
     Schema(String),
     InvalidFixture(String),
+    Http(reqwest::Error),
+    Judge(String),
 }
 
 impl fmt::Display for Error {
@@ -50,6 +55,8 @@ impl fmt::Display for Error {
             Error::TimeFormat(e) => write!(f, "time format: {e}"),
             Error::Schema(e) => write!(f, "schema: {e}"),
             Error::InvalidFixture(e) => write!(f, "invalid fixture: {e}"),
+            Error::Http(e) => write!(f, "http: {e}"),
+            Error::Judge(e) => write!(f, "judge: {e}"),
         }
     }
 }
@@ -63,6 +70,8 @@ impl std::error::Error for Error {
             Error::TimeFormat(_) => None,
             Error::Schema(_) => None,
             Error::InvalidFixture(_) => None,
+            Error::Http(e) => Some(e),
+            Error::Judge(_) => None,
         }
     }
 }
@@ -88,5 +97,11 @@ impl From<serde_json::Error> for Error {
 impl From<time::error::Format> for Error {
     fn from(e: time::error::Format) -> Self {
         Error::TimeFormat(e)
+    }
+}
+
+impl From<reqwest::Error> for Error {
+    fn from(e: reqwest::Error) -> Self {
+        Error::Http(e)
     }
 }

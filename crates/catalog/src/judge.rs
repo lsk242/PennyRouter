@@ -1,9 +1,9 @@
 //! AI-assisted processing: model-judged signals into indexed columns.
 //!
 //! Phase 2b plugs behind the same per-endpoint update hook Phase 2a
-//! establishes. The only judge that ships reads recorded model outputs
-//! from a JSON file (no live model calls); a live judge implements the
-//! same trait later without touching the store.
+//! establishes. The recorded judge reads model outputs from a JSON file
+//! (no live model calls); live judges (`BasetenJudge`, later Modal)
+//! implement the same trait without touching the store.
 
 use crate::store::{Catalog, EndpointJudgment};
 use crate::Error;
