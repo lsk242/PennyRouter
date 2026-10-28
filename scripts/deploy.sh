@@ -19,7 +19,7 @@
 #   HOST_PORT            Published port on the server. Default: 8003.
 #   PORT                 Container port. Default: 3000.
 #   IMAGE                Image to pull. Default: ghcr.io/lsk242/pennyrouter:latest.
-#   OPENROUTER_BASE_URL  Upstream base URL. Default: https://openrouter.ai.
+#   OPENROUTER_BASE_URL  Upstream base URL. Default: https://openrouter.ai/api.
 #   SSH_OPTS             Extra options for ssh/scp, e.g. "-i ~/.ssh/id -p 2222".
 #   DRY_RUN              Set to 1 to print what would run without touching
 #                        the server.
@@ -40,7 +40,7 @@ COMPOSE_FILE="${COMPOSE_FILE:-compose.prod.yaml}"
 HOST_PORT="${HOST_PORT:-8003}"
 PORT="${PORT:-3000}"
 IMAGE="${IMAGE:-ghcr.io/lsk242/pennyrouter:latest}"
-OPENROUTER_BASE_URL="${OPENROUTER_BASE_URL:-https://openrouter.ai}"
+OPENROUTER_BASE_URL="${OPENROUTER_BASE_URL:-https://openrouter.ai/api}"
 DRY_RUN="${DRY_RUN:-0}"
 
 # shellcheck disable=SC2086

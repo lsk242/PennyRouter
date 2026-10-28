@@ -6,18 +6,20 @@ and once through a running PennyRouter gateway with the same body, then
 compares: both must return 200 with a well-formed non-streaming chat
 completion. Compares shape, not wording — LLM output differs per call.
 
-Needs a real backend key, so it is opt-in and never runs in CI:
+Needs a real backend key, so it is opt-in and never runs in CI.
+Run it from this folder:
   1. cp -n .env.example .env   # once; .env is gitignored, never commit it
   2. add OPENROUTER_API_KEY=sk-or-... to .env (real env vars also work)
-  3. cargo run -p pennyrouter-gateway   # or: docker compose up --build
-  4. tests/integration/python/openrouter_compare.py
+  3. from the repo root: cargo run -p pennyrouter-gateway
+     (or: docker compose up --build)
+  4. ./openrouter_compare.py
 
 Without a key it skips (exit 0). Uses a tiny max_tokens to keep the two
 calls cheap. Stdlib only.
 
-Config (env var or .env, env wins):
+Config (folder .env, repo-root .env, or env var; env wins, folder beats root):
   OPENROUTER_API_KEY   backend key (required, else skip)
-  OPENROUTER_BASE_URL  default https://openrouter.ai
+  OPENROUTER_BASE_URL  default https://openrouter.ai/api
   GATEWAY_URL          default http://localhost:3000
   OPENROUTER_TEST_MODEL default openai/gpt-oss-20b
   TEST_TIMEOUT_SECONDS default 60
@@ -31,8 +33,16 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[3]
+_PARENTS = Path(__file__).resolve().parents
+ROOT = _PARENTS[3] if len(_PARENTS) > 3 else Path(__file__).resolve().parent
+HERE = Path(__file__).resolve().parent
 PROMPT = "Reply with exactly one word: ok"
+# Cloudflare (error 1010) blocks urllib's default UA, so identify as a
+# browser with our own token appended. The gateway forwards this upstream.
+USER_AGENT = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 PennyRouter-Check/1.0"
+)
 
 
 def load_dotenv(path):
@@ -71,6 +81,7 @@ def post_chat(base_url, api_key, model, timeout):
         headers={
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
+            "User-Agent": USER_AGENT,
         },
         method="POST",
     )
@@ -95,9 +106,15 @@ def check_shape(raw):
     if payload.get("object") != "chat.completion":
         return None, f"object is {payload.get('object')!r}"
     try:
-        content = payload["choices"][0]["message"]["content"]
+        message = payload["choices"][0]["message"]
     except (KeyError, IndexError, TypeError):
-        return None, "missing choices[0].message.content"
+        return None, "missing choices[0].message"
+    content = message.get("content")
+    if not isinstance(content, str) or not content.strip():
+        # Reasoning models can spend a tiny token budget on reasoning,
+        # leaving content null — their reasoning text still proves a
+        # well-formed completion.
+        content = message.get("reasoning") or ""
     if not isinstance(content, str) or not content.strip():
         return None, "empty completion content"
     return content.strip(), None
@@ -105,6 +122,7 @@ def check_shape(raw):
 
 def main():
     config = load_dotenv(ROOT / ".env")
+    config.update(load_dotenv(HERE / ".env"))  # folder-local wins over root
     for key in (
         "OPENROUTER_API_KEY",
         "OPENROUTER_BASE_URL",
@@ -118,7 +136,7 @@ def main():
     if not api_key or "redacted" in api_key.lower() or "example" in api_key.lower():
         print("SKIP: set OPENROUTER_API_KEY in .env or the environment")
         return 0
-    openrouter = config.get("OPENROUTER_BASE_URL", "https://openrouter.ai")
+    openrouter = config.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api")
     gateway = config.get("GATEWAY_URL", "http://localhost:3000")
     model = config.get("OPENROUTER_TEST_MODEL", "openai/gpt-oss-20b")
     timeout = float(config.get("TEST_TIMEOUT_SECONDS", "60"))

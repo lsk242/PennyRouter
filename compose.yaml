@@ -18,7 +18,7 @@ services:
       - "host.docker.internal:host-gateway"
     environment:
       PORT: ${PORT:-3000}
-      OPENROUTER_BASE_URL: ${OPENROUTER_BASE_URL:-https://openrouter.ai}
+      OPENROUTER_BASE_URL: ${OPENROUTER_BASE_URL:-https://openrouter.ai/api}
       CATALOG_DB: ${CATALOG_DB:-/catalog}
     volumes:
       - catalog-data:/catalog:ro

@@ -13,5 +13,5 @@ services:
       - "${HOST_PORT:-8003}:${PORT:-3000}"
     environment:
       PORT: ${PORT:-3000}
-      OPENROUTER_BASE_URL: ${OPENROUTER_BASE_URL:-https://openrouter.ai}
+      OPENROUTER_BASE_URL: ${OPENROUTER_BASE_URL:-https://openrouter.ai/api}
     restart: unless-stopped

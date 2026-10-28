@@ -40,7 +40,7 @@ itself. No iteration may depend on a later one.
 - Landed: `cargo test` (health + 2 passthrough tests), real-binary smoke
   (`/health` OK, OpenAI-shaped 502 on dead upstream), and Docker build +
   `/health` smoke all passed. Upstream configurable via
-  `OPENROUTER_BASE_URL` (default `https://openrouter.ai`).
+  `OPENROUTER_BASE_URL` (default `https://openrouter.ai/api`).
 
 ## Iter 2 — Streaming + guards (done)
 

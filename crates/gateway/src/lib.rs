@@ -106,7 +106,7 @@ impl AppState {
     /// loadable, otherwise plain passthrough.
     pub fn from_env() -> Self {
         let base = std::env::var("OPENROUTER_BASE_URL")
-            .unwrap_or_else(|_| "https://openrouter.ai".to_string());
+            .unwrap_or_else(|_| "https://openrouter.ai/api".to_string());
         let state = Self::new(base);
         match std::env::var("CATALOG_DB") {
             Err(_) => state,

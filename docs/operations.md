@@ -54,10 +54,11 @@ Docker-based local dev (see `docker/`):
   workload against a mock backend directly and through the capped
   gateway, producing a markdown/JSON report. Re-run it to prove later
   iterations did not regress the baseline.
-- An opt-in live integration check (`tests/integration/<lang>/`) that
-  calls OpenRouter directly and through the gateway, then compares. It
-  needs `OPENROUTER_API_KEY` in `.env` (gitignored, never committed) and
-  a running gateway; without a key it skips. Never runs in CI.
+- An opt-in live integration check (`tests/integration/<lang>/`, each
+  with its own README) that calls OpenRouter directly and through the
+  gateway, then compares. It needs `OPENROUTER_API_KEY` in that
+  folder's `.env` (gitignored, never committed) and a running gateway;
+  without a key it skips. Never runs in CI.
 - No secrets in the repo: backend keys travel with requests, not config.
 
 ## Configuration
@@ -65,7 +66,7 @@ Docker-based local dev (see `docker/`):
 Keep config minimal and env-based (`.env`, see [`.env.example`](../.env.example)):
 `PORT` (container port), `HOST_PORT` (published port), `IMAGE` (dev:
 tag for the local build; prod: image to pull), `OPENROUTER_BASE_URL`
-(upstream for chat completions, default `https://openrouter.ai`),
+(upstream for chat completions, default `https://openrouter.ai/api`),
 `CATALOG_DB` (catalog artifact for routing: directory, manifest, or DB
 file — unset means plain passthrough). A directory also serves the
 newest verified ranking artifact when one exists (see
