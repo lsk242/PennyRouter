@@ -47,6 +47,12 @@ adds value on its own. Detail and acceptance criteria live in
       Test: pricing fixtures (promo active/expired, cache-heavy/mixed) select
       the expected provider; `cargo test`, clippy, fmt, Docker build +
       smoke all passed.
+- [x] **Iter 8 — Drop-in fallback proxy.** Any path without a custom
+      handler proxies upstream untouched (method/path/query/headers/body)
+      and logs method + full path; same 1M cap, timeouts, error mapping.
+      Test: fallback tests (GET/POST proxied intact, oversize 413) +
+      live `/v1/models` 200 through the gateway; `cargo test`, clippy,
+      fmt all passed.
 
 ## Platform track (parallel — see [docs/platform.md](docs/platform.md))
 

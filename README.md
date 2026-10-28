@@ -16,9 +16,10 @@ local lookup) but the continuously re-ranked provider index behind it, which
 tracks real price, latency, throughput, and availability fluctuations that
 static sort orders miss.
 
-Status: gateway complete through Iter 7 — OpenAI-compatible
+Status: gateway complete through Iter 8 — OpenAI-compatible
 passthrough (JSON + SSE streaming), provider routing, ranking index,
-and price model, with Docker and Terraform (Hetzner) deploys. See
+price model, and a drop-in fallback proxy for every other endpoint,
+with Docker and Terraform (Hetzner) deploys. See
 [TODO.md](TODO.md) for the iteration plan and
 [Operations](docs/operations.md) to run it.
 

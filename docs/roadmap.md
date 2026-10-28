@@ -130,6 +130,21 @@ itself. No iteration may depend on a later one.
   `openrouter/free` meta-model routes to any free offering and re-routes
   pins that stopped being free.
 
+## Iter 8 — Drop-in fallback proxy (done)
+
+- Goal: any standard endpoint without a custom handler proxies upstream
+  untouched and logs its method + full path — no silent 404s. See
+  [api.md](api.md).
+- Value: OpenAI-compatible clients work through the gateway for every
+  endpoint, while logs reveal which ones are actually used so custom
+  handlers can follow demand.
+- Test: fallback tests over a mock backend (GET/POST proxied intact,
+  oversize rejected pre-backend); live `GET /v1/models` through the
+  gateway returns 200 with the fallback log line.
+- Landed: generic axum fallback sharing the chat forward path (same
+  body cap, timeouts, SSE + error mapping; no routing/rewriting).
+  `cargo test` (36 passed), clippy clean, fmt clean.
+
 ## Platform track (parallel to development)
 
 Runs alongside the iterations above; see [platform.md](platform.md).
@@ -151,7 +166,7 @@ Development delivers Docker images, platform delivers deployments.
 - **Later:** more providers on the same patterns; Terraform
   plan/apply automation per environment.
 
-## After Iter 7
+## After Iter 8
 
 Deferred ideas in [future.md](future.md): more backends, parallel fan-out,
 judge models, classifier routing. Each becomes roadmap items only when

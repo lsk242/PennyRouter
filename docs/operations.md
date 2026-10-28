@@ -106,5 +106,7 @@ status, latency, and outcome. `GET /metrics` serves Prometheus counters
 (requests by route/status, upstream errors by kind, guard rejections,
 in-flight gauge) plus a latency histogram. Provider, model, and snapshot
 fields join the log line once routing lands. Never log bodies, prompts,
-completions, or Authorization headers. Later, readiness/snapshot health
+completions, or Authorization headers. From Iter 8, fallback-proxied
+calls emit an extra `{"fallback_proxy":true,...}` line with method and
+full path (see [api.md](api.md)). Later, readiness/snapshot health
 may complement `/health` without changing its liveness contract.

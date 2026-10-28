@@ -3,7 +3,7 @@ use axum::{
     extract::{Request, State},
     http::{
         header::{CONTENT_LENGTH, CONTENT_TYPE, HOST},
-        HeaderMap, StatusCode,
+        HeaderMap, Method, StatusCode,
     },
     middleware::{self, Next},
     response::{IntoResponse, Json, Response},
@@ -131,6 +131,7 @@ pub fn app_with_state(state: AppState) -> Router {
         .route("/health", get(health))
         .route("/metrics", get(metrics_handler))
         .route("/v1/chat/completions", post(chat_completions))
+        .fallback(fallback_proxy)
         .layer(middleware::from_fn_with_state(metrics, track))
         .with_state(state)
 }
@@ -199,38 +200,9 @@ async fn chat_completions(
 ) -> Response {
     // Token guard first: count incrementally so oversize work is rejected
     // before anything is sent upstream.
-    let buffered = {
-        use futures_util::StreamExt;
-        let mut stream = Box::pin(body.into_data_stream());
-        let mut buffered = Vec::new();
-        while let Some(result) = stream.next().await {
-            let data = match result {
-                Ok(data) => data,
-                Err(_) => {
-                    return error_response(
-                        StatusCode::BAD_REQUEST,
-                        "invalid_request_error",
-                        "read_error",
-                        "failed to read request body".to_string(),
-                    );
-                }
-            };
-            if buffered.len() + data.len() > MAX_REQUEST_BYTES {
-                state.metrics.guard_rejected();
-                return error_response(
-                    StatusCode::PAYLOAD_TOO_LARGE,
-                    "invalid_request_error",
-                    "payload_too_large",
-                    format!(
-                        "request body exceeds the {MAX_TOKENS}-token limit \
-                         (~{} MiB at {BYTES_PER_TOKEN} bytes/token)",
-                        MAX_REQUEST_BYTES / (1024 * 1024),
-                    ),
-                );
-            }
-            buffered.extend_from_slice(&data);
-        }
-        buffered
+    let buffered = match read_capped_body(&state, body).await {
+        Ok(buffered) => buffered,
+        Err(response) => return *response,
     };
 
     // Routing rewrites recognized requests; anything unrecognized (or no
@@ -242,7 +214,14 @@ async fn chat_completions(
         },
         None => (buffered, None),
     };
-    let mut response = forward_chat_completions(&state, &headers, forwarded_body).await;
+    let mut response = forward_upstream(
+        &state,
+        &Method::POST,
+        "/v1/chat/completions",
+        &headers,
+        forwarded_body,
+    )
+    .await;
     if let Some(provider) = provider {
         if let Ok(value) = provider.parse() {
             response
@@ -253,13 +232,78 @@ async fn chat_completions(
     response
 }
 
-/// Forward one buffered body upstream and map the response.
-async fn forward_chat_completions(
+/// Drop-in fallback (Iter 8): any standard endpoint without a custom
+/// handler is proxied upstream untouched and logged with its full path,
+/// so no client call ever goes silent. No routing or rewriting applies.
+async fn fallback_proxy(State(state): State<AppState>, request: Request) -> Response {
+    let (parts, body) = request.into_parts();
+    let path = parts
+        .uri
+        .path_and_query()
+        .map(|path_and_query| path_and_query.as_str().to_string())
+        .unwrap_or_else(|| "/".to_string());
+    println!(
+        "{}",
+        serde_json::json!({
+            "fallback_proxy": true,
+            "method": parts.method.to_string(),
+            "path": path,
+        })
+    );
+    let buffered = match read_capped_body(&state, body).await {
+        Ok(buffered) => buffered,
+        Err(response) => return *response,
+    };
+    forward_upstream(&state, &parts.method, &path, &parts.headers, buffered).await
+}
+
+/// Read a request body up to the token-guard cap, rejecting oversize
+/// payloads before anything is sent upstream.
+async fn read_capped_body(state: &AppState, body: Body) -> Result<Vec<u8>, Box<Response>> {
+    use futures_util::StreamExt;
+    let mut stream = Box::pin(body.into_data_stream());
+    let mut buffered = Vec::new();
+    while let Some(result) = stream.next().await {
+        let data = match result {
+            Ok(data) => data,
+            Err(_) => {
+                return Err(Box::new(error_response(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request_error",
+                    "read_error",
+                    "failed to read request body".to_string(),
+                )));
+            }
+        };
+        if buffered.len() + data.len() > MAX_REQUEST_BYTES {
+            state.metrics.guard_rejected();
+            return Err(Box::new(error_response(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "invalid_request_error",
+                "payload_too_large",
+                format!(
+                    "request body exceeds the {MAX_TOKENS}-token limit \
+                     (~{} MiB at {BYTES_PER_TOKEN} bytes/token)",
+                    MAX_REQUEST_BYTES / (1024 * 1024),
+                ),
+            )));
+        }
+        buffered.extend_from_slice(&data);
+    }
+    Ok(buffered)
+}
+
+/// Forward one buffered body upstream with the given method and path,
+/// then map the response (streams chunk-by-chunk, buffered bodies
+/// byte-for-byte, errors wrapped OpenAI-style).
+async fn forward_upstream(
     state: &AppState,
+    method: &Method,
+    path: &str,
     headers: &HeaderMap,
     body: Vec<u8>,
 ) -> Response {
-    let url = format!("{}/v1/chat/completions", state.upstream_base_url);
+    let url = format!("{}{}", state.upstream_base_url, path);
     let mut forwarded = reqwest::header::HeaderMap::new();
     for (name, value) in headers.iter() {
         // The client sets host and content-length itself.
@@ -270,7 +314,12 @@ async fn forward_chat_completions(
     }
     let upstream = match tokio::time::timeout(
         state.timeouts.first_chunk,
-        state.client.post(url).headers(forwarded).body(body).send(),
+        state
+            .client
+            .request(method.clone(), url)
+            .headers(forwarded)
+            .body(body)
+            .send(),
     )
     .await
     {
