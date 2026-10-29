@@ -17,6 +17,16 @@ pub struct Judgment {
     pub quality_score: Option<f64>,
 }
 
+/// Audit identity of a judge (Iter 15): the model that produced the
+/// signals and the prompt version it answered. Stored with every
+/// judgment and in the rebuild meta, so a tier can always be traced
+/// back to the exact judge + prompt behind it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JudgeIdentity {
+    pub model: String,
+    pub prompt_version: String,
+}
+
 /// Judge hook: signals for one endpoint, given its identity and raw
 /// payload. Implementations must be deterministic for the same input.
 pub trait Judge {
@@ -26,6 +36,15 @@ pub trait Judge {
         provider_name: &str,
         payload: &Value,
     ) -> Result<Judgment, Error>;
+
+    /// Who to blame in the audit trail. The default (`unknown`) keeps
+    /// third-party impls compiling; every in-tree judge overrides it.
+    fn identity(&self) -> JudgeIdentity {
+        JudgeIdentity {
+            model: "unknown".to_string(),
+            prompt_version: "unknown".to_string(),
+        }
+    }
 }
 
 /// Judge that records "no signal" everywhere. Used when judging runs
@@ -38,6 +57,13 @@ impl Judge for NullJudge {
             quality_tier: None,
             quality_score: None,
         })
+    }
+
+    fn identity(&self) -> JudgeIdentity {
+        JudgeIdentity {
+            model: "none".to_string(),
+            prompt_version: "none".to_string(),
+        }
     }
 }
 
@@ -91,7 +117,17 @@ impl RecordedJudge {
                 .and_then(Value::as_str)
                 .filter(|s| !s.is_empty())
                 .ok_or_else(|| Error::InvalidFixture(at("needs a non-empty \"provider_name\"")))?;
-            let tag = item.get("tag").and_then(Value::as_str).map(str::to_string);
+            // A wrong-type tag is rejected, never widened to an
+            // unscoped match-all (Iter 11, A05).
+            let tag = match item.get("tag") {
+                None => None,
+                Some(value) => Some(
+                    value
+                        .as_str()
+                        .ok_or_else(|| Error::InvalidFixture(at("\"tag\" must be a string")))?
+                        .to_string(),
+                ),
+            };
             let quality_tier = match item.get("quality_tier") {
                 None | Some(Value::Null) => None,
                 Some(Value::String(t)) if ["high", "standard", "low"].contains(&t.as_str()) => {
@@ -141,6 +177,16 @@ pub fn endpoint_tag(payload: &Value) -> Option<&str> {
 }
 
 impl Judge for RecordedJudge {
+    /// Recordings carry signals, not provenance: the audit trail says
+    /// `recorded`, honestly marking judgments whose original model and
+    /// prompt are no longer known.
+    fn identity(&self) -> JudgeIdentity {
+        JudgeIdentity {
+            model: "recorded".to_string(),
+            prompt_version: "recorded".to_string(),
+        }
+    }
+
     fn judge(
         &self,
         model_id: &str,
@@ -184,9 +230,22 @@ pub fn run_judging(
     judged_at: &str,
 ) -> Result<JudgeSummary, Error> {
     let endpoints = catalog.all_endpoints()?;
+    run_judging_selected(catalog, judge, &endpoints, judged_at)
+}
+
+/// Fill the judgment columns for exactly `endpoints` (Iter 15: the
+/// policy-selected subset). Every written row carries the judge's
+/// audit identity; the rebuild meta records it too.
+pub fn run_judging_selected(
+    catalog: &Catalog,
+    judge: &dyn Judge,
+    endpoints: &[crate::store::EndpointRow],
+    judged_at: &str,
+) -> Result<JudgeSummary, Error> {
+    let identity = judge.identity();
     let mut judged = 0;
     let mut matched = 0;
-    for ep in &endpoints {
+    for ep in endpoints {
         let payload: Value = serde_json::from_str(&ep.payload)?;
         let judgment = judge.judge(&ep.model_id, &ep.provider_name, &payload)?;
         if judgment.quality_tier.is_some() || judgment.quality_score.is_some() {
@@ -198,12 +257,16 @@ pub fn run_judging(
                 quality_tier: judgment.quality_tier,
                 quality_score: judgment.quality_score,
                 judged_at: judged_at.to_string(),
+                judge_model: Some(identity.model.clone()),
+                judge_prompt: Some(identity.prompt_version.clone()),
             },
         )?;
         judged += 1;
     }
     catalog.set_meta("judged_at", judged_at)?;
     catalog.set_meta("judged_count", &judged.to_string())?;
+    catalog.set_meta("judge_model", &identity.model)?;
+    catalog.set_meta("judge_prompt", &identity.prompt_version)?;
     Ok(JudgeSummary { judged, matched })
 }
 
@@ -241,6 +304,17 @@ mod tests {
         let out = judge.judge("m", "p", &json!({})).unwrap();
         assert_eq!(out.quality_tier, None);
         assert_eq!(out.quality_score, None);
+    }
+
+    /// A05: a wrong-type tag fails the file instead of widening to a
+    /// match-all record.
+    #[test]
+    fn wrong_type_tag_rejected() {
+        let raw = r#"{"judgments": [
+            {"model_id": "m", "provider_name": "p", "tag": 42,
+             "quality_tier": "high", "quality_score": 0.9}
+        ]}"#;
+        assert!(RecordedJudge::from_str(raw).is_err());
     }
 
     #[test]

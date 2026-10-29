@@ -28,6 +28,8 @@ CREATE TABLE IF NOT EXISTS endpoints (
     quality_tier      TEXT,
     quality_score     REAL,
     judged_at         TEXT,
+    judge_model       TEXT,
+    judge_prompt      TEXT,
     FOREIGN KEY (model_id) REFERENCES models(model_id)
 );
 CREATE INDEX IF NOT EXISTS idx_endpoints_model ON endpoints(model_id);
@@ -51,6 +53,8 @@ pub const ENDPOINT_INDEXED_COLUMNS: &[(&str, &str)] = &[
     ("quality_tier", "TEXT"),
     ("quality_score", "REAL"),
     ("judged_at", "TEXT"),
+    ("judge_model", "TEXT"),
+    ("judge_prompt", "TEXT"),
 ];
 
 /// Phase 1 layout, kept so the migration test can build a legacy DB.

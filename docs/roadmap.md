@@ -168,29 +168,43 @@ Development delivers Docker images, platform delivers deployments.
 - **Later:** more providers on the same patterns; Terraform
   plan/apply automation per environment.
 
-## Iter 9 — Resilience bounds (planned)
+## Iter 9 — Resilience bounds (done)
 
 - Goal: close the architecture deviation — bounded upstream concurrency
   and queue depth with explicit load-shedding, plus graceful shutdown.
   See [architecture.md](architecture.md) and
   [performance.md](performance.md).
-- Value: the gateway degrades with 429/503 instead of collapsing under
+- Value: the gateway degrades with 503 instead of collapsing under
   a burst; deploys stop dropping in-flight requests.
 - Test: soak past the concurrency bound sheds with 503 (no error
   cascade); SIGTERM drains in-flight requests before exit.
+- Landed: `ConcurrencyLimits` semaphores on the forward path
+  (`UPSTREAM_MAX_CONCURRENT`/`UPSTREAM_MAX_QUEUED`, defaults 64/128);
+  fast-path slot, bounded wait, OpenAI-shaped 503 + `Retry-After` +
+  `pennyrouter_load_shed_total` beyond; graceful shutdown on
+  Ctrl-C/SIGTERM in `main.rs`. `cargo test` (81 passed), clippy clean,
+  fmt clean; new `tests/resilience.rs` (shed + queued).
 
-## Iter 10 — Catalog freshness (planned)
+## Iter 10 — Catalog freshness (done)
 
 - Goal: close the freshness deviation — periodic `CATALOG_DB` reload
   with atomic snapshot publication and last-good fallback, so ranking
   and price updates reach a running gateway without restart.
 - Value: re-ranking and promo windows actually take effect; resolves
   the routing-vs-operations contradiction (startup-once vs automatic
-  pickup) and wires `CATALOG_DB` in prod compose/Terraform.
+  pickup).
 - Test: drop a new artifact → gateway serves it without restart;
   corrupt artifact → last-good snapshot keeps serving.
+- Landed: `spawn_reload_task` in the gateway runtime (`main.rs`,
+  `RELOAD_INTERVAL_SECS` default 60s, 0 disables); `reload()` reuses
+  the existing atomic swap + last-good path; attempts counted in
+  `pennyrouter_catalog_reload_total{result="ok|error"}`. `cargo test`
+  (84 passed), clippy clean, fmt clean; new `tests/reload.rs`
+  (new-model pickup, corrupt-DB last-good, background publish).
+  Note: `CATALOG_DB` in prod compose/Terraform left for the platform
+  track — the gateway side honors it whenever set.
 
-## Iter 11 — Bug-review fixes (planned)
+## Iter 11 — Bug-review fixes (done)
 
 - Goal: fix the
   [security-and-bug review](review/PennyRouter-security-and-bug-review.md)
@@ -203,22 +217,60 @@ Development delivers Docker images, platform delivers deployments.
 - Value: routing stops silently dropping caller constraints or
   misrouting on stale/promo data.
 - Test: one regression test per finding; full `cargo test` green.
+- Landed: F01 caller `provider` fields preserved + `only`/`ignore`
+  intersection with pin invalidation (unsatisfiable passes through
+  for upstream enforcement); F02 admission-before-collection + 30s
+  upload-idle / 60s upload-total deadlines (408); F03 end-to-end
+  response headers preserved (transparent, never decoded), truthful
+  representation headers on rewritten bodies, hop-by-hop/proxy
+  request headers stripped, redirects pass through unfollowed; F04
+  precision class forwarded as `quantizations` (best-effort,
+  caller wins; tier targeting documented as limitation); F05 16 MiB
+  upstream body bound on success and error paths (502
+  `upstream_too_large`); F06 terminal SSE `error` event on
+  stall/break (clean EOF unchanged); F07 atomic data-before-manifest
+  publish + newest-*verifying*-manifest discovery with invalid
+  candidates skipped; F08 verified already correct (`/api` default
+  everywhere); F09 readiness loops exit nonzero after exhaustion with
+  per-probe timeouts (verified by stub); F10 descending scores keep
+  unknowns last; F11 `free_offers` with `valid_until_unix` published
+  in the ranking document and wall-clock-checked by the gateway.
+  A01 chat keeps its query string; A02 negative/non-finite prices
+  unpriceable; A03 real tag in offline rank signals (matches inline);
+  A04 stream-lifetime in-flight slot; A05 wrong-type tags rejected at
+  load. Hardening: query values redacted from fallback logs, session
+  keys are seeded hashes with 30-min TTL eviction, `Retry-After` on
+  shed. `cargo test` (105 passed), clippy clean, fmt clean; new
+  `tests/hardening.rs`, `tests/reload.rs` F07 case, F01/F04/F10/F11
+  unit + rank/process/price/judge tests.
 
-## Iter 12 — Hot-path hygiene + fresh baseline (planned)
+## Iter 12 — Hot-path hygiene + fresh baseline (done)
 
 - Goal: act on the
   [resource-efficiency review](review/PennyRouter-resource-efficiency-review.md) —
-  raw-envelope passthrough (no full parse + re-serialize when no rewrite
-  applies), stream-or-bound non-streaming bodies, buffered structured
-  logging (no `println!` per request), less per-request lock contention;
-  re-run `tests/load` and record post-Iter-8 numbers (Iter 3 baseline is
-  stale).
-- Value: the "dumb and fast" path stays allocation-lean; every later
-  change has a current baseline to prove against.
-- Test: load compare vs the Iter 3 baseline recorded here; no
-  allocation growth on the unrouted path.
+  buffered structured logging (no `println!` per request), less
+  per-request lock contention; re-run `tests/load` and record
+  post-Iter-11 numbers (Iter 3 baseline was stale).
+- Value: the "dumb and fast" path stays lean; every later change has a
+  current baseline to prove against.
+- Test: load compare vs the Iter 3 baseline recorded here.
+- Landed: single background log-writer thread over a bounded
+  1024-line channel (full drops counted in
+  `pennyrouter_log_dropped_total`, flush ≥1/s); session table
+  `Mutex` → `RwLock` (concurrent lookups no longer serialize;
+  expiry reap preserved). Parse + re-serialize kept only on the
+  routed path — unrouted requests never parse (already true since
+  Iter 5); full raw-envelope rewrite deferred as disproportionate.
+- Baseline re-run (`tests/load/compare.sh`, 20 sessions × 15s, 20ms
+  mock, 1 CPU / 1 GB profile, image built from this tree):
+  `tests/load/results/compare-20261029T212247Z`. json p50 overhead
+  +0.26ms (identical to Iter 3), p99 +13.10ms (vs +0.40ms — single
+  run, variance unconfirmed, needs a confirmation run); sse p50
+  +0.22ms, p99 +4.15ms; 0 errors on all sides; no sheds, no guard
+  rejections. p50 matches Iter 3 exactly, so the typical path did not
+  regress; the p99 tail is open investigation, not a verdict.
 
-## Iter 13 — Virtual model catalog, free-first (planned)
+## Iter 13 — Virtual model catalog, free-first (done)
 
 - Goal: serve six virtual models and nothing else. Ids carry the
   provider first so future providers slot in (today only OpenRouter,
@@ -226,16 +278,18 @@ Development delivers Docker images, platform delivers deployments.
   `openrouter/pair/low`, `openrouter/pair/think`,
   `openrouter/pair/privacy/free`, `openrouter/pair/privacy/low`,
   `openrouter/pair/privacy/think`.
-- Tiers: `free` = zero-cost offering; `low` = cheapest at basic level
-  (DeepSeek 4.1 Flash class); `think` = flagship reasoning (ChatGPT
-  Luna 6 MAX class). No speed/latency axis in v1.
+- Tiers: `free` = zero-cost offering; `low` = cheapest basic
+  (cheapest effective cost across models); `think` = best quality
+  signals across models. No speed/latency axis in v1.
 - Price metric: `effective_cost` blended over input/output/cache-read/
   cache-write under the documented workload profile; FP resolution is
   a separate comparison class, never silently substituted; eligibility
-  (modality, context, ZDR) filters before price compares.
-- Availability: retry/fallback policy per virtual model (revisit
-  `allow_fallbacks: false`); for `free`, track rate limits from model
-  info plus organic 429 history so routing avoids exhausted offerings.
+  (restrictions, priceable, known class) filters before price compares.
+- Availability: one retry on another provider for virtual requests on
+  retryable outcomes (429/502/503/504); wire `allow_fallbacks` stays
+  false (gateway-owned failover, no upstream surprise). For `free`
+  (and all virtual picks), organic 429 history steers around
+  throttled providers (60s cool-down) with availability fallback.
 - `GET /v1/models` answers locally with exactly the six curated
   entries (no upstream proxy leak); chat with a virtual id routes to a
   real backend offering. See [api.md](api.md), [routing.md](routing.md),
@@ -245,8 +299,23 @@ Development delivers Docker images, platform delivers deployments.
 - Test: each virtual id routes to an eligible offering in fixtures;
   `/v1/models` returns exactly the six; unknown ids keep current
   passthrough behavior.
+- Landed: `parse_virtual` strict parsing before catalog split;
+  `decide_virtual` (`free` shares legacy path per-id namespace,
+  `low`/`think` cross-model with disjoint tiers + known-class guard);
+  `privacy/` injects `zdr`/`data_collection` unless caller-set;
+  `note_throttled` + `skip_throttled` (60s, all-throttled still
+  serves); `route_request_retry` (failed provider joins `ignore`,
+  single retry, virtual only); curated local `GET /v1/models`
+  (fallback test moved to embeddings query coverage);
+  `pennyrouter_upstream_throttled_total`. `cargo test`, clippy, fmt
+  clean; new `tests/virtual_models.rs` (menu, tiers, privacy wire,
+  unknown passthrough, retry, throttle loop). Deferred: model-info
+  rate limits (no live feed exists — organic 429 history only);
+  `think` reasoning-capability signal (quality orientation is the
+  proxy); true provider-side privacy filtering (needs index signals,
+  Iter 14/15).
 
-## Iter 14 — Product gaps (planned)
+## Iter 14 — Product gaps (done)
 
 - Goal: close the remaining
   [product-viability gaps](review/PennyRouter-product-viability-review.md):
@@ -255,8 +324,16 @@ Development delivers Docker images, platform delivers deployments.
 - Value: the free-first coding policy is trustworthy on paid tiers too.
 - Test: over-budget request fails closed with an OpenAI-shaped error;
   ineligible providers never win on price alone.
+- Shipped: per-tier quality floors (`low` needs a judged tier,
+  `think` needs `high`) rejecting with `quality_floor_unmet` (503);
+  `provider.max_price` hard caps on raw price columns failing closed
+  with `budget_exceeded` (400), overriding affinity; sticky pins
+  re-checked against live restrictions every request; `POST
+  /v1/responses` on the same route-and-forward path as chat;
+  free-tier 429 failover proving live eligibility.
+  `cargo test --workspace`, clippy, fmt clean.
 
-## Iter 15 — Decision-model catalog + selection (planned)
+## Iter 15 — Decision-model catalog + selection (done)
 
 - Goal: answer "which model judges, and how is it chosen" with a
   cataloged, reviewable setup. Today judges run only as an offline
@@ -275,6 +352,18 @@ Development delivers Docker images, platform delivers deployments.
 - Test: `catalog-process` with each cataloged judge reproduces
   fixture judgments; unknown backend rejected; live-judge spend per
   rebuild logged and capped.
+- Shipped: judges file (`judges` + `policy`) loaded with strict
+  validation; recorded default, live only on explicit selection with
+  deterministic sampling and pre-write cap checks; per-row
+  (`judge_model`, `judge_prompt`) + rebuild (`judge_backend`,
+  `judge_calls`, `judge_spend_usd`) audit trail with presence-based
+  migration for old DBs; `--sample-rate`/`--max-calls`/`--max-spend-usd`
+  overrides; one spend line per live rebuild. Proven by
+  `tests/judge_catalog.rs` (9 tests incl. fixture repro per backend,
+  unknown-backend rejection, fail-closed caps, audit stamping) plus a
+  live-binary smoke (recorded run, unknown-backend error, cap-breach
+  error, audit meta read back).
+  `cargo test --workspace`, clippy, fmt clean.
 
 ## After Iter 15
 

@@ -53,6 +53,18 @@ fn asc_nulls_last(a: Option<f64>, b: Option<f64>) -> std::cmp::Ordering {
     }
 }
 
+/// Descending numbers with unknowns still last (Iter 11, F10):
+/// reversing the operands of `asc_nulls_last` would also reverse the
+/// null policy and promote missing scores ahead of known ones.
+fn desc_nulls_last(a: Option<f64>, b: Option<f64>) -> std::cmp::Ordering {
+    match (a, b) {
+        (Some(x), Some(y)) => y.total_cmp(&x),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    }
+}
+
 /// Orientation ordering over signals. Unknown error rates count as zero
 /// (no evidence of failures); unknown latencies sort after known ones.
 /// Provider and tag break all remaining ties, so rebuilds are stable.
@@ -66,7 +78,7 @@ pub fn compare(a: &Signals, b: &Signals, orientation: RankOrientation) -> std::c
     };
     let latency = || asc_nulls_last(a.latency_ms, b.latency_ms);
     let tier = || tier_rank(b.tier).cmp(&tier_rank(a.tier));
-    let score = || asc_nulls_last(b.score, a.score);
+    let score = || desc_nulls_last(a.score, b.score);
     let identity = || a.provider.cmp(b.provider).then_with(|| a.tag.cmp(&b.tag));
     match orientation {
         RankOrientation::Default => tier()
@@ -278,6 +290,20 @@ pub struct ClassRanking {
     pub quality: Vec<RankEntry>,
 }
 
+/// One free offering (Iter 11, F11): free only through
+/// `valid_until_unix` (unix seconds, half-open like promo windows);
+/// `None` means free by permanent catalog zeros with no expiry.
+/// Published so the gateway judges eligibility without the promo file —
+/// an expired or missing fact is never a permanent zero.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FreeOffer {
+    pub provider: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub valid_until_unix: Option<u64>,
+}
+
 /// Ranking artifact content. Models sort by key (BTreeMap) so rebuilds
 /// from the same inputs are byte-identical.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -286,6 +312,8 @@ pub struct RankingDocument {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub catalog_version: Option<String>,
     pub models: BTreeMap<String, Vec<ClassRanking>>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub free_offers: BTreeMap<String, Vec<FreeOffer>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -318,6 +346,13 @@ pub fn rank_catalog(
     let mut seen_models: Vec<String> = Vec::new();
     let mut endpoints_by_model: HashMap<String, Vec<usize>> = HashMap::new();
     let endpoints = catalog.all_endpoints()?;
+    // Parsed payloads alongside the rows: tag identity for ordering
+    // borrows these instead of re-parsing per comparison (Iter 11, A03,
+    // and cheaper than the old per-compare parse).
+    let payloads: Vec<serde_json::Value> = endpoints
+        .iter()
+        .map(|ep| serde_json::from_str(&ep.payload).unwrap_or(serde_json::Value::Null))
+        .collect();
     for (i, ep) in endpoints.iter().enumerate() {
         if !endpoints_by_model.contains_key(&ep.model_id) {
             seen_models.push(ep.model_id.clone());
@@ -350,8 +385,8 @@ pub fn rank_catalog(
                 let mut sorted = members.clone();
                 sorted.sort_by(|a, b| {
                     compare(
-                        &signals(&endpoints[*a], trends, promos, now),
-                        &signals(&endpoints[*b], trends, promos, now),
+                        &signals(&endpoints[*a], &payloads[*a], trends, promos, now),
+                        &signals(&endpoints[*b], &payloads[*b], trends, promos, now),
                         orientation,
                     )
                 });
@@ -372,32 +407,91 @@ pub fn rank_catalog(
         }
         by_model.insert(model_id.clone(), rankings);
     }
+    // Promo-free eligibility per model (Iter 11, F11): permanent
+    // catalog zeros carry no expiry; promo zeros carry the covering
+    // window's end so the gateway can expire them without the file.
+    let mut free_offers: BTreeMap<String, Vec<FreeOffer>> = BTreeMap::new();
+    for model_id in &seen_models {
+        let Some(indices) = endpoints_by_model.get(model_id) else {
+            continue;
+        };
+        let mut offers = Vec::new();
+        for i in indices {
+            let ep = &endpoints[*i];
+            let tag = endpoint_tag_of(ep);
+            let seen = |offers: &[FreeOffer]| {
+                offers
+                    .iter()
+                    .any(|o| o.provider == ep.provider_name && o.tag == tag)
+            };
+            if seen(&offers) {
+                continue;
+            }
+            let profile = crate::price::balanced_profile();
+            let static_cost = crate::price::effective_cost(
+                ep.price_prompt,
+                ep.price_completion,
+                ep.price_cache_read,
+                ep.price_cache_write,
+                &profile,
+                ep.promo_discount.unwrap_or(0.0),
+            );
+            if static_cost == Some(0.0) {
+                offers.push(FreeOffer {
+                    provider: ep.provider_name.clone(),
+                    tag,
+                    valid_until_unix: None,
+                });
+            } else if let Some(ends_at) =
+                promos.free_until(&ep.model_id, &ep.provider_name, tag.as_deref(), now)
+            {
+                let valid_until_unix = time::OffsetDateTime::parse(
+                    &ends_at,
+                    &time::format_description::well_known::Rfc3339,
+                )
+                .map(|t| t.unix_timestamp().max(0) as u64)
+                .ok();
+                offers.push(FreeOffer {
+                    provider: ep.provider_name.clone(),
+                    tag,
+                    valid_until_unix,
+                });
+            }
+        }
+        if !offers.is_empty() {
+            free_offers.insert(model_id.clone(), offers);
+        }
+    }
     Ok(RankingDocument {
         created_at: created_at.to_string(),
         catalog_version,
         models: by_model,
+        free_offers,
     })
 }
 
 fn signals<'a>(
     ep: &'a crate::store::EndpointRow,
+    payload: &'a serde_json::Value,
     trends: &'a Trends,
     promos: &crate::price::Promos,
     now: &str,
 ) -> Signals<'a> {
     let trend = trends.get(&ep.model_id, &ep.provider_name);
-    let tag = endpoint_tag_of(ep);
+    // Real tag identity (Iter 11, A03): the same tag the entry build
+    // and the gateway inline sort use, so all three agree on ties.
+    let tag = crate::judge::endpoint_tag(payload);
     let discount = crate::price::resolve_discount(
         promos,
         &ep.model_id,
         &ep.provider_name,
-        tag.as_deref(),
+        tag,
         ep.promo_discount,
         now,
     );
     Signals {
         provider: &ep.provider_name,
-        tag: None, // tag identity comes from the payload at entry build
+        tag,
         cost: crate::price::effective_cost(
             ep.price_prompt,
             ep.price_completion,
@@ -457,7 +551,9 @@ pub fn publish_ranking(
     let manifest_name = format!("ranking-{version}.manifest.json");
     let file_path = out_dir.join(&file_name);
     let manifest_path = out_dir.join(&manifest_name);
-    std::fs::write(&file_path, &bytes)?;
+    // Atomic data-before-manifest publish (Iter 11, F07): see
+    // `artifact::atomic_write`.
+    crate::artifact::atomic_write(&file_path, &bytes)?;
     let manifest = RankingManifest {
         version,
         sha256,
@@ -466,7 +562,10 @@ pub fn publish_ranking(
         catalog_version: doc.catalog_version.clone(),
         model_count: doc.models.len() as u64,
     };
-    std::fs::write(&manifest_path, serde_json::to_string_pretty(&manifest)?)?;
+    crate::artifact::atomic_write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest)?.as_bytes(),
+    )?;
     Ok((file_path, manifest_path, manifest))
 }
 

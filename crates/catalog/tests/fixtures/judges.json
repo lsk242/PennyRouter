@@ -1,0 +1,10 @@
+{"judges": [
+  {"backend": "recorded", "recording": "tests/fixtures/judge-baseten.json"},
+  {"backend": "baseten", "model": "meta-models/muse-spark-open-1026",
+   "base_url": "https://inference.baseten.co/v1",
+   "auth_env": ["BASETEN_API_KEY"], "prompt_version": "v1"},
+  {"backend": "modal", "model": "meta-models/Muse-Spark-Open-816B-A42B",
+   "base_url": "https://judge.modal.example.invalid/v1",
+   "auth_env": ["MODAL_KEY_ID", "MODAL_KEY_SECRET"], "prompt_version": "v1"}
+],
+"policy": {"sample_rate": 1.0, "max_calls": 1000}}

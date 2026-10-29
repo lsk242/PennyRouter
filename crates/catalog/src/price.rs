@@ -127,10 +127,17 @@ impl Promos {
             };
             let model_id = need_str("model_id")?;
             let provider_name = need_str("provider_name")?;
-            let tag = item
-                .get("tag")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_string);
+            // A wrong-type tag is rejected, never widened to an
+            // unscoped match-all (Iter 11, A05).
+            let tag = match item.get("tag") {
+                None => None,
+                Some(value) => Some(
+                    value
+                        .as_str()
+                        .ok_or_else(|| Error::InvalidFixture(at("\"tag\" must be a string")))?
+                        .to_string(),
+                ),
+            };
             let discount = item
                 .get("discount")
                 .and_then(serde_json::Value::as_f64)
@@ -162,6 +169,39 @@ impl Promos {
                 });
         }
         Ok(Self { by_endpoint })
+    }
+
+    /// End (`ends_at`) of the last active 100%-off window covering the
+    /// offering at `now` (Iter 11, F11). `None` means no promo makes it
+    /// free right now — permanent catalog zeros are not promo facts.
+    pub fn free_until(
+        &self,
+        model_id: &str,
+        provider_name: &str,
+        tag: Option<&str>,
+        now: &str,
+    ) -> Option<String> {
+        let now = parse_time(now)?;
+        let mut free_until = None;
+        if let Some(promos) = self
+            .by_endpoint
+            .get(&(model_id.to_string(), provider_name.to_string()))
+        {
+            for promo in promos {
+                if promo.tag.as_deref().is_some_and(|t| Some(t) != tag) {
+                    continue;
+                }
+                let (Some(start), Some(end)) =
+                    (parse_time(&promo.starts_at), parse_time(&promo.ends_at))
+                else {
+                    continue;
+                };
+                if start <= now && now < end && promo.discount == 1.0 {
+                    free_until = Some(promo.ends_at.clone());
+                }
+            }
+        }
+        free_until
     }
 
     /// Active discount for one offering at `now` (RFC 3339), if any promo
@@ -277,6 +317,24 @@ mod tests {
         );
         let blind_cache = effective_cost(Some(1.0), Some(1.0), None, None, cache_heavy, 0.0);
         assert!(blind_cache.unwrap() - cheap_cache.unwrap() > gap_balanced);
+    }
+
+    /// A05: a wrong-type tag fails the file instead of widening to a
+    /// match-all window.
+    #[test]
+    fn wrong_type_tag_rejected() {
+        let raw = r#"{"promos": [
+            {"model_id": "m", "provider_name": "p", "tag": 42,
+             "discount": 1.0, "starts_at": "2026-01-01T00:00:00Z",
+             "ends_at": "2026-02-01T00:00:00Z"}
+        ]}"#;
+        assert!(Promos::from_str(raw).is_err());
+        let raw = r#"{"promos": [
+            {"model_id": "m", "provider_name": "p", "tag": ["t"],
+             "discount": 1.0, "starts_at": "2026-01-01T00:00:00Z",
+             "ends_at": "2026-02-01T00:00:00Z"}
+        ]}"#;
+        assert!(Promos::from_str(raw).is_err());
     }
 
     #[test]

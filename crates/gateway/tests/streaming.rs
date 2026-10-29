@@ -191,5 +191,12 @@ async fn idle_stall_ends_client_stream_with_prefix_intact() {
         .await
         .expect("stalled stream terminates promptly")
         .unwrap();
-    assert_eq!(body.as_ref(), prefix.as_bytes());
+    // Iter 11 (F06): the prefix arrives intact, but truncation no longer
+    // masquerades as clean EOF — a terminal error event closes the body.
+    let body = std::str::from_utf8(body.as_ref()).unwrap();
+    assert!(body.starts_with(prefix), "prefix intact, got {body:?}");
+    assert!(
+        body.ends_with("event: error\ndata: {\"error\":{\"message\":\"upstream stream interrupted\",\"type\":\"stream_error\",\"code\":\"upstream_interrupted\"}}\n\n"),
+        "terminal error event present, got {body:?}"
+    );
 }

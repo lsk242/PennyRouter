@@ -2,7 +2,7 @@ use axum::{
     body::{Body, Bytes},
     extract::{Request, State},
     http::{
-        header::{CONTENT_LENGTH, CONTENT_TYPE, HOST},
+        header::{CONTENT_TYPE, LOCATION},
         HeaderMap, Method, StatusCode,
     },
     middleware::{self, Next},
@@ -12,9 +12,14 @@ use axum::{
 };
 use serde::Serialize;
 use std::{
-    sync::Arc,
+    io::Write,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, OnceLock,
+    },
     time::{Duration, Instant},
 };
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 mod metrics;
 pub mod routing;
@@ -32,15 +37,30 @@ const MAX_REQUEST_BYTES: usize = MAX_TOKENS * BYTES_PER_TOKEN;
 /// Upstream error bodies are wrapped with at most this much upstream text.
 const ERROR_SNIPPET_CHARS: usize = 200;
 
+/// Concurrency bounds (Iter 9): at most `max_upstream` requests hold an
+/// upstream slot at once; overflow waits on `max_queued` queue slots, and
+/// anything beyond sheds with 503 instead of piling up unboundedly.
+const DEFAULT_MAX_UPSTREAM: usize = 64;
+const DEFAULT_MAX_QUEUED: usize = 128;
+
+/// Catalog reload cadence (Iter 10): how often the gateway re-resolves
+/// `CATALOG_DB` and atomically publishes the new snapshot. Zero disables
+/// the background reload (load-once behavior).
+const DEFAULT_RELOAD_INTERVAL_SECS: u64 = 60;
+
 /// Upstream time budgets. Buffered (non-streaming) responses are bounded by
 /// `total`; streams are bounded per chunk by `idle`, so legitimately long
-/// generations can run as long as chunks keep flowing.
+/// generations can run as long as chunks keep flowing. Uploads are bounded
+/// per chunk-read by `upload_idle` and overall by `upload_total` (Iter 11,
+/// F02), so incomplete below-cap uploads cannot be retained indefinitely.
 #[derive(Clone, Copy)]
 pub struct Timeouts {
     pub connect: Duration,
     pub first_chunk: Duration,
     pub idle: Duration,
     pub total: Duration,
+    pub upload_idle: Duration,
+    pub upload_total: Duration,
 }
 
 impl Default for Timeouts {
@@ -50,8 +70,66 @@ impl Default for Timeouts {
             first_chunk: Duration::from_secs(30),
             idle: Duration::from_secs(60),
             total: Duration::from_secs(300),
+            upload_idle: Duration::from_secs(30),
+            upload_total: Duration::from_secs(60),
         }
     }
+}
+
+/// Upstream response bodies are collected only up to this size (Iter 11,
+/// F05). Streams pass chunk-by-chunk and need no bound; anything that
+/// must be buffered is capped here instead of growing without limit.
+const MAX_UPSTREAM_BYTES: usize = 16 * 1024 * 1024;
+
+/// Dropped log lines (Iter 12): rendered by metrics; `pub(crate)` so
+/// only the metrics renderer reads it.
+pub(crate) static LOG_DROPPED: AtomicU64 = AtomicU64::new(0);
+
+/// Buffered request logging (Iter 12): lines travel a bounded channel
+/// to a single writer thread instead of one syscall per request. A
+/// full channel drops lines (counted in
+/// `pennyrouter_log_dropped_total`) rather than blocking the request
+/// path; the writer flushes at least once a second.
+const LOG_CHANNEL: usize = 1024;
+
+static LOG_SENDER: OnceLock<std::sync::mpsc::SyncSender<String>> = OnceLock::new();
+
+fn log_line(line: String) {
+    let sender = LOG_SENDER.get_or_init(spawn_log_writer);
+    if sender.try_send(line).is_err() {
+        LOG_DROPPED.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+fn spawn_log_writer() -> std::sync::mpsc::SyncSender<String> {
+    let (tx, rx) = std::sync::mpsc::sync_channel::<String>(LOG_CHANNEL);
+    std::thread::Builder::new()
+        .name("pennyrouter-log".to_string())
+        .spawn(move || {
+            // The stdout lock is taken per batch and released: holding it
+            // for the thread's lifetime would starve every other stdout
+            // writer in the process (including test harnesses).
+            loop {
+                match rx.recv_timeout(Duration::from_secs(1)) {
+                    Ok(line) => {
+                        let mut batch = line;
+                        batch.push('\n');
+                        while let Ok(line) = rx.try_recv() {
+                            batch.push_str(&line);
+                            batch.push('\n');
+                            if batch.len() >= 64 * 1024 {
+                                break;
+                            }
+                        }
+                        let _ = std::io::stdout().lock().write_all(batch.as_bytes());
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                }
+            }
+        })
+        .expect("spawn log writer");
+    tx
 }
 
 #[derive(Serialize)]
@@ -63,6 +141,24 @@ async fn health() -> Json<Health> {
     Json(Health { status: "ok" })
 }
 
+/// Concurrency bounds (Iter 9). `max_upstream` caps simultaneous
+/// upstream calls; `max_queued` caps how many requests wait for a slot.
+/// Anything beyond sheds with 503.
+#[derive(Clone, Copy, Debug)]
+pub struct ConcurrencyLimits {
+    pub max_upstream: usize,
+    pub max_queued: usize,
+}
+
+impl Default for ConcurrencyLimits {
+    fn default() -> Self {
+        Self {
+            max_upstream: DEFAULT_MAX_UPSTREAM,
+            max_queued: DEFAULT_MAX_QUEUED,
+        }
+    }
+}
+
 /// Shared gateway state: where chat completions are forwarded upstream,
 // plus shared metrics and the optional provider router.
 #[derive(Clone)]
@@ -72,6 +168,8 @@ pub struct AppState {
     timeouts: Timeouts,
     metrics: Arc<Metrics>,
     router: Option<Arc<routing::Router>>,
+    upstream_slots: Arc<Semaphore>,
+    queue_slots: Arc<Semaphore>,
 }
 
 impl AppState {
@@ -80,17 +178,34 @@ impl AppState {
     }
 
     pub fn with_timeouts(upstream_base_url: impl Into<String>, timeouts: Timeouts) -> Self {
+        Self::with_limits(upstream_base_url, timeouts, ConcurrencyLimits::default())
+    }
+
+    pub fn with_limits(
+        upstream_base_url: impl Into<String>,
+        timeouts: Timeouts,
+        limits: ConcurrencyLimits,
+    ) -> Self {
         let base = upstream_base_url.into();
         let client = reqwest::Client::builder()
             .connect_timeout(timeouts.connect)
+            // The gateway is a reverse proxy: redirects pass through to
+            // the client (with Location preserved) instead of being
+            // followed with the caller's credentials (Iter 11).
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
+        // An upstream bound of zero would deadlock every request; a queue
+        // bound of zero (no waiting room) is a legitimate configuration.
+        let max_upstream = limits.max_upstream.max(1);
         Self {
             upstream_base_url: base.trim_end_matches('/').to_string(),
             client,
             timeouts,
             metrics: Arc::new(Metrics::new()),
             router: None,
+            upstream_slots: Arc::new(Semaphore::new(max_upstream)),
+            queue_slots: Arc::new(Semaphore::new(limits.max_queued)),
         }
     }
 
@@ -101,13 +216,35 @@ impl AppState {
         self
     }
 
+    /// Router handle for the background reload task (Iter 10).
+    pub fn router_handle(&self) -> Option<Arc<routing::Router>> {
+        self.router.clone()
+    }
+
+    /// Metrics handle for the background reload task (Iter 10).
+    pub fn metrics_handle(&self) -> Arc<Metrics> {
+        self.metrics.clone()
+    }
+
     /// State for the real server: upstream from `OPENROUTER_BASE_URL`,
     /// defaulting to OpenRouter; routing from `CATALOG_DB` when set and
-    /// loadable, otherwise plain passthrough.
+    /// loadable, otherwise plain passthrough. Concurrency bounds from
+    /// `UPSTREAM_MAX_CONCURRENT` / `UPSTREAM_MAX_QUEUED`, defaulting to
+    /// the compiled defaults on missing or unparsable values.
     pub fn from_env() -> Self {
         let base = std::env::var("OPENROUTER_BASE_URL")
             .unwrap_or_else(|_| "https://openrouter.ai/api".to_string());
-        let state = Self::new(base);
+        let limits = ConcurrencyLimits {
+            max_upstream: std::env::var("UPSTREAM_MAX_CONCURRENT")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(DEFAULT_MAX_UPSTREAM),
+            max_queued: std::env::var("UPSTREAM_MAX_QUEUED")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(DEFAULT_MAX_QUEUED),
+        };
+        let state = Self::with_limits(base, Timeouts::default(), limits);
         match std::env::var("CATALOG_DB") {
             Err(_) => state,
             Ok(path) => match routing::Router::load(&path) {
@@ -125,15 +262,81 @@ pub fn app() -> Router {
     app_with_state(AppState::from_env())
 }
 
+/// Reload cadence from `RELOAD_INTERVAL_SECS` (default 60s, 0 disables).
+pub fn reload_interval_from_env() -> Duration {
+    Duration::from_secs(
+        std::env::var("RELOAD_INTERVAL_SECS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(DEFAULT_RELOAD_INTERVAL_SECS),
+    )
+}
+
+/// Periodic catalog refresh (Iter 10): re-resolve the router source and
+/// atomically publish the new snapshot, keeping the last good one on
+/// failure. Runs until the handle is aborted (e.g. at shutdown).
+pub fn spawn_reload_task(
+    router: Arc<routing::Router>,
+    interval: Duration,
+    metrics: Arc<Metrics>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(interval);
+        // A slow or failed reload never delays the next scheduled one.
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            ticker.tick().await;
+            match router.reload() {
+                Ok(()) => metrics.reload_report(true),
+                Err(e) => {
+                    metrics.reload_report(false);
+                    eprintln!("gateway: catalog reload failed ({e}), keeping last good snapshot");
+                }
+            }
+        }
+    })
+}
+
 pub fn app_with_state(state: AppState) -> Router {
     let metrics = state.metrics.clone();
     Router::new()
         .route("/health", get(health))
         .route("/metrics", get(metrics_handler))
-        .route("/v1/chat/completions", post(chat_completions))
+        .route("/v1/chat/completions", post(routed_completion))
+        // Responses bodies carry the same `model` field, so they get
+        // the same routing, budget, and floor policy (Iter 14).
+        .route("/v1/responses", post(routed_completion))
+        // Curated menu (Iter 13): clients discover exactly the virtual
+        // models; this path used to proxy upstream.
+        .route("/v1/models", get(models_list))
         .fallback(fallback_proxy)
         .layer(middleware::from_fn_with_state(metrics, track))
         .with_state(state)
+}
+
+/// Curated virtual-model menu (Iter 13): exactly the six ids, OpenAI
+/// list shape, served locally instead of proxied.
+async fn models_list() -> Response {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "object": "list",
+            "data": crate::routing::VIRTUAL_MODELS
+                .iter()
+                .map(|id| serde_json::json!({
+                    "id": id,
+                    "object": "model",
+                    "created": now,
+                    "owned_by": "pennyrouter",
+                }))
+                .collect::<Vec<_>>(),
+        })),
+    )
+        .into_response()
 }
 
 /// Observability middleware (Iter 3): request ID, latency histogram,
@@ -147,6 +350,8 @@ async fn track(State(metrics): State<Arc<Metrics>>, request: Request, next: Next
         .and_then(|value| value.to_str().ok())
         .map(str::to_string)
         .unwrap_or_else(|| format!("{:x}", metrics.next_request_id()));
+    // The header-latency guard drops at return; SSE bodies hold their
+    // own in-flight slot until the stream ends (Iter 11, A04).
     let _in_flight = metrics.in_flight_guard();
     let start = Instant::now();
     let mut response = next.run(request).await;
@@ -156,7 +361,7 @@ async fn track(State(metrics): State<Arc<Metrics>>, request: Request, next: Next
     if let Ok(value) = request_id.parse() {
         response.headers_mut().insert("x-request-id", value);
     }
-    println!(
+    log_line(format!(
         "{}",
         serde_json::json!({
             "request_id": request_id,
@@ -166,7 +371,7 @@ async fn track(State(metrics): State<Arc<Metrics>>, request: Request, next: Next
             "latency_ms": (latency.as_secs_f64() * 1000.0 * 1000.0).round() / 1000.0,
             "outcome": outcome(status),
         })
-    );
+    ));
     response
 }
 
@@ -175,6 +380,7 @@ fn outcome(status: u16) -> &'static str {
         200..=299 => "ok",
         413 => "guard_rejection",
         502 => "upstream_error",
+        503 => "load_shed",
         504 => "upstream_timeout",
         400..=499 => "client_error",
         _ => "error",
@@ -190,14 +396,27 @@ async fn metrics_handler(State(state): State<AppState>) -> Response {
         .into_response()
 }
 
-/// Chat completions: guard, optionally route (stripped model + forced
-/// provider), then forward; streams pass chunk-by-chunk, buffered
-/// responses byte-for-byte.
-async fn chat_completions(
+/// Routed completions (`/v1/chat/completions` and `/v1/responses`):
+/// admit, guard, optionally route (stripped model + forced provider),
+/// then forward; streams pass chunk-by-chunk, buffered responses
+/// byte-for-byte.
+///
+/// Admission happens before body collection (Iter 11, F02), so the
+/// concurrency bound covers retained upload buffers too. Unlike the
+/// fallback, these endpoints keep their query string (Iter 11, A01).
+async fn routed_completion(
     State(state): State<AppState>,
     headers: HeaderMap,
+    uri: axum::http::Uri,
     body: Body,
 ) -> Response {
+    let permit = match acquire_upstream_slot(&state).await {
+        Some(permit) => permit,
+        None => {
+            state.metrics.load_shed();
+            return service_unavailable();
+        }
+    };
     // Token guard first: count incrementally so oversize work is rejected
     // before anything is sent upstream.
     let buffered = match read_capped_body(&state, body).await {
@@ -205,31 +424,110 @@ async fn chat_completions(
         Err(response) => return *response,
     };
 
+    // Virtual requests keep a copy for one retry (Iter 13): the permit
+    // is per-attempt, the body is reusable.
+    let retry_body = is_virtual_request(&buffered).then(|| buffered.clone());
     // Routing rewrites recognized requests; anything unrecognized (or no
-    // router configured) forwards untouched.
-    let (forwarded_body, provider) = match &state.router {
-        Some(router) => match router.route_request(&headers, &buffered) {
-            Some((rewritten, decision)) => (rewritten, Some(decision.provider)),
-            None => (buffered, None),
+    // router configured) forwards untouched. Virtual-model rejections
+    // fail closed (Iter 14): a gateway-owned id must never leak upstream,
+    // where it would 404 opaquely.
+    let (forwarded_body, decision) = match &state.router {
+        Some(router) => match router.route_request_or_reject(&headers, &buffered) {
+            Ok(Some((rewritten, decision))) => (rewritten, Some(decision)),
+            Ok(None) => (buffered, None),
+            Err(rejection) => {
+                if is_virtual_request(&buffered) {
+                    return rejection_response(&rejection);
+                }
+                (buffered, None)
+            }
         },
         None => (buffered, None),
     };
+    let path = uri
+        .path_and_query()
+        .map(|path_and_query| path_and_query.as_str().to_string())
+        .unwrap_or_else(|| "/v1/chat/completions".to_string());
     let mut response = forward_upstream(
         &state,
+        permit,
         &Method::POST,
-        "/v1/chat/completions",
+        &path,
         &headers,
         forwarded_body,
     )
     .await;
-    if let Some(provider) = provider {
-        if let Ok(value) = provider.parse() {
+    if let Some(decision) = &decision {
+        if response.status() == StatusCode::TOO_MANY_REQUESTS {
+            // 429 history steers later virtual picks elsewhere.
+            if let Some(router) = &state.router {
+                router.note_throttled(&decision.model_id, &decision.provider);
+            }
+            state.metrics.throttled();
+        }
+    }
+    // Availability (Iter 13): one retry on a different provider for
+    // virtual requests when the first attempt is retryable. Non-virtual
+    // requests keep exactly-once semantics.
+    // `retry_body` exists only for virtual requests (see above), so
+    // reaching here already implies virtual + retryable.
+    if is_retryable(response.status()) {
+        if let (Some(router), Some(retry_body), Some(decision)) =
+            (&state.router, retry_body, &decision)
+        {
+            if let Some((rewritten, retry_decision)) =
+                router.route_request_retry(&headers, &retry_body, &decision.provider)
+            {
+                let permit = match acquire_upstream_slot(&state).await {
+                    Some(permit) => permit,
+                    None => {
+                        state.metrics.load_shed();
+                        return service_unavailable();
+                    }
+                };
+                response =
+                    forward_upstream(&state, permit, &Method::POST, &path, &headers, rewritten)
+                        .await;
+                if let Ok(provider) = retry_decision.provider.parse() {
+                    response
+                        .headers_mut()
+                        .insert(routing::PROVIDER_HEADER, provider);
+                }
+                return response;
+            }
+        }
+    }
+    if let Some(decision) = decision {
+        if let Ok(value) = decision.provider.parse() {
             response
                 .headers_mut()
                 .insert(routing::PROVIDER_HEADER, value);
         }
     }
     response
+}
+
+/// True for virtual-model chat bodies (Iter 13), from the raw `model`
+/// field — routing may already have rewritten it by the time we ask.
+fn is_virtual_request(buffered: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(buffered)
+        .ok()
+        .and_then(|json| json.get("model")?.as_str().map(str::to_string))
+        .and_then(|model| routing::parse_virtual(&model))
+        .is_some()
+}
+
+/// Retryable upstream outcomes (Iter 13): rate limits, bad gateways,
+/// and timeouts. Other statuses (including 500s, which may be
+/// deterministic) stand as-is.
+fn is_retryable(status: StatusCode) -> bool {
+    matches!(
+        status,
+        StatusCode::TOO_MANY_REQUESTS
+            | StatusCode::BAD_GATEWAY
+            | StatusCode::SERVICE_UNAVAILABLE
+            | StatusCode::GATEWAY_TIMEOUT
+    )
 }
 
 /// Drop-in fallback (Iter 8): any standard endpoint without a custom
@@ -242,72 +540,211 @@ async fn fallback_proxy(State(state): State<AppState>, request: Request) -> Resp
         .path_and_query()
         .map(|path_and_query| path_and_query.as_str().to_string())
         .unwrap_or_else(|| "/".to_string());
-    println!(
+    log_line(format!(
         "{}",
         serde_json::json!({
             "fallback_proxy": true,
             "method": parts.method.to_string(),
-            "path": path,
+            "path": redact_query(&path),
         })
-    );
+    ));
+    let permit = match acquire_upstream_slot(&state).await {
+        Some(permit) => permit,
+        None => {
+            state.metrics.load_shed();
+            return service_unavailable();
+        }
+    };
     let buffered = match read_capped_body(&state, body).await {
         Ok(buffered) => buffered,
         Err(response) => return *response,
     };
-    forward_upstream(&state, &parts.method, &path, &parts.headers, buffered).await
+    forward_upstream(
+        &state,
+        permit,
+        &parts.method,
+        &path,
+        &parts.headers,
+        buffered,
+    )
+    .await
+}
+
+/// Log paths without query values (Iter 11): tokens and private
+/// identifiers in query strings must not enter logs.
+fn redact_query(path: &str) -> String {
+    match path.find('?') {
+        Some(i) => format!("{}?[redacted]", &path[..i]),
+        None => path.to_string(),
+    }
 }
 
 /// Read a request body up to the token-guard cap, rejecting oversize
-/// payloads before anything is sent upstream.
+/// payloads before anything is sent upstream. Chunk reads are bounded
+/// by the upload-idle deadline and the whole read by the upload-total
+/// deadline (Iter 11, F02): stalled or trickling uploads fail instead
+/// of retaining buffers indefinitely.
 async fn read_capped_body(state: &AppState, body: Body) -> Result<Vec<u8>, Box<Response>> {
     use futures_util::StreamExt;
-    let mut stream = Box::pin(body.into_data_stream());
-    let mut buffered = Vec::new();
-    while let Some(result) = stream.next().await {
-        let data = match result {
-            Ok(data) => data,
-            Err(_) => {
-                return Err(Box::new(error_response(
-                    StatusCode::BAD_REQUEST,
-                    "invalid_request_error",
-                    "read_error",
-                    "failed to read request body".to_string(),
-                )));
+    let read = async {
+        let mut stream = Box::pin(body.into_data_stream());
+        let mut buffered = Vec::new();
+        loop {
+            let next = match tokio::time::timeout(state.timeouts.upload_idle, stream.next()).await {
+                Ok(next) => next,
+                Err(_) => return Err(Box::new(upload_timeout())),
+            };
+            match next {
+                None => return Ok(buffered),
+                Some(Err(_)) => {
+                    return Err(Box::new(error_response(
+                        StatusCode::BAD_REQUEST,
+                        "invalid_request_error",
+                        "read_error",
+                        "failed to read request body".to_string(),
+                    )));
+                }
+                Some(Ok(data)) => {
+                    if buffered.len() + data.len() > MAX_REQUEST_BYTES {
+                        state.metrics.guard_rejected();
+                        return Err(Box::new(error_response(
+                            StatusCode::PAYLOAD_TOO_LARGE,
+                            "invalid_request_error",
+                            "payload_too_large",
+                            format!(
+                                "request body exceeds the {MAX_TOKENS}-token limit \
+                                 (~{} MiB at {BYTES_PER_TOKEN} bytes/token)",
+                                MAX_REQUEST_BYTES / (1024 * 1024),
+                            ),
+                        )));
+                    }
+                    buffered.extend_from_slice(&data);
+                }
             }
-        };
-        if buffered.len() + data.len() > MAX_REQUEST_BYTES {
-            state.metrics.guard_rejected();
-            return Err(Box::new(error_response(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "invalid_request_error",
-                "payload_too_large",
-                format!(
-                    "request body exceeds the {MAX_TOKENS}-token limit \
-                     (~{} MiB at {BYTES_PER_TOKEN} bytes/token)",
-                    MAX_REQUEST_BYTES / (1024 * 1024),
-                ),
-            )));
         }
-        buffered.extend_from_slice(&data);
+    };
+    match tokio::time::timeout(state.timeouts.upload_total, read).await {
+        Ok(result) => result,
+        Err(_) => Err(Box::new(upload_timeout())),
     }
-    Ok(buffered)
+}
+
+fn upload_timeout() -> Response {
+    error_response(
+        StatusCode::REQUEST_TIMEOUT,
+        "invalid_request_error",
+        "upload_timeout",
+        "request body upload timed out".to_string(),
+    )
+}
+
+/// One held upstream slot, plus the queue slot when the request had to
+/// wait for its turn. Dropping both releases the capacity back.
+struct UpstreamPermit {
+    _slot: OwnedSemaphorePermit,
+    _queued: Option<OwnedSemaphorePermit>,
+}
+
+/// Admit one request to the upstream path (Iter 9): the fast path takes a
+/// free slot immediately; overflow takes a bounded queue slot and waits
+/// for its turn; anything beyond sheds with `None` (caller answers 503).
+async fn acquire_upstream_slot(state: &AppState) -> Option<UpstreamPermit> {
+    if let Ok(slot) = state.upstream_slots.clone().try_acquire_owned() {
+        return Some(UpstreamPermit {
+            _slot: slot,
+            _queued: None,
+        });
+    }
+    let queued = state.queue_slots.clone().try_acquire_owned().ok()?;
+    match state.upstream_slots.clone().acquire_owned().await {
+        Ok(slot) => Some(UpstreamPermit {
+            _slot: slot,
+            _queued: Some(queued),
+        }),
+        // Unreachable: the semaphore is never closed while state lives.
+        Err(_) => None,
+    }
+}
+
+/// End-to-end response headers preserved on every path (Iter 11,
+/// F03): representation and negotiation metadata stay coherent with
+/// the bytes (transparent passthrough — the gateway never decodes),
+/// so compressed bodies, ranges, auth challenges, validators, and
+/// redirects survive. Everything else (framing, hop-by-hop) is
+/// rebuilt by our own stack.
+const FORWARDED_RESPONSE_HEADERS: [&str; 7] = [
+    "content-type",
+    "content-encoding",
+    "content-range",
+    "retry-after",
+    "www-authenticate",
+    "etag",
+    "last-modified",
+];
+
+/// Copy the preserved response headers from an upstream response.
+fn forwarded_response_headers(upstream: &reqwest::header::HeaderMap) -> HeaderMap {
+    let mut out = HeaderMap::new();
+    for name in FORWARDED_RESPONSE_HEADERS {
+        if let Some(value) = upstream.get(name) {
+            out.insert(axum::http::HeaderName::from_static(name), value.clone());
+        }
+    }
+    // Redirects pass through with their target intact.
+    if let Some(location) = upstream.get(LOCATION) {
+        out.insert(LOCATION, location.clone());
+    }
+    out
+}
+
+/// Request headers never forwarded upstream (Iter 11): framing the
+/// client stack owns, plus proxy credentials and connection-nominated
+/// fields per RFC 9110 §7.6.1.
+fn is_hop_by_hop(name: &axum::http::HeaderName, nominated: &[String]) -> bool {
+    const FIXED: [&str; 10] = [
+        "host",
+        "content-length",
+        "connection",
+        "keep-alive",
+        "proxy-authenticate",
+        "proxy-authorization",
+        "te",
+        "trailer",
+        "transfer-encoding",
+        "upgrade",
+    ];
+    if FIXED.contains(&name.as_str()) {
+        return true;
+    }
+    nominated.iter().any(|field| field == name.as_str())
 }
 
 /// Forward one buffered body upstream with the given method and path,
 /// then map the response (streams chunk-by-chunk, buffered bodies
-/// byte-for-byte, errors wrapped OpenAI-style).
+/// byte-for-byte, errors wrapped OpenAI-style). The caller holds an
+/// admission permit for the whole call (Iter 11, F02).
 async fn forward_upstream(
     state: &AppState,
+    _permit: UpstreamPermit,
     method: &Method,
     path: &str,
     headers: &HeaderMap,
     body: Vec<u8>,
 ) -> Response {
     let url = format!("{}{}", state.upstream_base_url, path);
+    let nominated: Vec<String> = headers
+        .get(axum::http::header::CONNECTION)
+        .and_then(|value| value.to_str().ok())
+        .map(|connection| {
+            connection
+                .split(',')
+                .map(|field| field.trim().to_lowercase())
+                .collect()
+        })
+        .unwrap_or_default();
     let mut forwarded = reqwest::header::HeaderMap::new();
     for (name, value) in headers.iter() {
-        // The client sets host and content-length itself.
-        if *name == HOST || *name == CONTENT_LENGTH {
+        if is_hop_by_hop(name, &nominated) {
             continue;
         }
         forwarded.append(name.clone(), value.clone());
@@ -346,49 +783,124 @@ async fn forward_upstream(
     if is_stream {
         return stream_response(status, upstream, state.timeouts.idle, state.metrics.clone());
     }
-    let content_type = upstream.headers().get(CONTENT_TYPE).cloned();
-    let bytes = match tokio::time::timeout(state.timeouts.total, upstream.bytes()).await {
-        Ok(Ok(bytes)) => bytes,
-        _ => {
-            state.metrics.upstream_error(UpstreamErrorKind::Timeout);
-            return gateway_timeout();
-        }
+    let headers = forwarded_response_headers(upstream.headers());
+    let bytes = match read_capped_upstream(upstream, state.timeouts.total, &state.metrics).await {
+        Ok(bytes) => bytes,
+        Err(response) => return *response,
     };
     let mut response = Response::builder().status(status);
-    if let Some(content_type) = content_type {
-        response = response.header(CONTENT_TYPE, content_type);
+    for (name, value) in headers.iter() {
+        response = response.header(name, value);
     }
     response
         .body(Body::from(bytes))
         .unwrap_or_else(|_| bad_gateway())
 }
 
+/// Collect a buffered upstream body up to the byte bound (Iter 11,
+/// F05). Oversize or timed-out bodies map to 502, never to unbounded
+/// memory.
+async fn read_capped_upstream(
+    upstream: reqwest::Response,
+    total: Duration,
+    metrics: &Metrics,
+) -> Result<Bytes, Box<Response>> {
+    let read = async {
+        let mut res = upstream;
+        let mut buffered = Vec::new();
+        loop {
+            match res.chunk().await {
+                Err(_) => {
+                    metrics.upstream_error(UpstreamErrorKind::Transport);
+                    return Err(Box::new(bad_gateway()));
+                }
+                Ok(None) => return Ok(Bytes::from(buffered)),
+                Ok(Some(data)) => {
+                    if buffered.len() + data.len() > MAX_UPSTREAM_BYTES {
+                        metrics.upstream_error(UpstreamErrorKind::Status5xx);
+                        return Err(Box::new(error_response(
+                            StatusCode::BAD_GATEWAY,
+                            "server_error",
+                            "upstream_too_large",
+                            format!(
+                                "upstream response exceeds the {} MiB bound",
+                                MAX_UPSTREAM_BYTES / (1024 * 1024),
+                            ),
+                        )));
+                    }
+                    buffered.extend_from_slice(&data);
+                }
+            }
+        }
+    };
+    match tokio::time::timeout(total, read).await {
+        Ok(result) => result,
+        Err(_) => {
+            metrics.upstream_error(UpstreamErrorKind::Timeout);
+            Err(Box::new(gateway_timeout()))
+        }
+    }
+}
+
+/// Terminal SSE event emitted when the upstream stream breaks mid-body
+/// (Iter 11, F06). Headers already went out as 200, so a clean EOF would
+/// masquerade truncation as success; the explicit error event lets
+/// clients tell interruption apart from completion.
+const SSE_INTERRUPTED_EVENT: &[u8] = b"event: error\ndata: {\"error\":{\"message\":\"upstream stream interrupted\",\"type\":\"stream_error\",\"code\":\"upstream_interrupted\"}}\n\n";
+
 /// SSE passthrough: forward each chunk as it arrives, preserving bytes and
-/// order. A stalled or broken stream ends the client stream — the status was
-/// already sent, so there is nothing left to map it to.
+/// order. Clean upstream EOF ends the stream unchanged; a stall or break
+/// emits one terminal error event first, so truncation never looks like
+/// success. The in-flight slot is held for the whole body lifetime
+/// (Iter 11, A04) — the middleware counts headers, the stream counts
+/// completion.
 fn stream_response(
     status: StatusCode,
     upstream: reqwest::Response,
     idle: Duration,
     metrics: Arc<Metrics>,
 ) -> Response {
-    let stream =
-        futures_util::stream::unfold((upstream, metrics), move |(mut res, metrics)| async move {
+    let preserved = forwarded_response_headers(upstream.headers());
+    let guard = metrics.in_flight_owned();
+    let stream = futures_util::stream::unfold(
+        (upstream, metrics, guard, false),
+        move |(mut res, metrics, guard, failed)| async move {
+            if failed {
+                return None;
+            }
             match tokio::time::timeout(idle, res.chunk()).await {
-                Ok(Ok(Some(bytes))) => Some((Ok::<Bytes, reqwest::Error>(bytes), (res, metrics))),
+                Ok(Ok(Some(bytes))) => Some((
+                    Ok::<Bytes, reqwest::Error>(bytes),
+                    (res, metrics, guard, false),
+                )),
+                Ok(Ok(None)) => None,
                 Err(_) => {
                     metrics.upstream_error(UpstreamErrorKind::Timeout);
-                    None
+                    eprintln!("gateway: upstream stream stalled, ending with error event");
+                    Some((
+                        Ok::<Bytes, reqwest::Error>(Bytes::from_static(SSE_INTERRUPTED_EVENT)),
+                        (res, metrics, guard, true),
+                    ))
                 }
                 Ok(Err(_)) => {
                     metrics.upstream_error(UpstreamErrorKind::Transport);
-                    None
+                    eprintln!("gateway: upstream stream broke, ending with error event");
+                    Some((
+                        Ok::<Bytes, reqwest::Error>(Bytes::from_static(SSE_INTERRUPTED_EVENT)),
+                        (res, metrics, guard, true),
+                    ))
                 }
-                Ok(Ok(None)) => None,
             }
-        });
-    Response::builder()
-        .status(status)
+        },
+    );
+    let mut response = Response::builder().status(status);
+    for (name, value) in preserved.iter() {
+        // Content-Type stays event-stream: the body is SSE either way.
+        if name != CONTENT_TYPE {
+            response = response.header(name, value);
+        }
+    }
+    response
         .header(CONTENT_TYPE, "text/event-stream")
         .body(Body::from_stream(stream))
         .unwrap_or_else(|_| bad_gateway())
@@ -407,21 +919,23 @@ async fn upstream_error(
     } else {
         UpstreamErrorKind::Status5xx
     });
-    let bytes = match tokio::time::timeout(total, upstream.bytes()).await {
-        Ok(Ok(bytes)) => bytes,
-        _ => {
-            metrics.upstream_error(UpstreamErrorKind::Timeout);
-            return gateway_timeout();
-        }
+    // Error bodies are bounded like success bodies (Iter 11, F05):
+    // the 200-char snippet is taken after a capped collection.
+    let preserved = forwarded_response_headers(upstream.headers());
+    let bytes = match read_capped_upstream(upstream, total, metrics).await {
+        Ok(bytes) => bytes,
+        Err(response) => return *response,
     };
     if serde_json::from_slice::<serde_json::Value>(&bytes)
         .ok()
         .and_then(|json| json.get("error").cloned())
         .is_some()
     {
-        return Response::builder()
-            .status(status)
-            .header(CONTENT_TYPE, "application/json")
+        let mut response = Response::builder().status(status);
+        for (name, value) in preserved.iter() {
+            response = response.header(name, value);
+        }
+        return response
             .body(Body::from(bytes))
             .unwrap_or_else(|_| bad_gateway());
     }
@@ -430,7 +944,7 @@ async fn upstream_error(
     } else {
         "server_error"
     };
-    error_response(
+    let mut response = error_response(
         status,
         kind,
         "upstream_error",
@@ -439,7 +953,19 @@ async fn upstream_error(
             status.as_u16(),
             snippet(&bytes)
         ),
-    )
+    );
+    // Negotiation metadata survives; representation headers do not —
+    // the body is rewritten JSON, so upstream content-type/encoding
+    // would lie about it (Iter 11, F03).
+    for (name, value) in preserved.iter() {
+        if name != CONTENT_TYPE
+            && name != axum::http::header::CONTENT_ENCODING
+            && name != axum::http::header::CONTENT_RANGE
+        {
+            response.headers_mut().insert(name.clone(), value.clone());
+        }
+    }
+    response
 }
 
 fn snippet(bytes: &[u8]) -> String {
@@ -467,6 +993,55 @@ fn gateway_timeout() -> Response {
         "gateway_timeout",
         "upstream timed out".to_string(),
     )
+}
+
+/// Virtual-model rejection (Iter 14): fail closed with an
+/// OpenAI-shaped error instead of forwarding a gateway-owned id.
+/// Budget violations are caller-fixable (400); unmet floors and empty
+/// tiers are gateway-side availability (503 with `Retry-After`, since a
+/// catalog reload or cool-down expiry may restore service).
+fn rejection_response(rejection: &routing::RouteRejection) -> Response {
+    match rejection.code {
+        "budget_exceeded" => error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            rejection.code,
+            rejection.message.clone(),
+        ),
+        "invalid_body" => error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            rejection.code,
+            rejection.message.clone(),
+        ),
+        _ => {
+            let mut response = error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "server_error",
+                rejection.code,
+                rejection.message.clone(),
+            );
+            response
+                .headers_mut()
+                .insert("retry-after", axum::http::HeaderValue::from_static("1"));
+            response
+        }
+    }
+}
+
+/// Load-shed response (Iter 9): the gateway is at capacity, so the
+/// request never reached upstream. OpenAI-shaped with `Retry-After`.
+fn service_unavailable() -> Response {
+    let mut response = error_response(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "server_error",
+        "service_unavailable",
+        "gateway at capacity, retry later".to_string(),
+    );
+    response
+        .headers_mut()
+        .insert("retry-after", axum::http::HeaderValue::from_static("1"));
+    response
 }
 
 fn error_response(status: StatusCode, kind: &str, code: &str, message: String) -> Response {

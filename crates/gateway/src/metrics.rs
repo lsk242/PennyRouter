@@ -7,7 +7,7 @@ use std::{
     collections::HashMap,
     sync::{
         atomic::{AtomicI64, AtomicU64, Ordering},
-        Mutex,
+        Arc, Mutex,
     },
     time::Duration,
 };
@@ -22,6 +22,7 @@ const BUCKETS: [f64; 14] = [
 pub enum Route {
     Health,
     Chat,
+    Responses,
     Metrics,
     Other,
 }
@@ -31,6 +32,7 @@ impl Route {
         match path {
             "/health" => Self::Health,
             "/v1/chat/completions" => Self::Chat,
+            "/v1/responses" => Self::Responses,
             "/metrics" => Self::Metrics,
             _ => Self::Other,
         }
@@ -40,6 +42,7 @@ impl Route {
         match self {
             Self::Health => "health",
             Self::Chat => "chat",
+            Self::Responses => "responses",
             Self::Metrics => "metrics",
             Self::Other => "other",
         }
@@ -49,8 +52,9 @@ impl Route {
         match self {
             Self::Health => 0,
             Self::Chat => 1,
-            Self::Metrics => 2,
-            Self::Other => 3,
+            Self::Responses => 2,
+            Self::Metrics => 3,
+            Self::Other => 4,
         }
     }
 }
@@ -118,9 +122,13 @@ impl RouteMetrics {
 }
 
 pub struct Metrics {
-    routes: [RouteMetrics; 4],
+    routes: [RouteMetrics; 5],
     upstream_errors: [AtomicU64; 4],
     guard_rejections: AtomicU64,
+    load_shed: AtomicU64,
+    throttled: AtomicU64,
+    reload_ok: AtomicU64,
+    reload_err: AtomicU64,
     in_flight: AtomicI64,
     request_ids: AtomicU64,
 }
@@ -133,9 +141,14 @@ impl Metrics {
                 RouteMetrics::new(),
                 RouteMetrics::new(),
                 RouteMetrics::new(),
+                RouteMetrics::new(),
             ],
             upstream_errors: [const { AtomicU64::new(0) }; 4],
             guard_rejections: AtomicU64::new(0),
+            load_shed: AtomicU64::new(0),
+            throttled: AtomicU64::new(0),
+            reload_ok: AtomicU64::new(0),
+            reload_err: AtomicU64::new(0),
             in_flight: AtomicI64::new(0),
             request_ids: AtomicU64::new(0),
         }
@@ -149,6 +162,22 @@ impl Metrics {
         self.guard_rejections.fetch_add(1, Ordering::Relaxed);
     }
 
+    pub fn load_shed(&self) {
+        self.load_shed.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn throttled(&self) {
+        self.throttled.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn reload_report(&self, ok: bool) {
+        if ok {
+            self.reload_ok.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.reload_err.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
     pub fn upstream_error(&self, kind: UpstreamErrorKind) {
         self.upstream_errors[kind.index()].fetch_add(1, Ordering::Relaxed);
     }
@@ -160,6 +189,15 @@ impl Metrics {
     pub fn in_flight_guard(&self) -> InFlightGuard<'_> {
         self.in_flight.fetch_add(1, Ordering::Relaxed);
         InFlightGuard { metrics: self }
+    }
+
+    /// Owned in-flight slot for bodies that outlive the middleware
+    /// (Iter 11, A04): SSE streams hold one until the body ends.
+    pub fn in_flight_owned(self: &Arc<Self>) -> OwnedInFlightGuard {
+        self.in_flight.fetch_add(1, Ordering::Relaxed);
+        OwnedInFlightGuard {
+            metrics: Arc::clone(self),
+        }
     }
 
     /// Prometheus exposition format. Histograms, sums, and error counters
@@ -230,6 +268,36 @@ impl Metrics {
             "pennyrouter_guard_rejections_total {}\n",
             self.guard_rejections.load(Ordering::Relaxed)
         ));
+        out.push_str("# HELP pennyrouter_load_shed_total Requests shed at capacity.\n");
+        out.push_str("# TYPE pennyrouter_load_shed_total counter\n");
+        out.push_str(&format!(
+            "pennyrouter_load_shed_total {}\n",
+            self.load_shed.load(Ordering::Relaxed)
+        ));
+        out.push_str("# HELP pennyrouter_catalog_reload_total Catalog reload attempts.\n");
+        out.push_str("# TYPE pennyrouter_catalog_reload_total counter\n");
+        out.push_str(&format!(
+            "pennyrouter_catalog_reload_total{{result=\"ok\"}} {}\n",
+            self.reload_ok.load(Ordering::Relaxed)
+        ));
+        out.push_str(&format!(
+            "pennyrouter_catalog_reload_total{{result=\"error\"}} {}\n",
+            self.reload_err.load(Ordering::Relaxed)
+        ));
+        out.push_str(
+            "# HELP pennyrouter_upstream_throttled_total Upstream 429s recorded for cool-down.\n",
+        );
+        out.push_str("# TYPE pennyrouter_upstream_throttled_total counter\n");
+        out.push_str(&format!(
+            "pennyrouter_upstream_throttled_total {}\n",
+            self.throttled.load(Ordering::Relaxed)
+        ));
+        out.push_str("# HELP pennyrouter_log_dropped_total Log lines dropped on a full buffer.\n");
+        out.push_str("# TYPE pennyrouter_log_dropped_total counter\n");
+        out.push_str(&format!(
+            "pennyrouter_log_dropped_total {}\n",
+            crate::LOG_DROPPED.load(Ordering::Relaxed)
+        ));
         out.push_str("# HELP pennyrouter_requests_in_flight Requests in flight.\n");
         out.push_str("# TYPE pennyrouter_requests_in_flight gauge\n");
         out.push_str(&format!(
@@ -251,6 +319,17 @@ pub struct InFlightGuard<'a> {
 }
 
 impl Drop for InFlightGuard<'_> {
+    fn drop(&mut self) {
+        self.metrics.in_flight.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// Owned variant of [`InFlightGuard`]: same counter, stream lifetime.
+pub struct OwnedInFlightGuard {
+    metrics: Arc<Metrics>,
+}
+
+impl Drop for OwnedInFlightGuard {
     fn drop(&mut self) {
         self.metrics.in_flight.fetch_sub(1, Ordering::Relaxed);
     }

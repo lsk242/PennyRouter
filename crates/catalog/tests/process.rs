@@ -104,6 +104,8 @@ fn migration_v1_to_current_preserves_data() {
     assert_eq!(eps[0].quality_tier, None);
     assert_eq!(eps[0].quality_score, None);
     assert_eq!(eps[0].judged_at, None);
+    assert_eq!(eps[0].judge_model, None);
+    assert_eq!(eps[0].judge_prompt, None);
     assert_eq!(
         catalog.get_meta("schema_version").unwrap().as_deref(),
         Some("3")

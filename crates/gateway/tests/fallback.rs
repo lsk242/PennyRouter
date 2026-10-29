@@ -60,13 +60,14 @@ async fn spawn_mock(seen: Arc<Mutex<Seen>>) -> SocketAddr {
         )
         .route(
             "/v1/embeddings",
-            post(move |headers: HeaderMap, req_body: Bytes| {
+            post(move |uri: Uri, headers: HeaderMap, req_body: Bytes| {
                 let seen = seen_embeddings.clone();
                 async move {
                     let mut seen = seen.lock().unwrap();
                     seen.hits += 1;
                     seen.method = Some("POST".to_string());
-                    seen.path = Some("/v1/embeddings".to_string());
+                    seen.path = Some(uri.path().to_string());
+                    seen.query = uri.query().map(str::to_string);
                     seen.auth = headers
                         .get("authorization")
                         .and_then(|v| v.to_str().ok())
@@ -96,36 +97,13 @@ async fn spawn_gateway(upstream: SocketAddr) -> SocketAddr {
 }
 
 #[tokio::test]
-async fn unknown_get_is_proxied_with_path_and_query_intact() {
+async fn unknown_post_body_query_and_auth_are_forwarded() {
     let seen = Arc::new(Mutex::new(Seen::default()));
     let mock = spawn_mock(seen.clone()).await;
     let gw = spawn_gateway(mock).await;
 
     let res = reqwest::Client::new()
-        .get(format!("http://{gw}/v1/models?limit=2"))
-        .header("authorization", API_KEY)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(res.status(), StatusCode::OK);
-    assert_eq!(res.bytes().await.unwrap().as_ref(), MODELS);
-
-    let seen = seen.lock().unwrap();
-    assert_eq!(seen.hits, 1);
-    assert_eq!(seen.method.as_deref(), Some("GET"));
-    assert_eq!(seen.path.as_deref(), Some("/v1/models"));
-    assert_eq!(seen.query.as_deref(), Some("limit=2"));
-    assert_eq!(seen.auth.as_deref(), Some(API_KEY));
-}
-
-#[tokio::test]
-async fn unknown_post_body_and_auth_are_forwarded() {
-    let seen = Arc::new(Mutex::new(Seen::default()));
-    let mock = spawn_mock(seen.clone()).await;
-    let gw = spawn_gateway(mock).await;
-
-    let res = reqwest::Client::new()
-        .post(format!("http://{gw}/v1/embeddings"))
+        .post(format!("http://{gw}/v1/embeddings?limit=2"))
         .header("authorization", API_KEY)
         .header("content-type", "application/json")
         .body(EMBEDDING_REQUEST)
@@ -138,6 +116,8 @@ async fn unknown_post_body_and_auth_are_forwarded() {
     let seen = seen.lock().unwrap();
     assert_eq!(seen.hits, 1);
     assert_eq!(seen.method.as_deref(), Some("POST"));
+    assert_eq!(seen.path.as_deref(), Some("/v1/embeddings"));
+    assert_eq!(seen.query.as_deref(), Some("limit=2"));
     assert_eq!(seen.auth.as_deref(), Some(API_KEY));
     assert_eq!(seen.body.as_deref(), Some(EMBEDDING_REQUEST.as_bytes()));
 }

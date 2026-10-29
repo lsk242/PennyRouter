@@ -79,6 +79,10 @@ tag for the local build; prod: image to pull), `OPENROUTER_BASE_URL`
 file — unset means plain passthrough). A directory also serves the
 newest verified ranking artifact when one exists (see
 [ranking-index.md](ranking-index.md)).
+`UPSTREAM_MAX_CONCURRENT` (default 64: max simultaneous upstream calls)
+and `UPSTREAM_MAX_QUEUED` (default 128: max requests waiting for a
+slot); beyond both, the gateway sheds with OpenAI-shaped 503 +
+`Retry-After`, counted in `pennyrouter_load_shed_total`.
 No local key store:
 backend keys travel with requests, never in config or fixtures. The
 one exception is catalog judging (Phase 4): the offline
@@ -88,6 +92,35 @@ the environment (`BASETEN_API_KEY`, `MODAL_JUDGE_URL`, `MODAL_KEY_ID`,
 gateway never reads them; without them judging stays on recorded
 fixtures. Never commit real values.
 
+## Decision-model catalog (Iter 15)
+
+Which model judges is config, not tribal knowledge. A judges file
+(`catalog-process --judges <file>`) lists one entry per backend —
+`recorded`, `baseten`, `modal` — with the judge model, base URL, the
+*names* of the secret variables, the expected prompt version, and
+the optional known per-call cost; plus a policy section
+(`sample_rate`, `only_models`/`only_providers` scope, `max_calls`,
+`max_spend_usd`). Recording paths resolve from the working
+directory. Selection rules:
+
+- Recorded judging is the default: free, deterministic, full runs,
+  no caps. Live judges run only when explicitly selected with
+  `--judge-backend`, and only on the policy-selected subset
+  (deterministic per-endpoint sampling, so rebuilds re-judge the
+  same endpoints).
+- Call and spend caps are checked *before* any judgment is written:
+  a breached cap fails closed with the DB untouched. A spend cap
+  with unknown per-call cost fails rather than guessing. Every live
+  rebuild prints one spend line (`calls x unit = total (caps …)`).
+- Every judgment stores its audit identity (`judge_model`,
+  `judge_prompt` columns; `judge_backend`, `judge_model`,
+  `judge_prompt`, `judge_calls`, `judge_spend_usd` in `sync_meta`),
+  so a quality tier always traces back to the exact judge + prompt
+  behind it. Rows judged before Iter 15 read back `NULL` provenance.
+- `--sample-rate`, `--max-calls`, `--max-spend-usd` override the
+  file policy. Judges never run on the request path — this is all
+  offline batch, before publish.
+
 ## Ranking
 
 From Iter 6: `catalog-rank` rebuilds the provider ranking offline from
@@ -95,8 +128,11 @@ the catalog DB plus optional trends and recorded AI adjustments, and
 publishes a versioned `ranking-<version>.json` artifact beside the DB.
 The sync container runs it every cycle (`TRENDS`/`ASSIST`/`PROMOS`
 inputs default to the `/input` fixtures when present). The gateway
-picks the ranking up from its `CATALOG_DB` directory automatically and
-keeps serving the last good one when a rebuild fails or is missing.
+re-resolves its `CATALOG_DB` directory every `RELOAD_INTERVAL_SECS`
+(default 60s, 0 disables) and atomically publishes the new snapshot
+and ranking, keeping the last good ones when a reload fails or an
+artifact is missing; reload attempts are counted in
+`pennyrouter_catalog_reload_total{result="ok|error"}`.
 From Iter 7, "cheapest" means effective cost under the balanced
 workload profile (see [pricing.md](pricing.md)), and `openrouter/free`
 routes to any free offering.
@@ -105,12 +141,22 @@ routes to any free offering.
 
 From Iter 2: request bodies estimating over 1M tokens (~4 MiB at 4
 bytes/token) are rejected with 413 before contacting the backend.
+From Iter 11, uploads are also bounded in time (30s idle per chunk,
+60s total; stalled uploads answer 408) and admitted before
+collection, so below-cap incomplete uploads cannot accumulate.
 Upstream budgets are connect 10s, first response 30s, stream idle 60s
 per chunk, and 300s total for buffered responses; timeouts answer 504.
+Buffered upstream bodies are capped at 16 MiB (oversize answers 502).
 Upstream JSON errors pass through; anything else is wrapped in an
-OpenAI-shaped error keeping the upstream status. A stalled stream ends
-the client stream — the 200 was already sent, so there is nothing left
-to map it to.
+OpenAI-shaped error keeping the upstream status. End-to-end response
+headers (encoding, range, retry-after, auth challenges, validators,
+redirect targets) are preserved; rewritten bodies keep negotiation
+metadata but get truthful representation headers. Redirects pass
+through with `Location` instead of being followed. A stalled or
+broken stream ends with a terminal SSE `error` event after the intact
+prefix — truncation never looks like clean EOF. Beyond the
+concurrency/queue bounds the gateway sheds with OpenAI-shaped 503 +
+`Retry-After`.
 
 ## Observability
 

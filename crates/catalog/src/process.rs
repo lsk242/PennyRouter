@@ -38,20 +38,24 @@ pub fn run_processing(catalog: &Catalog, processed_at: &str) -> Result<ProcessSu
 }
 
 /// Per-token price as f64; accepts a string or a number, else None.
+/// Negative or non-finite values are rejected (Iter 11, A02): an
+/// operator-imported "-1" must never sort ahead of valid prices.
 fn extract_price(payload: &Value, key: &str) -> Option<f64> {
-    match payload.get("pricing")?.get(key)? {
+    let price = match payload.get("pricing")?.get(key)? {
         Value::String(s) => s.parse().ok(),
         Value::Number(n) => n.as_f64(),
         _ => None,
-    }
+    }?;
+    (price.is_finite() && price >= 0.0).then_some(price)
 }
 
 fn extract_discount(payload: &Value) -> Option<f64> {
-    match payload.get("pricing")?.get("discount")? {
+    let discount = match payload.get("pricing")?.get("discount")? {
         Value::Number(n) => n.as_f64(),
         Value::String(s) => s.parse().ok(),
         _ => None,
-    }
+    }?;
+    (discount.is_finite() && discount >= 0.0).then_some(discount)
 }
 
 /// Quantization label to precision class. Anything unrecognized (including
@@ -97,6 +101,37 @@ mod tests {
         assert_eq!(extract_price(&payload, "input_cache_write"), None);
         assert_eq!(extract_price(&payload, "missing"), None);
         assert_eq!(extract_price(&json!({}), "prompt"), None);
+    }
+
+    /// A02: negative or non-finite prices are unpriceable, never
+    /// cheapest-first.
+    #[test]
+    fn negative_and_nonfinite_prices_rejected() {
+        assert_eq!(
+            extract_price(&json!({"pricing": {"prompt": -1}}), "prompt"),
+            None
+        );
+        assert_eq!(
+            extract_price(&json!({"pricing": {"prompt": "-1"}}), "prompt"),
+            None
+        );
+        assert_eq!(
+            extract_price(&json!({"pricing": {"prompt": "NaN"}}), "prompt"),
+            None
+        );
+        assert_eq!(
+            extract_price(&json!({"pricing": {"prompt": "inf"}}), "prompt"),
+            None
+        );
+        assert_eq!(
+            extract_discount(&json!({"pricing": {"discount": -0.5}})),
+            None
+        );
+        // Valid zero still prices (free is real).
+        assert_eq!(
+            extract_price(&json!({"pricing": {"prompt": 0}}), "prompt"),
+            Some(0.0)
+        );
     }
 
     #[test]

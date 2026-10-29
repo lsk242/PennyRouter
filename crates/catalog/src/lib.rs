@@ -7,6 +7,7 @@
 mod artifact;
 mod judge;
 mod judge_baseten;
+mod judge_catalog;
 mod judge_modal;
 mod judge_openai;
 mod price;
@@ -17,17 +18,25 @@ mod store;
 mod sync;
 
 pub use artifact::{now_rfc3339, publish, sha256_hex, verify, Manifest};
-pub use judge::{endpoint_tag, run_judging, Judge, JudgeSummary, NullJudge, RecordedJudge};
+pub use judge::{
+    endpoint_tag, run_judging, run_judging_selected, Judge, JudgeIdentity, JudgeSummary, NullJudge,
+    RecordedJudge,
+};
 pub use judge_baseten::BasetenJudge;
+pub use judge_catalog::{
+    build_judge, plan_live_calls, select_endpoints, spend_line, JudgeCatalog, JudgeEntry,
+    JudgePlan, JudgePolicy, KNOWN_BACKENDS,
+};
 pub use judge_modal::ModalJudge;
+pub use judge_openai::PROMPT_VERSION;
 pub use price::{
     balanced_profile, builtin_profiles, effective_cost, resolve_discount, Promos, WorkloadProfile,
 };
 pub use process::{run_processing, ProcessSummary};
 pub use rank::{
     compare as compare_signals, load_ranking_doc, publish_ranking, rank_catalog, verify_ranking,
-    Assist, ClassRanking, RankEntry, RankOrientation, RankingDocument, RankingManifest, Signals,
-    TrendStats, Trends,
+    Assist, ClassRanking, FreeOffer, RankEntry, RankOrientation, RankingDocument, RankingManifest,
+    Signals, TrendStats, Trends,
 };
 pub use schema::{SCHEMA_VERSION, V1_DDL};
 pub use store::{Catalog, EndpointIndex, EndpointJudgment, EndpointRow, ModelRow};

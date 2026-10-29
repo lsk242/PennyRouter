@@ -77,6 +77,8 @@ fn build_db(path: &std::path::Path, alpha_price: f64, beta_price: f64) {
         quality_tier: None,
         quality_score: None,
         judged_at: None,
+        judge_model: None,
+        judge_prompt: None,
     };
     for row in [
         endpoint("Alpha", "alpha"),
@@ -98,6 +100,8 @@ fn build_db(path: &std::path::Path, alpha_price: f64, beta_price: f64) {
         quality_tier: Some(tier.to_string()),
         quality_score: None,
         judged_at: "t".to_string(),
+        judge_model: None,
+        judge_prompt: None,
     };
     let eps = catalog.endpoints_for(MODEL).unwrap();
     assert_eq!(eps.len(), 3);
@@ -268,6 +272,8 @@ fn build_free_db(path: &std::path::Path) {
                 quality_tier: None,
                 quality_score: None,
                 judged_at: None,
+                judge_model: None,
+                judge_prompt: None,
             })
             .unwrap();
         let ep = catalog.endpoints_for(model).unwrap().pop().unwrap();
@@ -292,6 +298,8 @@ fn build_free_db(path: &std::path::Path) {
                     quality_tier: Some("standard".to_string()),
                     quality_score: None,
                     judged_at: "t".to_string(),
+                    judge_model: None,
+                    judge_prompt: None,
                 },
             )
             .unwrap();

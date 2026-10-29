@@ -54,6 +54,8 @@ fn insert_offering(catalog: &Catalog, model: &str, provider: &str, price: f64, t
             quality_tier: None,
             quality_score: None,
             judged_at: None,
+            judge_model: None,
+            judge_prompt: None,
         })
         .unwrap();
     let ep = catalog.endpoints_for(model).unwrap().pop().unwrap();
@@ -78,6 +80,8 @@ fn insert_offering(catalog: &Catalog, model: &str, provider: &str, price: f64, t
                 quality_tier: Some(tier.to_string()),
                 quality_score: None,
                 judged_at: "t".to_string(),
+                judge_model: None,
+                judge_prompt: None,
             },
         )
         .unwrap();

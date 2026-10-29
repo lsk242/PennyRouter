@@ -29,9 +29,39 @@ pub fn now_rfc3339() -> Result<String, Error> {
     Ok(OffsetDateTime::now_utc().format(&Rfc3339)?)
 }
 
+/// Atomically install `bytes` at `final_path` (Iter 11, F07): write a
+/// unique temp file on the same filesystem, sync it, and rename over
+/// the target — readers never see a truncated file. Identical existing
+/// content is left untouched: published files are content-addressed
+/// and immutable once written.
+pub fn atomic_write(final_path: &Path, bytes: &[u8]) -> Result<(), Error> {
+    if fs::read(final_path)
+        .map(|current| current == bytes)
+        .unwrap_or(false)
+    {
+        return Ok(());
+    }
+    let nanos = OffsetDateTime::now_utc().unix_timestamp_nanos().max(0) as u128;
+    let file_name = final_path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "artifact".to_string());
+    let tmp_path =
+        final_path.with_file_name(format!(".{file_name}.tmp-{}-{nanos}", std::process::id()));
+    let mut tmp = fs::File::create(&tmp_path)?;
+    use std::io::Write;
+    tmp.write_all(bytes)?;
+    tmp.sync_all()?;
+    drop(tmp);
+    fs::rename(&tmp_path, final_path)?;
+    Ok(())
+}
+
 /// Publish `work_db` into `out_dir` as `catalog-{version}.db` plus a
 /// `catalog-{version}.manifest.json` sidecar. The version is the DB
 /// content-hash prefix, so re-publishing identical content is idempotent.
+/// Data lands before the manifest (both atomic), so discovery never
+/// sees a manifest pointing at a half-written DB.
 pub fn publish(
     work_db: &Path,
     out_dir: &Path,
@@ -47,7 +77,7 @@ pub fn publish(
     let manifest_name = format!("catalog-{version}.manifest.json");
     let db_path = out_dir.join(&db_name);
     let manifest_path = out_dir.join(&manifest_name);
-    fs::write(&db_path, &bytes)?;
+    atomic_write(&db_path, &bytes)?;
     let manifest = Manifest {
         version,
         sha256,
@@ -58,7 +88,10 @@ pub fn publish(
         endpoint_count,
         created_at: now_rfc3339()?,
     };
-    fs::write(&manifest_path, serde_json::to_string_pretty(&manifest)?)?;
+    atomic_write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest)?.as_bytes(),
+    )?;
     Ok((db_path, manifest_path, manifest))
 }
 

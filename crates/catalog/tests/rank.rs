@@ -146,6 +146,8 @@ fn tie_db(path: &std::path::Path) {
                 quality_tier: None,
                 quality_score: None,
                 judged_at: None,
+                judge_model: None,
+                judge_prompt: None,
             })
             .unwrap();
     }
@@ -162,6 +164,8 @@ fn tie_db(path: &std::path::Path) {
         quality_tier: Some("standard".to_string()),
         quality_score: None,
         judged_at: "t".to_string(),
+        judge_model: None,
+        judge_prompt: None,
     };
     for ep in catalog.endpoints_for("syn/tie").unwrap() {
         catalog.update_endpoint_index(ep.id, &index(1.0)).unwrap();
@@ -212,6 +216,249 @@ fn trends_break_signal_ties() {
     }
 }
 
+/// F10: equal tier, scores [0.99, None, 0.01] — quality orientation
+/// must order known-high, known-low, unknown (never unknown first).
+/// Provider names sort alphabetically opposite to prove the score
+/// comparator decides, not the identity tie-break.
+#[test]
+fn unknown_scores_sort_after_known_scores() {
+    let dir = common::scratch("rank-nulls");
+    let db = dir.join("nulls.db");
+    let _ = std::fs::remove_file(&db);
+    let catalog = Catalog::open(&db).unwrap();
+    catalog.init().unwrap();
+    catalog
+        .insert_model(&ModelRow {
+            model_id: "syn/nulls".to_string(),
+            name: "Nulls".to_string(),
+            source: "test".to_string(),
+            payload: "{}".to_string(),
+            fetched_at: "t".to_string(),
+        })
+        .unwrap();
+    for (provider, score) in [("Zed", Some(0.99)), ("Ace", None), ("Mid", Some(0.01))] {
+        catalog
+            .insert_endpoint(&EndpointRow {
+                id: 0,
+                model_id: "syn/nulls".to_string(),
+                provider_name: provider.to_string(),
+                payload: "{}".to_string(),
+                fetched_at: "t".to_string(),
+                price_prompt: None,
+                price_completion: None,
+                price_cache_read: None,
+                price_cache_write: None,
+                precision_class: None,
+                promo_discount: None,
+                processed_at: None,
+                quality_tier: None,
+                quality_score: None,
+                judged_at: None,
+                judge_model: None,
+                judge_prompt: None,
+            })
+            .unwrap();
+        let id = catalog
+            .endpoints_for("syn/nulls")
+            .unwrap()
+            .last()
+            .unwrap()
+            .id;
+        catalog
+            .update_endpoint_judgment(
+                id,
+                &EndpointJudgment {
+                    quality_tier: Some("standard".to_string()),
+                    quality_score: score,
+                    judged_at: "t".to_string(),
+                    judge_model: None,
+                    judge_prompt: None,
+                },
+            )
+            .unwrap();
+    }
+    let doc = rank_catalog(
+        &catalog,
+        &Trends::empty(),
+        &Assist::empty(),
+        &Promos::empty(),
+        STAMP,
+        STAMP,
+        None,
+    )
+    .unwrap();
+    let providers: Vec<&str> = doc.models["syn/nulls"][0]
+        .quality
+        .iter()
+        .map(|e| e.provider.as_str())
+        .collect();
+    assert_eq!(providers, ["Zed", "Mid", "Ace"]);
+}
+
+/// A03: same provider, different tags, otherwise identical signals —
+/// insertion order (b-tag first) must not decide; the real tag breaks
+/// the tie, matching the gateway inline sort.
+#[test]
+fn tag_breaks_same_provider_ties_regardless_of_insertion_order() {
+    let dir = common::scratch("rank-tags");
+    let db = dir.join("tags.db");
+    let _ = std::fs::remove_file(&db);
+    let catalog = Catalog::open(&db).unwrap();
+    catalog.init().unwrap();
+    catalog
+        .insert_model(&ModelRow {
+            model_id: "syn/tags".to_string(),
+            name: "Tags".to_string(),
+            source: "test".to_string(),
+            payload: "{}".to_string(),
+            fetched_at: "t".to_string(),
+        })
+        .unwrap();
+    for tag in ["b-tag", "a-tag"] {
+        catalog
+            .insert_endpoint(&EndpointRow {
+                id: 0,
+                model_id: "syn/tags".to_string(),
+                provider_name: "Solo".to_string(),
+                payload: format!(r#"{{"tag": "{tag}"}}"#),
+                fetched_at: "t".to_string(),
+                price_prompt: None,
+                price_completion: None,
+                price_cache_read: None,
+                price_cache_write: None,
+                precision_class: None,
+                promo_discount: None,
+                processed_at: None,
+                quality_tier: None,
+                quality_score: None,
+                judged_at: None,
+                judge_model: None,
+                judge_prompt: None,
+            })
+            .unwrap();
+    }
+    let doc = rank_catalog(
+        &catalog,
+        &Trends::empty(),
+        &Assist::empty(),
+        &Promos::empty(),
+        STAMP,
+        STAMP,
+        None,
+    )
+    .unwrap();
+    for orientation in [
+        &doc.models["syn/tags"][0].default,
+        &doc.models["syn/tags"][0].price,
+    ] {
+        assert_eq!(tags(orientation), ["a-tag", "b-tag"]);
+    }
+}
+
+/// F11: a paid endpoint under an active 100% promo window is published
+/// as free with the window's end; a catalog-zero endpoint is published
+/// with no expiry; an expired window publishes nothing.
+#[test]
+fn promo_free_eligibility_published_with_validity() {
+    let dir = common::scratch("rank-free-offers");
+    let db = dir.join("free.db");
+    let _ = std::fs::remove_file(&db);
+    let catalog = Catalog::open(&db).unwrap();
+    catalog.init().unwrap();
+    for (model, provider, price) in [
+        ("syn/promo", "Promo", 1.0),
+        ("syn/zero", "Zero", 0.0),
+        ("syn/old", "Old", 1.0),
+    ] {
+        catalog
+            .insert_model(&ModelRow {
+                model_id: model.to_string(),
+                name: model.to_string(),
+                source: "test".to_string(),
+                payload: "{}".to_string(),
+                fetched_at: "t".to_string(),
+            })
+            .unwrap();
+        catalog
+            .insert_endpoint(&EndpointRow {
+                id: 0,
+                model_id: model.to_string(),
+                provider_name: provider.to_string(),
+                payload: "{}".to_string(),
+                fetched_at: "t".to_string(),
+                price_prompt: None,
+                price_completion: None,
+                price_cache_read: None,
+                price_cache_write: None,
+                precision_class: None,
+                promo_discount: None,
+                processed_at: None,
+                quality_tier: None,
+                quality_score: None,
+                judged_at: None,
+                judge_model: None,
+                judge_prompt: None,
+            })
+            .unwrap();
+        let id = catalog.endpoints_for(model).unwrap()[0].id;
+        catalog
+            .update_endpoint_index(
+                id,
+                &EndpointIndex {
+                    price_prompt: Some(price),
+                    price_completion: Some(price),
+                    price_cache_read: None,
+                    price_cache_write: None,
+                    precision_class: Some("fp16".to_string()),
+                    promo_discount: None,
+                    processed_at: "t".to_string(),
+                },
+            )
+            .unwrap();
+    }
+    // One active 100% window (covers STAMP), one expired long ago.
+    let promos_path = dir.join("promos.json");
+    std::fs::write(
+        &promos_path,
+        r#"{"promos": [
+            {"model_id": "syn/promo", "provider_name": "Promo",
+             "discount": 1.0, "starts_at": "2026-01-01T00:00:00Z",
+             "ends_at": "2027-01-01T00:00:00Z"},
+            {"model_id": "syn/old", "provider_name": "Old",
+             "discount": 1.0, "starts_at": "2020-01-01T00:00:00Z",
+             "ends_at": "2020-02-01T00:00:00Z"}
+        ]}"#,
+    )
+    .unwrap();
+    let promos = Promos::load(&promos_path).unwrap();
+    let doc = rank_catalog(
+        &catalog,
+        &Trends::empty(),
+        &Assist::empty(),
+        &promos,
+        STAMP,
+        STAMP,
+        None,
+    )
+    .unwrap();
+
+    let promo = &doc.free_offers["syn/promo"];
+    assert_eq!(promo.len(), 1);
+    assert_eq!(promo[0].provider, "Promo");
+    // 2027-01-01T00:00:00Z: the covering window's end, not a guess.
+    assert_eq!(promo[0].valid_until_unix, Some(1798761600));
+
+    let zero = &doc.free_offers["syn/zero"];
+    assert_eq!(zero.len(), 1);
+    assert_eq!(zero[0].valid_until_unix, None);
+
+    assert!(
+        !doc.free_offers.contains_key("syn/old"),
+        "expired promo is not eligibility: {:?}",
+        doc.free_offers.get("syn/old"),
+    );
+}
+
 #[test]
 fn promo_active_leads_and_expired_falls_back() {
     let dir = common::scratch("rank-promos");
@@ -246,6 +493,8 @@ fn promo_active_leads_and_expired_falls_back() {
                 quality_tier: None,
                 quality_score: None,
                 judged_at: None,
+                judge_model: None,
+                judge_prompt: None,
             })
             .unwrap();
         let ep = catalog.endpoints_for("syn/promo").unwrap().pop().unwrap();

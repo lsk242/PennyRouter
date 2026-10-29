@@ -103,5 +103,5 @@ run "${SCP[@]}" "$ENV_FILE" "$DEPLOY_HOST:$DEPLOY_DIR/.env"
 run "${SSH[@]}" "$DEPLOY_HOST" \
   "cd $DEPLOY_DIR && docker compose -f $REMOTE_COMPOSE pull && docker compose -f $REMOTE_COMPOSE up -d"
 run "${SSH[@]}" "$DEPLOY_HOST" \
-  "for i in \$(seq 1 30); do curl -fsS http://localhost:$HOST_PORT/health && break || sleep 2; done"
+  "ok=0; for i in \$(seq 1 30); do if curl -fsS --connect-timeout 2 --max-time 5 http://localhost:$HOST_PORT/health; then ok=1; break; fi; sleep 2; done; [ \"\$ok\" = 1 ] || { echo 'deploy: gateway health check failed' >&2; exit 1; }"
 echo "--- deployed: http://$DEPLOY_HOST:$HOST_PORT/health ---"

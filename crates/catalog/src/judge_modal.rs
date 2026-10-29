@@ -75,6 +75,13 @@ impl ModalJudge {
 }
 
 impl Judge for ModalJudge {
+    fn identity(&self) -> crate::judge::JudgeIdentity {
+        crate::judge::JudgeIdentity {
+            model: self.model.clone(),
+            prompt_version: crate::judge_openai::PROMPT_VERSION.to_string(),
+        }
+    }
+
     fn judge(
         &self,
         model_id: &str,

@@ -9,6 +9,8 @@ use serde_json::{json, Value};
 
 pub const SYSTEM_PROMPT: &str = "You judge one LLM provider offering for a routing catalog. Reply with exactly one JSON object and no other text: {\"quality_tier\": \"high\", \"standard\" or \"low\", \"quality_score\": a number from 0.0 to 1.0}. Judge expected answer quality for general chat use.";
 
+pub const PROMPT_VERSION: &str = "v1";
+
 /// Chat completions body: temperature 0, JSON-object response, one system
 /// message plus one user message naming the offering under judgment.
 pub fn chat_body(model: &str, model_id: &str, provider_name: &str, payload: &Value) -> Value {

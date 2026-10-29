@@ -31,11 +31,13 @@
 
 use pennyrouter_catalog::{
     compare_signals, endpoint_tag, load_ranking_doc, verify_ranking, Catalog, EndpointRow,
-    RankOrientation, RankingDocument, SCHEMA_VERSION,
+    RankOrientation, RankingDocument, Signals, SCHEMA_VERSION,
 };
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, RwLock};
+use std::sync::RwLock;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// One provider offering of a model, projected from the catalog snapshot.
 #[derive(Debug, Clone)]
@@ -103,18 +105,246 @@ impl std::error::Error for RouteError {}
 /// fresh without pinning (existing pins are kept).
 const MAX_SESSIONS: usize = 16_384;
 
+/// Sticky pins expire after this long without renewal (Iter 11): the
+/// table cannot fill with stale entries, and keys stay opaque hashes.
+const SESSION_TTL: Duration = Duration::from_secs(30 * 60);
+
 /// Header carrying the chosen provider on routed responses.
 pub const PROVIDER_HEADER: &str = "x-pennyrouter-provider";
+
+/// Precision classes the gateway may forward as an OpenRouter
+/// `quantizations` requirement (Iter 11, F04). Anything else —
+/// including "unknown" — never constrains the wire request.
+fn is_known_precision_class(class: &str) -> bool {
+    matches!(class, "fp32" | "fp16" | "fp8" | "int8" | "int4")
+}
+
+/// Per-router hash seed from wall-clock nanos XOR the process id.
+/// Unpredictable enough for opaque session keys; not a secret.
+fn fresh_seed() -> u64 {
+    use std::hash::{Hash, Hasher};
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0x9e37_79b9_7f4a_7c15);
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    nanos.hash(&mut hasher);
+    std::process::id().hash(&mut hasher);
+    hasher.finish()
+}
 
 /// Meta-model: route to any free offering ("optimize for cost including
 /// free tiers"). Rewritten to the chosen offering's backend model id.
 pub const FREE_MODEL: &str = "openrouter/free";
 
+/// Virtual tiers (Iter 13): `free` = zero-cost offering, `low` =
+/// cheapest basic offering, `think` = best-quality offering. Tiers
+/// compare by the documented price metric (blended input/output/cache
+/// effective cost) with eligibility before price; FP resolution is a
+/// separate class, never a silent substitute.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VirtualTier {
+    Free,
+    Low,
+    Think,
+}
+
+/// A virtual model id: `<provider>/pair/[privacy/]<free|low|think>`.
+/// The provider segment is first so future providers slot in; only
+/// OpenRouter exists today.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VirtualModel {
+    pub tier: VirtualTier,
+    /// Privacy variant: zero-retention fields enforced on the wire
+    /// until the index carries privacy signals (Iter 13).
+    pub privacy: bool,
+}
+
+/// Parse a virtual model id. Anything else (including unknown
+/// providers or tiers) returns `None` and passes through untouched.
+pub fn parse_virtual(model_field: &str) -> Option<VirtualModel> {
+    let rest = model_field.strip_prefix("openrouter/pair/")?;
+    let (privacy, tier) = match rest.split_once('/') {
+        Some(("privacy", tier)) => (true, tier),
+        None => (false, rest),
+        _ => return None,
+    };
+    let tier = match tier {
+        "free" => VirtualTier::Free,
+        "low" => VirtualTier::Low,
+        "think" => VirtualTier::Think,
+        _ => return None,
+    };
+    Some(VirtualModel { tier, privacy })
+}
+
+/// Canonical virtual ids served by `GET /v1/models` (Iter 13).
+pub const VIRTUAL_MODELS: [&str; 6] = [
+    "openrouter/pair/free",
+    "openrouter/pair/low",
+    "openrouter/pair/think",
+    "openrouter/pair/privacy/free",
+    "openrouter/pair/privacy/low",
+    "openrouter/pair/privacy/think",
+];
+
+/// Throttled providers stay out of virtual picks for this long (Iter
+/// 13): 429 history steers around exhausted free offerings without
+/// any live rate-limit feed.
+const THROTTLE_TTL: Duration = Duration::from_secs(60);
+
+/// Upper bound on remembered throttles; past it, expiry is reaped and
+/// only then is new information dropped.
+const MAX_THROTTLES: usize = 4096;
+
+/// Wall-clock seconds for promo-free expiry (Iter 11, F11).
+fn now_unix() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Free by permanent catalog zeros or by an unexpired published promo
+/// window (Iter 11, F11). An expired or missing fact is never free —
+/// promo eligibility comes from the ranking document, not from a
+/// stale snapshot column.
+fn free_eligible(
+    ranking: Option<&RankingDocument>,
+    model_id: &str,
+    offering: &Offering,
+    now: u64,
+) -> bool {
+    if inline_cost(offering) == Some(0.0) {
+        return true;
+    }
+    ranking
+        .and_then(|ranking| ranking.free_offers.get(model_id))
+        .is_some_and(|offers| {
+            offers.iter().any(|offer| {
+                offer.provider == offering.provider_name
+                    && offer.tag == offering.tag
+                    && offer.valid_until_unix.is_none_or(|end| now < end)
+            })
+        })
+}
+
 pub struct Router {
     source: PathBuf,
     snapshot: RwLock<Snapshot>,
     ranking: RwLock<Option<RankingDocument>>,
-    sessions: Mutex<HashMap<(String, String), Pin>>,
+    /// Session pins keyed by an opaque credential hash plus model, with
+    /// last-use timestamps for TTL eviction (Iter 11). Raw
+    /// Authorization values are never retained.
+    sessions: RwLock<HashMap<(u64, String), (Pin, Instant)>>,
+    /// Per-router hash seed, so session keys differ across restarts.
+    seed: u64,
+    /// Recently rate-limited (model, provider) pairs with cool-down
+    /// deadlines (Iter 13). Never blocks routing alone: when every
+    /// candidate is throttled, the least-stale one still serves.
+    throttled: RwLock<HashMap<(String, String), Instant>>,
+}
+
+/// Hard per-request price ceiling from the incoming `provider` object
+/// (Iter 14): both legs must parse, else there is no cap. Columns are
+/// raw per-token prices; unpriceable legs fail closed under a cap.
+#[derive(Debug, Clone, Copy)]
+pub struct BudgetCap {
+    pub prompt: f64,
+    pub completion: f64,
+}
+
+/// Why a virtual request could not route (Iter 14): the menu promises
+/// a floor and a budget, so failure is explicit instead of silent
+/// passthrough to an id the upstream would 404.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RouteRejection {
+    pub code: &'static str,
+    pub message: String,
+}
+
+/// Caller provider restrictions (Iter 11, F01; budget Iter 14):
+/// `only`/`ignore` lists plus an optional price ceiling from the
+/// incoming `provider` object. Candidates and sticky pins must satisfy
+/// them; violations fall back to untouched passthrough so the upstream
+/// enforces the original restrictions (virtual ids fail explicitly —
+/// no upstream knows them).
+#[derive(Debug, Default, Clone)]
+pub struct ProviderConstraints {
+    pub only: Vec<String>,
+    pub ignore: Vec<String>,
+    pub max_price: Option<BudgetCap>,
+}
+
+impl ProviderConstraints {
+    /// Provider names compare case-insensitively ignoring punctuation,
+    /// so display names ("OpenAI") match slugs ("openai").
+    fn norm(name: &str) -> String {
+        name.chars()
+            .filter(|c| c.is_alphanumeric())
+            .collect::<String>()
+            .to_lowercase()
+    }
+
+    pub fn allows(&self, provider: &str) -> bool {
+        let candidate = Self::norm(provider);
+        if !self.only.is_empty() && !self.only.iter().any(|o| Self::norm(o) == candidate) {
+            return false;
+        }
+        !self.ignore.iter().any(|i| Self::norm(i) == candidate)
+    }
+
+    /// Parse constraints from a chat-completions body. Non-string
+    /// entries are ignored (never treated as wildcards). A malformed
+    /// `max_price` is no cap at all — documented, never guessed.
+    pub fn from_body(body: &serde_json::Value) -> Self {
+        let strings = |key: &str| {
+            body.get("provider")
+                .and_then(|provider| provider.get(key))
+                .and_then(serde_json::Value::as_array)
+                .map(|list| {
+                    list.iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let number = |cap: &serde_json::Value, key: &str| match cap.get(key) {
+            Some(serde_json::Value::Number(n)) => n.as_f64(),
+            Some(serde_json::Value::String(s)) => s.parse().ok(),
+            _ => None,
+        };
+        let max_price = body
+            .get("provider")
+            .and_then(|provider| provider.get("max_price"))
+            .and_then(|cap| {
+                Some(BudgetCap {
+                    prompt: number(cap, "prompt")?,
+                    completion: number(cap, "completion")?,
+                })
+            });
+        Self {
+            only: strings("only"),
+            ignore: strings("ignore"),
+            max_price,
+        }
+    }
+
+    /// Price caps override everything, including affinity (Iter 14):
+    /// raw columns must sit under both legs. Unpriceable legs fail
+    /// closed while a cap is set.
+    pub fn budget_allows(&self, offering: &Offering) -> bool {
+        match self.max_price {
+            None => true,
+            Some(cap) => {
+                offering.price_prompt.is_some_and(|p| p <= cap.prompt)
+                    && offering
+                        .price_completion
+                        .is_some_and(|p| p <= cap.completion)
+            }
+        }
+    }
 }
 
 impl Router {
@@ -130,8 +360,89 @@ impl Router {
             source: path.to_path_buf(),
             snapshot: RwLock::new(snapshot),
             ranking: RwLock::new(ranking),
-            sessions: Mutex::new(HashMap::new()),
+            sessions: RwLock::new(HashMap::new()),
+            seed: fresh_seed(),
+            throttled: RwLock::new(HashMap::new()),
         })
+    }
+
+    /// Record a 429 from `(model_id, provider)` (Iter 13): virtual
+    /// picks steer around it until the cool-down elapses.
+    pub fn note_throttled(&self, model_id: &str, provider: &str) {
+        let mut throttled = self.throttled.write().unwrap_or_else(|e| e.into_inner());
+        if throttled.len() >= MAX_THROTTLES {
+            let now = Instant::now();
+            throttled.retain(|_, until| *until > now);
+        }
+        throttled.insert(
+            (model_id.to_string(), provider.to_string()),
+            Instant::now() + THROTTLE_TTL,
+        );
+    }
+
+    /// Providers still in cool-down are skipped when alternatives
+    /// exist; when every candidate is throttled the filter is a no-op
+    /// so availability wins over strictness.
+    fn skip_throttled<'a>(&self, candidates: Vec<&'a Offering>) -> Vec<&'a Offering> {
+        let now = Instant::now();
+        let throttled = self.throttled.read().unwrap_or_else(|e| e.into_inner());
+        let fresh: Vec<&'a Offering> = candidates
+            .iter()
+            .filter(|o| {
+                throttled
+                    .get(&(o.model_id.clone(), o.provider_name.clone()))
+                    .is_none_or(|until| *until <= now)
+            })
+            .copied()
+            .collect();
+        if fresh.is_empty() {
+            candidates
+        } else {
+            fresh
+        }
+    }
+
+    /// Opaque session key: seeded hash of the credential plus the model
+    /// (Iter 11). Raw Authorization values never enter the table.
+    fn session_key(&self, authorization: &str, model: &str) -> (u64, String) {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.seed.hash(&mut hasher);
+        authorization.hash(&mut hasher);
+        (hasher.finish(), model.to_string())
+    }
+
+    /// Look up a live pin (Iter 12: shared read lock — lookups from
+    /// concurrent requests no longer serialize). Expired pins read as
+    /// missing and are reaped on sight or at the next store.
+    fn lookup_pin(&self, key: &(u64, String)) -> Option<Pin> {
+        let expired = {
+            let sessions = self.sessions.read().unwrap_or_else(|e| e.into_inner());
+            match sessions.get(key) {
+                Some((pin, used)) if used.elapsed() < SESSION_TTL => return Some(pin.clone()),
+                Some(_) => true,
+                None => return None,
+            }
+        };
+        if expired {
+            self.sessions
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(key);
+        }
+        None
+    }
+
+    /// Store a pin, evicting expired entries first; past the cap plus
+    /// no expired entries, the session routes fresh (never unbounded).
+    fn store_pin(&self, key: (u64, String), pin: Pin) {
+        let mut sessions = self.sessions.write().unwrap_or_else(|e| e.into_inner());
+        if sessions.len() >= MAX_SESSIONS {
+            sessions.retain(|_, (_, used)| used.elapsed() < SESSION_TTL);
+            if sessions.len() >= MAX_SESSIONS {
+                return;
+            }
+        }
+        sessions.insert(key, (pin, Instant::now()));
     }
 
     /// Load a router with an explicit ranking artifact (directory or
@@ -216,44 +527,75 @@ impl Router {
         Self::load_ranking(path).ok().flatten()
     }
 
-    /// Load a ranking from a directory (newest verified manifest) or a
+    /// Load a ranking from a directory (newest verified manifest wins;
+    /// invalid candidates are skipped for older valid ones) or a
     /// manifest file. `Ok(None)` means "no ranking here".
     fn load_ranking(path: &Path) -> Result<Option<RankingDocument>, RouteError> {
-        let manifest_path = if path.is_dir() {
-            match newest_manifest(path, "ranking-")? {
-                Some(p) => p,
-                None => return Ok(None),
+        if path.is_dir() {
+            if let Some(manifest_path) =
+                newest_valid_manifests(path, "ranking-", &verify_ranking_ok)
+                    .into_iter()
+                    .next()
+            {
+                return Self::load_verified_ranking(&manifest_path).map(Some);
             }
-        } else {
-            path.to_path_buf()
-        };
-        if !verify_ranking(&manifest_path).map_err(|e| RouteError(e.to_string()))? {
+            return Ok(None);
+        }
+        if !verify_ranking(path).map_err(|e| RouteError(e.to_string()))? {
             return Err(RouteError(format!(
                 "ranking hash mismatch: {}",
-                manifest_path.display()
+                path.display()
             )));
         }
-        let raw = std::fs::read_to_string(&manifest_path).map_err(|e| RouteError(e.to_string()))?;
+        Self::load_verified_ranking(path).map(Some)
+    }
+
+    fn load_verified_ranking(manifest_path: &Path) -> Result<RankingDocument, RouteError> {
+        let raw = std::fs::read_to_string(manifest_path).map_err(|e| RouteError(e.to_string()))?;
         let manifest: pennyrouter_catalog::RankingManifest =
             serde_json::from_str(&raw).map_err(|e| RouteError(e.to_string()))?;
         let dir = manifest_path.parent().unwrap_or_else(|| Path::new("."));
-        let doc = load_ranking_doc(&dir.join(&manifest.ranking_file))
-            .map_err(|e| RouteError(e.to_string()))?;
-        Ok(Some(doc))
+        load_ranking_doc(&dir.join(&manifest.ranking_file)).map_err(|e| RouteError(e.to_string()))
     }
 
     /// Route one request. `model_field` is the raw `model` value,
     /// `authorization` the raw Authorization header if present. Returns
     /// `None` when the request should pass through untouched.
     pub fn decide(&self, model_field: &str, authorization: Option<&str>) -> Option<Decision> {
+        self.decide_constrained(model_field, authorization, &ProviderConstraints::default())
+    }
+
+    /// Route one request honoring caller provider restrictions (Iter 11,
+    /// F01). Candidates and sticky pins must satisfy `constraints`;
+    /// anything unsatisfiable returns `None` (untouched passthrough, so
+    /// the upstream enforces the original restrictions).
+    pub fn decide_constrained(
+        &self,
+        model_field: &str,
+        authorization: Option<&str>,
+        constraints: &ProviderConstraints,
+    ) -> Option<Decision> {
         let snapshot = self.snapshot.read().unwrap_or_else(|e| e.into_inner());
+        // Virtual ids resolve before catalog lookup (Iter 13): they are
+        // not catalog models, so longest-prefix split must not see them.
+        if let Some(virtual_model) = parse_virtual(model_field) {
+            return self
+                .decide_virtual(
+                    &snapshot,
+                    &virtual_model,
+                    model_field,
+                    authorization,
+                    constraints,
+                )
+                .ok();
+        }
         if model_field == FREE_MODEL || model_field.starts_with(&format!("{FREE_MODEL}/")) {
             let tags = model_field[FREE_MODEL.len()..]
                 .split('/')
                 .filter(|s| !s.is_empty())
                 .map(str::to_string)
                 .collect::<Vec<_>>();
-            return self.decide_free(&snapshot, &tags, authorization);
+            return self.decide_free(&snapshot, &tags, authorization, constraints, FREE_MODEL);
         }
         let (model_id, tags) = split_model(&snapshot, model_field)?;
         let offerings = snapshot.models.get(&model_id)?;
@@ -261,52 +603,60 @@ impl Router {
             return None;
         }
         let orientation = orientation_from(&tags);
-        let key = authorization.map(|auth| (auth.to_string(), model_id.clone()));
+        let key = authorization.map(|auth| self.session_key(auth, &model_id));
         let ranking = self.ranking.read().unwrap_or_else(|e| e.into_inner());
 
-        // Sticky path: keep the pinned provider when it still serves.
+        // Sticky path: keep the pinned provider when it still serves and
+        // still satisfies the caller's restrictions.
         if let Some(key) = &key {
-            if let Some(pin) = self
-                .sessions
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .get(key)
-            {
-                let mine: Vec<&Offering> = offerings
-                    .iter()
-                    .filter(|o| {
-                        o.provider_name == pin.provider && o.precision_class == pin.precision_class
-                    })
-                    .collect();
-                if !mine.is_empty() {
-                    let order = ordered(
-                        ranking.as_ref(),
-                        &model_id,
-                        &pin.precision_class,
-                        orientation,
-                        &mine,
-                    );
-                    if let Some(pick) = order.into_iter().next() {
-                        return Some(Decision {
-                            model_id,
-                            provider: pick.provider_name.clone(),
-                            tag: pick.tag.clone(),
-                            precision_class: pick.precision_class.clone(),
+            if let Some(pin) = self.lookup_pin(key) {
+                if constraints.allows(&pin.provider) {
+                    let mine: Vec<&Offering> = offerings
+                        .iter()
+                        .filter(|o| {
+                            o.provider_name == pin.provider
+                                && o.precision_class == pin.precision_class
+                        })
+                        .collect();
+                    if !mine.is_empty() {
+                        let order = ordered(
+                            ranking.as_ref(),
+                            &model_id,
+                            &pin.precision_class,
                             orientation,
-                            sticky: true,
-                        });
+                            &mine,
+                        );
+                        if let Some(pick) = order.into_iter().next() {
+                            // Price caps override affinity: a pin above the
+                            // ceiling re-routes instead of sticking (Iter 14).
+                            if constraints.budget_allows(pick) {
+                                return Some(Decision {
+                                    model_id,
+                                    provider: pick.provider_name.clone(),
+                                    tag: pick.tag.clone(),
+                                    precision_class: pick.precision_class.clone(),
+                                    orientation,
+                                    sticky: true,
+                                });
+                            }
+                        }
                     }
                 }
-                // Pin unusable (provider/class gone): fall through and
-                // re-route fresh, re-pinning below.
+                // Pin unusable (provider/class gone, or newly disallowed):
+                // fall through and re-route fresh, re-pinning below.
             }
         }
 
-        // Fresh path: most common precision class, then oriented pick.
+        // Fresh path: most common precision class, then oriented pick
+        // among restriction- and budget-satisfying candidates.
         let class = majority_class(offerings)?;
         let candidates: Vec<&Offering> = offerings
             .iter()
-            .filter(|o| o.precision_class == class)
+            .filter(|o| {
+                o.precision_class == class
+                    && constraints.allows(&o.provider_name)
+                    && constraints.budget_allows(o)
+            })
             .collect();
         let pick = ordered(
             ranking.as_ref(),
@@ -318,16 +668,13 @@ impl Router {
         .into_iter()
         .next()?;
         if let Some(key) = key {
-            let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
-            if sessions.len() < MAX_SESSIONS {
-                sessions.insert(
-                    key,
-                    Pin {
-                        provider: pick.provider_name.clone(),
-                        precision_class: pick.precision_class.clone(),
-                    },
-                );
-            }
+            self.store_pin(
+                key,
+                Pin {
+                    provider: pick.provider_name.clone(),
+                    precision_class: pick.precision_class.clone(),
+                },
+            );
         }
         Some(Decision {
             model_id,
@@ -343,51 +690,238 @@ impl Router {
     /// models. Sessions pin as usual, but a pin whose offering stopped
     /// being free re-routes instead of misrouting at full price. The
     /// decision carries the chosen offering's backend model id.
+    /// Virtual dispatch (Iter 13): `free` shares the legacy free path
+    /// under its own session namespace; `low` picks the cheapest
+    /// priceable offering across models; `think` picks the best-quality
+    /// offering across models. Throttled providers are skipped when
+    /// alternatives exist.
+    fn decide_virtual(
+        &self,
+        snapshot: &Snapshot,
+        virtual_model: &VirtualModel,
+        model_field: &str,
+        authorization: Option<&str>,
+        constraints: &ProviderConstraints,
+    ) -> Result<Decision, RouteRejection> {
+        match virtual_model.tier {
+            VirtualTier::Free => self
+                .decide_free(snapshot, &[], authorization, constraints, model_field)
+                .ok_or_else(|| RouteRejection {
+                    code: "no_eligible_offering",
+                    message: "no free offering is currently eligible".to_string(),
+                }),
+            tier => {
+                self.decide_ordered_virtual(snapshot, authorization, constraints, model_field, tier)
+            }
+        }
+    }
+
+    /// Quality-tier floor per virtual tier (Iter 14): `low` needs a
+    /// judged tier (unknown quality promises nothing basic); `think`
+    /// needs `high`. Unmet floors reject instead of silently serving
+    /// below the promise.
+    fn tier_floor(tier: VirtualTier) -> u8 {
+        match tier {
+            VirtualTier::Free => 0,
+            VirtualTier::Low => 1,
+            VirtualTier::Think => 3,
+        }
+    }
+
+    /// Cross-model pick for the `low` (cheapest effective cost) and
+    /// `think` (best quality signals) tiers. Eligibility filters
+    /// before price compares: caller restrictions, priceable, and a
+    /// known precision class (unknown-class offerings are not eligible
+    /// for tiered routing, so FP resolution never substitutes
+    /// silently).
+    fn decide_ordered_virtual(
+        &self,
+        snapshot: &Snapshot,
+        authorization: Option<&str>,
+        constraints: &ProviderConstraints,
+        session_ns: &str,
+        tier: VirtualTier,
+    ) -> Result<Decision, RouteRejection> {
+        let tier_name = match tier {
+            VirtualTier::Free => "free",
+            VirtualTier::Low => "low",
+            VirtualTier::Think => "think",
+        };
+        let base: Vec<&Offering> = snapshot
+            .models
+            .values()
+            .flatten()
+            .filter(|o| {
+                constraints.allows(&o.provider_name)
+                    // Tiers are disjoint by design: zero-cost serves `free`
+                    // only, never `low`/`think`.
+                    && inline_cost(o).is_some_and(|cost| cost > 0.0)
+                    && is_known_precision_class(o.precision_class.as_deref().unwrap_or("unknown"))
+            })
+            .collect();
+        if base.is_empty() {
+            return Err(RouteRejection {
+                code: "no_eligible_offering",
+                message: format!("no offering is eligible for the {tier_name} tier"),
+            });
+        }
+        let floored: Vec<&Offering> = base
+            .into_iter()
+            .filter(|o| Self::quality_rank(o.quality_tier.as_deref()) >= Self::tier_floor(tier))
+            .collect();
+        if floored.is_empty() {
+            return Err(RouteRejection {
+                code: "quality_floor_unmet",
+                message: format!("no offering meets the {tier_name} tier quality floor"),
+            });
+        }
+        let budgeted: Vec<&Offering> = floored
+            .into_iter()
+            .filter(|o| constraints.budget_allows(o))
+            .collect();
+        if budgeted.is_empty() {
+            return Err(RouteRejection {
+                code: "budget_exceeded",
+                message: format!("no {tier_name} tier offering fits the price ceiling"),
+            });
+        }
+        let candidates = self.skip_throttled(budgeted);
+        let key = authorization.map(|auth| self.session_key(auth, session_ns));
+        // Sticky path: the pinned provider serves and already passed
+        // floor + budget (candidates are filtered), so keep it.
+        if let Some(key) = &key {
+            if let Some(pin) = self.lookup_pin(key) {
+                if let Some(pick) = candidates.iter().find(|o| {
+                    o.provider_name == pin.provider && o.precision_class == pin.precision_class
+                }) {
+                    return Ok(Decision {
+                        model_id: pick.model_id.clone(),
+                        provider: pick.provider_name.clone(),
+                        tag: pick.tag.clone(),
+                        precision_class: pick.precision_class.clone(),
+                        orientation: Orientation::Default,
+                        sticky: true,
+                    });
+                }
+            }
+        }
+        let pick = match tier {
+            VirtualTier::Low => candidates.into_iter().min_by(|a, b| {
+                inline_cost(a)
+                    .partial_cmp(&inline_cost(b))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.model_id.cmp(&b.model_id))
+                    .then_with(|| a.provider_name.cmp(&b.provider_name))
+            }),
+            // Best-first comparator: the minimum sorts first.
+            _ => candidates.into_iter().min_by(|a, b| {
+                compare_signals(
+                    &Self::virtual_signals(a),
+                    &Self::virtual_signals(b),
+                    RankOrientation::Quality,
+                )
+            }),
+        }
+        .ok_or_else(|| RouteRejection {
+            code: "no_eligible_offering",
+            message: format!("no offering is eligible for the {tier_name} tier"),
+        })?;
+        if let Some(key) = key {
+            self.store_pin(
+                key,
+                Pin {
+                    provider: pick.provider_name.clone(),
+                    precision_class: pick.precision_class.clone(),
+                },
+            );
+        }
+        Ok(Decision {
+            model_id: pick.model_id.clone(),
+            provider: pick.provider_name.clone(),
+            tag: pick.tag.clone(),
+            precision_class: pick.precision_class.clone(),
+            orientation: Orientation::Default,
+            sticky: false,
+        })
+    }
+
+    /// Quality-tier rank for floors (Iter 14): mirrors the catalog
+    /// ordering (high 3, standard 2, low 1, unknown 0).
+    fn quality_rank(tier: Option<&str>) -> u8 {
+        match tier {
+            Some("high") => 3,
+            Some("standard") => 2,
+            Some("low") => 1,
+            _ => 0,
+        }
+    }
+
+    /// Inline signals for one offering in cross-model comparison
+    /// (Iter 13): identity plus its own cost/tier/score, no ranking.
+    fn virtual_signals(offering: &Offering) -> Signals<'_> {
+        Signals {
+            provider: &offering.provider_name,
+            tag: offering.tag.as_deref(),
+            cost: inline_cost(offering),
+            tier: offering.quality_tier.as_deref(),
+            score: offering.quality_score,
+            error_rate: None,
+            latency_ms: None,
+        }
+    }
+
     fn decide_free(
         &self,
         snapshot: &Snapshot,
         tags: &[String],
         authorization: Option<&str>,
+        constraints: &ProviderConstraints,
+        session_ns: &str,
     ) -> Option<Decision> {
+        let now = now_unix();
+        let ranking = self.ranking.read().unwrap_or_else(|e| e.into_inner());
         let free: Vec<&Offering> = snapshot
             .models
-            .values()
-            .flatten()
-            .filter(|o| inline_cost(o) == Some(0.0))
+            .iter()
+            .flat_map(|(model_id, offerings)| {
+                offerings.iter().filter(|o| {
+                    constraints.allows(&o.provider_name)
+                        && free_eligible(ranking.as_ref(), model_id, o, now)
+                })
+            })
             .collect();
         if free.is_empty() {
             return None;
         }
         let orientation = orientation_from(tags);
-        let key = authorization.map(|auth| (auth.to_string(), FREE_MODEL.to_string()));
-        let ranking = self.ranking.read().unwrap_or_else(|e| e.into_inner());
+        let key = authorization.map(|auth| self.session_key(auth, session_ns));
 
         if let Some(key) = &key {
-            if let Some(pin) = self
-                .sessions
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .get(key)
-            {
-                let mine: Vec<&Offering> = free
-                    .iter()
-                    .filter(|o| {
-                        o.provider_name == pin.provider && o.precision_class == pin.precision_class
-                    })
-                    .copied()
-                    .collect();
-                let order = ordered(
-                    ranking.as_ref(),
-                    FREE_MODEL,
-                    &pin.precision_class,
-                    orientation,
-                    &mine,
-                );
-                if let Some(pick) = order.into_iter().next() {
-                    if inline_cost(pick) == Some(0.0) {
-                        return Some(free_decision(pick, orientation, true));
+            if let Some(pin) = self.lookup_pin(key) {
+                if !constraints.allows(&pin.provider) {
+                    // Newly disallowed: fall through and re-route fresh.
+                } else {
+                    let mine: Vec<&Offering> = free
+                        .iter()
+                        .filter(|o| {
+                            o.provider_name == pin.provider
+                                && o.precision_class == pin.precision_class
+                        })
+                        .copied()
+                        .collect();
+                    let order = ordered(
+                        ranking.as_ref(),
+                        FREE_MODEL,
+                        &pin.precision_class,
+                        orientation,
+                        &mine,
+                    );
+                    if let Some(pick) = order.into_iter().next() {
+                        if free_eligible(ranking.as_ref(), &pick.model_id, pick, now) {
+                            return Some(free_decision(pick, orientation, true));
+                        }
+                        // Pin stopped being free: fall through and re-route.
                     }
-                    // Pin stopped being free: fall through and re-route.
                 }
             }
         }
@@ -398,6 +932,9 @@ impl Router {
             .iter()
             .filter(|o| o.precision_class == class)
             .collect();
+        // Recently rate-limited providers yield to fresh ones when any
+        // remain (Iter 13); all-throttled still serves (availability).
+        let candidates = self.skip_throttled(candidates);
         let order = ordered(
             ranking.as_ref(),
             FREE_MODEL,
@@ -409,16 +946,13 @@ impl Router {
         // Candidates were pre-filtered to free offerings, so the pick is
         // free by construction.
         if let Some(key) = key {
-            let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
-            if sessions.len() < MAX_SESSIONS {
-                sessions.insert(
-                    key,
-                    Pin {
-                        provider: pick.provider_name.clone(),
-                        precision_class: pick.precision_class.clone(),
-                    },
-                );
-            }
+            self.store_pin(
+                key,
+                Pin {
+                    provider: pick.provider_name.clone(),
+                    precision_class: pick.precision_class.clone(),
+                },
+            );
         }
         Some(free_decision(pick, orientation, false))
     }
@@ -426,34 +960,148 @@ impl Router {
     /// Route a buffered chat-completions body: returns the rewritten body
     /// (stripped model + forced provider) with its decision, or `None`
     /// to forward the body untouched.
+    ///
+    /// Caller provider restrictions survive (Iter 11, F01): every field
+    /// of the incoming `provider` object is preserved — only `order`
+    /// and `allow_fallbacks` are set by routing. When no candidate
+    /// satisfies `only`/`ignore`, the body passes through untouched so
+    /// the upstream enforces the original restrictions.
     pub fn route_request(
         &self,
         headers: &axum::http::HeaderMap,
         body: &[u8],
     ) -> Option<(Vec<u8>, Decision)> {
-        let mut json: serde_json::Value = serde_json::from_slice(body).ok()?;
-        let model_field = json.get("model")?.as_str()?.to_string();
+        self.route_inner(headers, body, None).ok().flatten()
+    }
+
+    /// Strict variant (Iter 14): virtual rejections surface as `Err`
+    /// so the handler can fail closed instead of forwarding a
+    /// gateway-owned id the upstream would 404.
+    pub fn route_request_or_reject(
+        &self,
+        headers: &axum::http::HeaderMap,
+        body: &[u8],
+    ) -> Result<Option<(Vec<u8>, Decision)>, RouteRejection> {
+        self.route_inner(headers, body, None)
+    }
+
+    /// Re-route after a failed attempt (Iter 13): same body, but the
+    /// failed provider joins `ignore` so the retry lands elsewhere.
+    /// Returns `None` when nothing else can serve (the first attempt's
+    /// response stands).
+    pub fn route_request_retry(
+        &self,
+        headers: &axum::http::HeaderMap,
+        body: &[u8],
+        failed_provider: &str,
+    ) -> Option<(Vec<u8>, Decision)> {
+        let mut extra = ProviderConstraints::default();
+        extra.ignore.push(failed_provider.to_string());
+        self.route_inner(headers, body, Some(&extra)).ok().flatten()
+    }
+
+    fn route_inner(
+        &self,
+        headers: &axum::http::HeaderMap,
+        body: &[u8],
+        extra: Option<&ProviderConstraints>,
+    ) -> Result<Option<(Vec<u8>, Decision)>, RouteRejection> {
+        let json: serde_json::Value = serde_json::from_slice(body).map_err(|_| RouteRejection {
+            code: "invalid_body",
+            message: "request body is not valid JSON".to_string(),
+        })?;
+        let model_field = json
+            .get("model")
+            .and_then(|model| model.as_str())
+            .map(str::to_string)
+            .ok_or_else(|| RouteRejection {
+                code: "invalid_body",
+                message: "request body has no string \"model\" field".to_string(),
+            })?;
         let auth = headers
             .get(axum::http::header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok());
-        let decision = self.decide(&model_field, auth)?;
+        let mut constraints = ProviderConstraints::from_body(&json);
+        if let Some(extra) = extra {
+            constraints.ignore.extend(extra.ignore.iter().cloned());
+            constraints.only.extend(extra.only.iter().cloned());
+        }
+        // Virtual ids resolve here, not in `decide_constrained`: a
+        // rejection must surface, never decay into untouched passthrough
+        // of a gateway-owned id.
+        if let Some(virtual_model) = parse_virtual(&model_field) {
+            let snapshot = self.snapshot.read().unwrap_or_else(|e| e.into_inner());
+            let decision =
+                self.decide_virtual(&snapshot, &virtual_model, &model_field, auth, &constraints)?;
+            return Ok(Self::finish_route(&model_field, json, decision));
+        }
+        let decision = match self.decide_constrained(&model_field, auth, &constraints) {
+            Some(decision) => decision,
+            None => return Ok(None),
+        };
+        Ok(Self::finish_route(&model_field, json, decision))
+    }
+
+    /// Rewrite the body for `decision`: real backend model id, forced
+    /// provider order, best-effort precision pin, privacy fields.
+    fn finish_route(
+        model_field: &str,
+        mut json: serde_json::Value,
+        decision: Decision,
+    ) -> Option<(Vec<u8>, Decision)> {
         json["model"] = serde_json::Value::String(decision.model_id.clone());
-        json["provider"] = serde_json::json!({
-            "order": [decision.provider.clone()],
-            "allow_fallbacks": false,
-        });
+        let mut provider = json
+            .get("provider")
+            .and_then(|provider| provider.as_object())
+            .cloned()
+            .unwrap_or_default();
+        provider.insert(
+            "order".to_string(),
+            serde_json::json!([decision.provider.clone()]),
+        );
+        provider.insert("allow_fallbacks".to_string(), serde_json::json!(false));
+        // F04: pin the chosen precision class as a quantization
+        // requirement (best-effort: classes are coarse), unless the
+        // caller already constrained quantizations.
+        if provider.get("quantizations").is_none() {
+            if let Some(class) = decision.precision_class.as_deref() {
+                if is_known_precision_class(class) {
+                    provider.insert("quantizations".to_string(), serde_json::json!([class]));
+                }
+            }
+        }
+        // Privacy virtual models enforce zero-retention on the wire
+        // unless the caller already set the fields (Iter 13).
+        if parse_virtual(model_field).is_some_and(|v| v.privacy) {
+            if provider.get("zdr").is_none() {
+                provider.insert("zdr".to_string(), serde_json::json!(true));
+            }
+            if provider.get("data_collection").is_none() {
+                provider.insert("data_collection".to_string(), serde_json::json!("deny"));
+            }
+        }
+        json["provider"] = serde_json::Value::Object(provider);
         let rewritten = serde_json::to_vec(&json).ok()?;
         Some((rewritten, decision))
     }
 }
 
-/// Resolve an artifact path to (db file, version). Directories verify the
-/// newest manifest; manifest files are verified; `.db` files open as-is.
+/// Resolve an artifact path to (db file, version). Directories take
+/// the newest *verifying* manifest (invalid candidates are skipped for
+/// older valid ones); manifest files are verified; `.db` files open
+/// as-is.
 fn resolve_artifact(path: &Path) -> Result<(PathBuf, Option<String>), RouteError> {
     if path.is_dir() {
-        let manifest_path = newest_manifest(path, "catalog-")?
-            .ok_or_else(|| RouteError(format!("no catalog manifest in {}", path.display())))?;
-        return resolve_manifest(&manifest_path);
+        if let Some(manifest_path) = newest_valid_manifests(path, "catalog-", &catalog_manifest_ok)
+            .into_iter()
+            .next()
+        {
+            return resolve_manifest(&manifest_path);
+        }
+        return Err(RouteError(format!(
+            "no verifying catalog manifest in {}",
+            path.display()
+        )));
     }
     match path.extension().and_then(|e| e.to_str()) {
         Some("json") => resolve_manifest(path),
@@ -461,30 +1109,71 @@ fn resolve_artifact(path: &Path) -> Result<(PathBuf, Option<String>), RouteError
     }
 }
 
-/// Newest `<prefix>*.manifest.json` in a directory by `created_at`.
-/// Both catalog and ranking manifests carry that field.
-fn newest_manifest(dir: &Path, prefix: &str) -> Result<Option<PathBuf>, RouteError> {
-    let mut manifests: Vec<(String, PathBuf)> = Vec::new();
-    let entries =
-        std::fs::read_dir(dir).map_err(|e| RouteError(format!("read {}: {e}", dir.display())))?;
-    for entry in entries {
-        let entry = entry.map_err(|e| RouteError(e.to_string()))?;
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if name.starts_with(prefix) && name.ends_with(".manifest.json") {
-            let raw =
-                std::fs::read_to_string(entry.path()).map_err(|e| RouteError(e.to_string()))?;
-            let manifest: serde_json::Value = serde_json::from_str(&raw)
-                .map_err(|e| RouteError(format!("parse {}: {e}", entry.path().display())))?;
-            let created_at = manifest
-                .get("created_at")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            manifests.push((created_at, entry.path()));
+fn catalog_manifest_ok(path: &Path) -> bool {
+    pennyrouter_catalog::verify(path).unwrap_or(false)
+}
+
+fn verify_ranking_ok(path: &Path) -> bool {
+    verify_ranking(path).unwrap_or(false)
+}
+
+/// Manifest candidates newest-first by `created_at` (Iter 11, F07).
+/// Unparseable files are skipped with a log line instead of aborting
+/// discovery: one truncated publish must not poison later good
+/// artifacts. Both catalog and ranking manifests carry `created_at`.
+fn newest_valid_manifests(
+    dir: &Path,
+    prefix: &str,
+    verify: &dyn Fn(&Path) -> bool,
+) -> Vec<PathBuf> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) => {
+            eprintln!("gateway: cannot read {}: {e}", dir.display());
+            return Vec::new();
         }
+    };
+    let mut manifests: Vec<(String, PathBuf)> = Vec::new();
+    for entry in entries {
+        let path = match entry {
+            Ok(entry) => entry.path(),
+            Err(e) => {
+                eprintln!("gateway: bad directory entry: {e}");
+                continue;
+            }
+        };
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
+        if !name
+            .as_deref()
+            .is_some_and(|n| n.starts_with(prefix) && n.ends_with(".manifest.json"))
+        {
+            continue;
+        }
+        let created_at = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+            .and_then(|manifest| {
+                manifest
+                    .get("created_at")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+            })
+            .unwrap_or_default();
+        manifests.push((created_at, path));
     }
     manifests.sort();
-    Ok(manifests.pop().map(|(_, p)| p))
+    manifests
+        .into_iter()
+        .rev()
+        .map(|(_, path)| path)
+        .filter(|path| {
+            let ok = verify(path);
+            if !ok {
+                eprintln!("gateway: skipping invalid manifest {}", path.display());
+            }
+            ok
+        })
+        .collect()
 }
 
 fn resolve_manifest(manifest_path: &Path) -> Result<(PathBuf, Option<String>), RouteError> {
@@ -717,7 +1406,9 @@ mod tests {
             source: PathBuf::from("test"),
             snapshot: RwLock::new(snapshot()),
             ranking: RwLock::new(None),
-            sessions: Mutex::new(HashMap::new()),
+            sessions: RwLock::new(HashMap::new()),
+            seed: 0,
+            throttled: RwLock::new(HashMap::new()),
         }
     }
 
@@ -744,6 +1435,7 @@ mod tests {
             )]
             .into_iter()
             .collect(),
+            free_offers: Default::default(),
         };
         let router = router();
         router.swap_ranking(ranking);
@@ -861,7 +1553,9 @@ mod tests {
                 artifact_version: None,
             }),
             ranking: RwLock::new(None),
-            sessions: Mutex::new(HashMap::new()),
+            sessions: RwLock::new(HashMap::new()),
+            seed: 0,
+            throttled: RwLock::new(HashMap::new()),
         };
         let d = router.decide("openrouter/free", None).unwrap();
         assert_eq!(d.provider, "Free");
@@ -871,6 +1565,77 @@ mod tests {
         let d = router.decide("openrouter/free/quality", None).unwrap();
         assert_eq!(d.provider, "Free");
         assert_eq!(d.orientation, Orientation::Quality);
+    }
+
+    /// F11: a paid offering under a live published promo window routes
+    /// free; an expired window never does; a missing fact never does.
+    #[test]
+    fn promo_free_eligibility_expires_by_wall_clock() {
+        use pennyrouter_catalog::FreeOffer;
+        let ranked = |valid_until_unix: Option<u64>| {
+            let router = Router {
+                source: PathBuf::from("test"),
+                snapshot: RwLock::new(Snapshot {
+                    models: HashMap::from([(
+                        "m/one".to_string(),
+                        vec![priced("m/one", "Promo", 5.0, Some("high"))],
+                    )]),
+                    artifact_version: None,
+                }),
+                ranking: RwLock::new(None),
+                sessions: RwLock::new(HashMap::new()),
+                seed: 0,
+                throttled: RwLock::new(HashMap::new()),
+            };
+            router.swap_ranking(RankingDocument {
+                created_at: "t".to_string(),
+                catalog_version: None,
+                models: Default::default(),
+                free_offers: [(
+                    "m/one".to_string(),
+                    vec![FreeOffer {
+                        provider: "Promo".to_string(),
+                        tag: None,
+                        valid_until_unix,
+                    }],
+                )]
+                .into_iter()
+                .collect(),
+            });
+            router
+        };
+        // Live window (far future): routes free to the backend id.
+        let d = ranked(Some(u64::MAX))
+            .decide("openrouter/free", None)
+            .unwrap();
+        assert_eq!(d.provider, "Promo");
+        assert_eq!(d.model_id, "m/one");
+        // Expired window (epoch): passes through untouched.
+        assert_eq!(
+            ranked(Some(0))
+                .decide("openrouter/free", None)
+                .map(|d| d.provider),
+            None
+        );
+        // No published fact at all: passes through untouched.
+        let router = Router {
+            source: PathBuf::from("test"),
+            snapshot: RwLock::new(Snapshot {
+                models: HashMap::from([(
+                    "m/one".to_string(),
+                    vec![priced("m/one", "Promo", 5.0, Some("high"))],
+                )]),
+                artifact_version: None,
+            }),
+            ranking: RwLock::new(None),
+            sessions: RwLock::new(HashMap::new()),
+            seed: 0,
+            throttled: RwLock::new(HashMap::new()),
+        };
+        assert_eq!(
+            router.decide("openrouter/free", None).map(|d| d.provider),
+            None
+        );
     }
 
     #[test]
@@ -891,7 +1656,9 @@ mod tests {
                 artifact_version: None,
             }),
             ranking: RwLock::new(None),
-            sessions: Mutex::new(HashMap::new()),
+            sessions: RwLock::new(HashMap::new()),
+            seed: 0,
+            throttled: RwLock::new(HashMap::new()),
         };
         let auth = Some("Bearer key");
         let d = router.decide("openrouter/free", auth).unwrap();
@@ -960,6 +1727,311 @@ mod tests {
         let d = r.decide("meta/muse-spark", auth).unwrap();
         assert_eq!(d.provider, "Dear");
         assert!(!d.sticky);
+    }
+
+    /// F01: caller provider restrictions survive routing and constrain
+    /// selection; unsatisfiable restrictions pass through untouched.
+    fn routed_body(model: &str, provider: serde_json::Value) -> Vec<u8> {
+        serde_json::json!({
+            "model": model,
+            "messages": [],
+            "provider": provider,
+        })
+        .to_string()
+        .into_bytes()
+    }
+
+    #[test]
+    fn caller_provider_restrictions_survive_routing() {
+        let r = router();
+        let body = routed_body(
+            "meta/muse-spark/price",
+            serde_json::json!({
+                "zdr": true,
+                "data_collection": "deny",
+                "only": ["Cheap"],
+                "max_price": {"prompt": 1, "completion": 2},
+            }),
+        );
+        let (rewritten, decision) = r
+            .route_request(&axum::http::HeaderMap::new(), &body)
+            .unwrap();
+        assert_eq!(decision.provider, "Cheap");
+        let out: serde_json::Value = serde_json::from_slice(&rewritten).unwrap();
+        let provider = out.get("provider").unwrap();
+        assert_eq!(provider.get("zdr"), Some(&serde_json::json!(true)));
+        assert_eq!(
+            provider.get("data_collection"),
+            Some(&serde_json::json!("deny"))
+        );
+        assert_eq!(
+            provider.get("max_price"),
+            Some(&serde_json::json!({"prompt": 1, "completion": 2}))
+        );
+        assert_eq!(provider.get("order"), Some(&serde_json::json!(["Cheap"])));
+        assert_eq!(
+            provider.get("allow_fallbacks"),
+            Some(&serde_json::json!(false))
+        );
+    }
+
+    #[test]
+    fn unsatisfiable_only_passes_through_untouched() {
+        let r = router();
+        let body = routed_body(
+            "meta/muse-spark/price",
+            serde_json::json!({"only": ["SomebodyElse"], "zdr": true}),
+        );
+        assert!(r
+            .route_request(&axum::http::HeaderMap::new(), &body)
+            .is_none());
+    }
+
+    #[test]
+    fn ignore_list_excludes_the_default_pick() {
+        let r = router();
+        // Default pick is Cheap; ignoring it must not silently route
+        // there — Dear also serves, so routing picks Dear instead.
+        let body = routed_body(
+            "meta/muse-spark/price",
+            serde_json::json!({"ignore": ["cheap"]}),
+        );
+        let (rewritten, decision) = r
+            .route_request(&axum::http::HeaderMap::new(), &body)
+            .unwrap();
+        assert_eq!(decision.provider, "Dear");
+        let out: serde_json::Value = serde_json::from_slice(&rewritten).unwrap();
+        assert_eq!(
+            out.pointer("/provider/order"),
+            Some(&serde_json::json!(["Dear"]))
+        );
+    }
+
+    #[test]
+    fn changed_allowlist_invalidates_the_sticky_pin() {
+        let r = router();
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            "Bearer [REDACTED]".parse().unwrap(),
+        );
+        // Price orientation pins Cheap (cheapest); default would pin Dear.
+        let first = routed_body("meta/muse-spark/price", serde_json::json!({}));
+        let (_, d) = r.route_request(&headers, &first).unwrap();
+        assert_eq!(d.provider, "Cheap");
+        assert!(!d.sticky);
+        // Same session, still unrestricted: sticky.
+        let (_, d) = r.route_request(&headers, &first).unwrap();
+        assert!(d.sticky);
+        // Same session, now restricted away from the pinned provider:
+        // must re-route or pass through, never stay pinned.
+        let narrowed = routed_body(
+            "meta/muse-spark/price",
+            serde_json::json!({"only": ["Dear"]}),
+        );
+        if let Some((_, d)) = r.route_request(&headers, &narrowed) {
+            assert_eq!(d.provider, "Dear");
+            assert!(!d.sticky);
+        }
+    }
+
+    #[test]
+    fn caller_quantizations_win_over_precision_class() {
+        let r = router();
+        let body = routed_body(
+            "meta/muse-spark",
+            serde_json::json!({"quantizations": ["fp8"]}),
+        );
+        let (rewritten, _) = r
+            .route_request(&axum::http::HeaderMap::new(), &body)
+            .unwrap();
+        let out: serde_json::Value = serde_json::from_slice(&rewritten).unwrap();
+        assert_eq!(
+            out.pointer("/provider/quantizations"),
+            Some(&serde_json::json!(["fp8"])),
+            "caller constraint preserved, not overwritten by the fp16 class",
+        );
+    }
+
+    #[test]
+    fn known_precision_class_pins_quantization() {
+        let r = router();
+        let body = routed_body("meta/muse-spark", serde_json::json!({}));
+        let (rewritten, _) = r
+            .route_request(&axum::http::HeaderMap::new(), &body)
+            .unwrap();
+        let out: serde_json::Value = serde_json::from_slice(&rewritten).unwrap();
+        assert_eq!(
+            out.pointer("/provider/quantizations"),
+            Some(&serde_json::json!(["fp16"])),
+        );
+    }
+
+    /// A03: the inline sort the gateway falls back to must break
+    /// same-provider ties by the real tag, exactly like the offline
+    /// ranker — not by insertion order.
+    #[test]
+    fn inline_sort_breaks_same_provider_ties_by_tag() {
+        use pennyrouter_catalog::{RankOrientation, Signals};
+        fn signals(tag: Option<&str>) -> Signals<'_> {
+            Signals {
+                provider: "Solo",
+                tag,
+                cost: None,
+                tier: None,
+                score: None,
+                error_rate: None,
+                latency_ms: None,
+            }
+        }
+        assert_eq!(
+            compare_signals(
+                &signals(Some("b-tag")),
+                &signals(Some("a-tag")),
+                RankOrientation::Default
+            ),
+            std::cmp::Ordering::Greater
+        );
+        // Untagged sorts before tagged (None < Some): stable either
+        // way, and identical offline and inline.
+        assert_eq!(
+            compare_signals(
+                &signals(None),
+                &signals(Some("a-tag")),
+                RankOrientation::Default
+            ),
+            std::cmp::Ordering::Less
+        );
+    }
+
+    /// Iter 13: virtual ids parse strictly; anything else passes
+    /// through for the catalog split to handle (or ignore).
+    #[test]
+    fn virtual_ids_parse_strictly() {
+        assert_eq!(
+            parse_virtual("openrouter/pair/low"),
+            Some(VirtualModel {
+                tier: VirtualTier::Low,
+                privacy: false
+            })
+        );
+        assert_eq!(
+            parse_virtual("openrouter/pair/privacy/think"),
+            Some(VirtualModel {
+                tier: VirtualTier::Think,
+                privacy: true
+            })
+        );
+        assert_eq!(parse_virtual("azure/pair/free"), None);
+        assert_eq!(parse_virtual("openrouter/pair/ultra"), None);
+        assert_eq!(parse_virtual("openrouter/pair/privacy"), None);
+        assert_eq!(parse_virtual("openrouter/pair/free/extra"), None);
+        assert_eq!(parse_virtual("openrouter/free"), None);
+        assert_eq!(parse_virtual("meta/muse-spark"), None);
+        assert_eq!(VIRTUAL_MODELS.len(), 6);
+        assert!(VIRTUAL_MODELS.iter().all(|id| parse_virtual(id).is_some()));
+    }
+
+    /// Dedicated snapshot for virtual-tier tests: four models with
+    /// correct per-offering model ids (the shared `router()` fixture
+    /// reuses one placeholder id across map keys).
+    fn virtual_router() -> Router {
+        Router {
+            source: PathBuf::from("test"),
+            snapshot: RwLock::new(Snapshot {
+                models: HashMap::from([
+                    (
+                        "m/cheap".to_string(),
+                        vec![priced("m/cheap", "Cheap", 1.0, Some("low"))],
+                    ),
+                    (
+                        "m/mid".to_string(),
+                        vec![priced("m/mid", "Mid", 3.0, Some("standard"))],
+                    ),
+                    (
+                        "m/dear".to_string(),
+                        vec![priced("m/dear", "Dear", 9.0, Some("high"))],
+                    ),
+                    (
+                        "m/free".to_string(),
+                        vec![priced("m/free", "Freebie", 0.0, Some("standard"))],
+                    ),
+                ]),
+                artifact_version: None,
+            }),
+            ranking: RwLock::new(None),
+            sessions: RwLock::new(HashMap::new()),
+            seed: 0,
+            throttled: RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Iter 13: `low` is the cheapest non-free offering across models;
+    /// `think` is the best-quality non-free offering; both skip
+    /// throttled providers when alternatives exist.
+    #[test]
+    fn virtual_tiers_pick_across_models() {
+        let r = virtual_router();
+        let low = r.decide("openrouter/pair/low", None).unwrap();
+        assert_eq!(low.provider, "Cheap");
+        assert_eq!(low.model_id, "m/cheap");
+        // Freebie (0.0) is excluded: tiers are disjoint by design.
+        let think = r.decide("openrouter/pair/think", None).unwrap();
+        assert_eq!(think.provider, "Dear");
+        assert_eq!(think.model_id, "m/dear");
+        // Free tier still routes the zero-cost offering.
+        let free = r.decide("openrouter/pair/free", None).unwrap();
+        assert_eq!(free.provider, "Freebie");
+        // Unknown provider segments pass through untouched.
+        assert_eq!(r.decide("azure/pair/free", None).map(|d| d.provider), None);
+    }
+
+    #[test]
+    fn virtual_picks_skip_throttled_providers() {
+        let r = virtual_router();
+        r.note_throttled("m/cheap", "Cheap");
+        let low = r.decide("openrouter/pair/low", None).unwrap();
+        assert_eq!(low.provider, "Mid");
+        // Everything throttled: availability wins, still serves.
+        r.note_throttled("m/dear", "Dear");
+        r.note_throttled("m/mid", "Mid");
+        let low = r.decide("openrouter/pair/low", None).unwrap();
+        assert_eq!(low.provider, "Cheap");
+    }
+
+    #[test]
+    fn privacy_virtual_enforces_zero_retention_on_the_wire() {
+        let r = virtual_router();
+        let body = routed_body("openrouter/pair/privacy/low", serde_json::json!({}));
+        let (rewritten, _) = r
+            .route_request(&axum::http::HeaderMap::new(), &body)
+            .unwrap();
+        let out: serde_json::Value = serde_json::from_slice(&rewritten).unwrap();
+        assert_eq!(out.pointer("/provider/zdr"), Some(&serde_json::json!(true)));
+        assert_eq!(
+            out.pointer("/provider/data_collection"),
+            Some(&serde_json::json!("deny"))
+        );
+        // Non-privacy virtuals add no retention fields of their own.
+        let body = routed_body("openrouter/pair/low", serde_json::json!({}));
+        let (rewritten, _) = r
+            .route_request(&axum::http::HeaderMap::new(), &body)
+            .unwrap();
+        let out: serde_json::Value = serde_json::from_slice(&rewritten).unwrap();
+        assert_eq!(out.pointer("/provider/zdr"), None);
+        // Caller-set fields always win.
+        let body = routed_body(
+            "openrouter/pair/privacy/low",
+            serde_json::json!({"zdr": false}),
+        );
+        let (rewritten, _) = r
+            .route_request(&axum::http::HeaderMap::new(), &body)
+            .unwrap();
+        let out: serde_json::Value = serde_json::from_slice(&rewritten).unwrap();
+        assert_eq!(
+            out.pointer("/provider/zdr"),
+            Some(&serde_json::json!(false))
+        );
     }
 
     #[test]

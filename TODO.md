@@ -80,36 +80,34 @@ cheap judge model, classifier-based routing.
 
 ## Next (planned — detail in [docs/roadmap.md](docs/roadmap.md))
 
-- [ ] **Iter 9 — Resilience bounds.** Bounded upstream concurrency +
-      queue depth with explicit 429/503 shedding + graceful shutdown.
-      Test: soak sheds cleanly; SIGTERM drains.
-- [ ] **Iter 10 — Catalog freshness.** Periodic `CATALOG_DB` reload +
+- [x] **Iter 9 — Resilience bounds.** Bounded upstream concurrency +
+      queue depth with explicit 503 shedding + graceful shutdown.
+      Test: soak sheds cleanly (`tests/resilience.rs`); SIGTERM drains.
+      `cargo test` (81 passed), clippy, fmt clean.
+- [x] **Iter 10 — Catalog freshness.** Periodic `CATALOG_DB` reload +
       atomic snapshot publication + last-good fallback; resolve
       routing-vs-operations contradiction. Test: new artifact picked
-      up without restart; corrupt artifact keeps serving.
-- [ ] **Iter 11 — Bug-review fixes.** F01–F11 (keys done separately) +
-      A01–A05: provider-field preservation, gzip, endpoint/precision
-      enforcement, upstream body bounds, SSE failure rule, atomic
-      publish, Terraform `/api` base, readiness loop,
-      None-scores-first, promos→free filter; hashed session keys + TTL.
-      Test: one regression test per finding.
-- [ ] **Iter 12 — Hot-path hygiene + fresh baseline.** Raw-envelope
-      passthrough, stream-or-bound bodies, buffered logging, less lock
-      contention; re-run `tests/load`, record numbers. Test: load
-      compare vs Iter 3 baseline.
-- [ ] **Iter 13 — Virtual model catalog, free-first.** Six virtual ids
-      (`openrouter/pair/free`, `/low`, `/think` + `/privacy/…`
-      variants; provider-first, OpenRouter-only for now); tier
-      definitions; blended
-      input/output/cache price metric with FP-resolution classes and
-      eligibility-first comparison; retry/fallback policy; free-tier
-      rate-limit awareness (model info + 429 history); curated local
-      `GET /v1/models`. Test: each virtual id routes; models list
-      returns exactly the six.
-- [ ] **Iter 14 — Product gaps.** Quality floor, strict-budget
+      up without restart; corrupt artifact keeps serving
+      (`tests/reload.rs`). `cargo test` (84 passed), clippy, fmt clean.
+- [x] **Iter 11 — Bug-review fixes.** F01–F11 (F08 verified
+      pre-fixed) + A01–A05 + hardening (query redaction, hashed
+      session keys + TTL, hop-by-hop strip, no-follow redirects).
+      Test: one regression test per finding (`tests/hardening.rs`,
+      F01/F04/F10/F11 unit + rank/process/price/judge tests).
+      `cargo test` (105 passed), clippy, fmt clean.
+- [x] **Iter 12 — Hot-path hygiene + fresh baseline.** Buffered
+      logging thread, sessions RwLock; re-ran `tests/load`, recorded
+      numbers (json p50 +0.26ms same as Iter 3, p99 tail open).
+      `cargo test` (105 passed), clippy, fmt clean.
+- [x] **Iter 13 — Virtual model catalog, free-first.** Six virtual ids
+      (`openrouter/pair/…`); disjoint tiers; blended price metric +
+      known-class guard; single retry (virtual only); 429 cool-down;
+      curated local `GET /v1/models`. Test: `tests/virtual_models.rs`
+      + unit tests. `cargo test`, clippy, fmt clean.
+- [x] **Iter 14 — Product gaps.** Quality floor, strict-budget
       fail-closed, live free eligibility, affinity, Responses routing.
       Test: over-budget fails closed; ineligible never wins on price.
-- [ ] **Iter 15 — Decision-model catalog + selection.** Catalog which
+- [x] **Iter 15 — Decision-model catalog + selection.** Catalog which
       judge model serves which backend, selection policy
       (recorded vs live, sampling), cost caps, judgment audit trail;
       judges stay offline batch, never on the request path. Test:

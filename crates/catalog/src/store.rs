@@ -13,6 +13,7 @@ pub struct ModelRow {
     pub fetched_at: String,
 }
 
+#[derive(Clone)]
 pub struct EndpointRow {
     pub id: i64,
     pub model_id: String,
@@ -29,6 +30,8 @@ pub struct EndpointRow {
     pub quality_tier: Option<String>,
     pub quality_score: Option<f64>,
     pub judged_at: Option<String>,
+    pub judge_model: Option<String>,
+    pub judge_prompt: Option<String>,
 }
 
 /// Indexed values distilled from an endpoint payload by processing.
@@ -42,17 +45,22 @@ pub struct EndpointIndex {
     pub processed_at: String,
 }
 
-/// Model-judged signals distilled by judging (Phase 2b).
+/// Model-judged signals distilled by judging (Phase 2b), plus the
+/// audit identity of the judge that produced them (Iter 15: model +
+/// prompt version with every judgment; `None` on rows judged before
+/// the audit columns existed).
 pub struct EndpointJudgment {
     pub quality_tier: Option<String>,
     pub quality_score: Option<f64>,
     pub judged_at: String,
+    pub judge_model: Option<String>,
+    pub judge_prompt: Option<String>,
 }
 
 const ENDPOINT_COLS: &str = "id, model_id, provider_name, payload, fetched_at,
     price_prompt, price_completion, price_cache_read, price_cache_write,
     precision_class, promo_discount, processed_at,
-    quality_tier, quality_score, judged_at";
+    quality_tier, quality_score, judged_at, judge_model, judge_prompt";
 
 fn endpoint_row(r: &Row) -> Result<EndpointRow, rusqlite::Error> {
     Ok(EndpointRow {
@@ -71,6 +79,8 @@ fn endpoint_row(r: &Row) -> Result<EndpointRow, rusqlite::Error> {
         quality_tier: r.get(12)?,
         quality_score: r.get(13)?,
         judged_at: r.get(14)?,
+        judge_model: r.get(15)?,
+        judge_prompt: r.get(16)?,
     })
 }
 
@@ -205,11 +215,13 @@ impl Catalog {
     ) -> Result<(), Error> {
         self.conn.execute(
             "UPDATE endpoints SET quality_tier = ?1, quality_score = ?2,
-             judged_at = ?3 WHERE id = ?4",
+             judged_at = ?3, judge_model = ?4, judge_prompt = ?5 WHERE id = ?6",
             params![
                 judgment.quality_tier,
                 judgment.quality_score,
                 judgment.judged_at,
+                judgment.judge_model,
+                judgment.judge_prompt,
                 id
             ],
         )?;

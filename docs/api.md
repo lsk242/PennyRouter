@@ -34,8 +34,9 @@ path lives only in logs).
 | Client path | Behavior |
 |---|---|
 | `POST /v1/chat/completions` | Custom handler: guard, provider routing, streaming |
-| `GET /v1/models` | Proxied + logged (verified live: 200 with model list) |
-| `POST /v1/embeddings`, `POST /v1/completions`, `/v1/responses`, `/v1/audio/*`, `/v1/images/*`, `/v1/moderations`, `/v1/files`, `/v1/batches`, `/v1/fine_tuning/*`, `/v1/vector_stores` | Proxied + logged |
+| `POST /v1/responses` | Same routed handler as chat (Iter 14): model rewrite, budget, floor, retry, rejections |
+| `GET /v1/models` | Curated menu (Iter 13): exactly the six virtual ids, served locally |
+| `POST /v1/embeddings`, `POST /v1/completions`, `/v1/audio/*`, `/v1/images/*`, `/v1/moderations`, `/v1/files`, `/v1/batches`, `/v1/fine_tuning/*`, `/v1/vector_stores` | Proxied + logged |
 | OpenRouter extras `/api/v1/auth/key`, `/api/v1/credits`, `/api/v1/generation` | No `/v1` alias exists, so these don't compose through the gateway (`{base}{path}` would double `/api`); call OpenRouter directly (verified live: 200). A gateway call is still logged, then answers upstream 404. |
 | Ollama-native `/api/chat`, `/api/generate`, `/api/tags`, `/api/show`, `/api/embed`, `/api/ps`, `/api/version` | Proxied as-is to the configured upstream + logged. OpenRouter hosts no such paths (upstream 404, still logged); with an Ollama upstream they pass straight through. No Ollama↔OpenAI translation yet. |
 | Anything else | Proxied as-is + logged |
@@ -55,6 +56,18 @@ forwarded with the stripped model id plus a forced `provider.order`,
 and responses carry the chosen provider in `x-pennyrouter-provider`.
 From Iter 7, `openrouter/free` routes to any free offering (rewritten
 to its backend id) or passes through untouched when nothing is free.
+From Iter 13, the virtual catalog `openrouter/pair/[privacy/]<free|low|think>`
+is the stable menu (see [routing.md](routing.md)): `free` = zero-cost,
+`low` = cheapest basic, `think` = best quality; `privacy/` variants
+additionally enforce zero-retention provider fields. Virtual requests
+retry once on another provider when the first attempt is retryable
+(429/502/503/504); anything else keeps exactly-once semantics.
+From Iter 14, virtual requests that cannot be served fail closed
+with an OpenAI-shaped error instead of leaking the virtual id
+upstream: `budget_exceeded` (400) when no candidate fits
+`provider.max_price`, `quality_floor_unmet` / `no_eligible_offering`
+(503 + `Retry-After: 1`) when the tier floor or eligibility leaves
+nothing to serve. `POST /v1/responses` shares this whole contract.
 
 ## Limits
 

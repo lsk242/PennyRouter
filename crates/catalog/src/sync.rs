@@ -104,6 +104,8 @@ pub fn run_fixture_sync(
                 quality_tier: None,
                 quality_score: None,
                 judged_at: None,
+                judge_model: None,
+                judge_prompt: None,
                 model_id: model_id.clone(),
                 provider_name: provider.to_string(),
                 payload: serde_json::to_string(e)?,

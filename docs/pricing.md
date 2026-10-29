@@ -51,6 +51,30 @@ quality at a lower price.
   rewrite to its backend id; with nothing free they pass through
   untouched. Free-session pins re-route when the offering stops being
   free, so a mid-day expiry never misroutes at full price.
+- From Iter 11, promo-free eligibility is published in the ranking
+  document (`free_offers`: provider + tag + `valid_until_unix`; no
+  expiry means free by permanent catalog zeros), and the gateway
+  checks the wall clock: an expired or missing fact is never free,
+  even mid-window-cached. Catalog zeros stay expiry-free by design.
+- From Iter 13, tier comparison uses the blended effective cost
+  (input/output/cache-read/cache-write under the balanced profile)
+  with eligibility before price: caller restrictions, priceable, and
+  known precision class. `low` = minimum effective cost;
+  `think` = best quality signals (tier, then score, then errors, then
+  price). FP resolution is a separate class and never substitutes
+  silently — unknown-class offerings are ineligible for tiered
+  routing.
 - Modality/context/ZDR constraints stay out: price compares within
   precision class (the constraint the index carries); richer
   eligibility waits for the signals.
+- Caller budget caps (Iter 14): `provider.max_price: {prompt,
+  completion}` in the request body sets a hard ceiling compared
+  against the raw per-token `price_prompt`/`price_completion`
+  columns — not the blended effective cost, so the promise is
+  legible without knowing the workload profile. Both legs must be
+  present and numeric (JSON numbers or numeric strings); a malformed
+  cap is silently no cap, never a guessed one. Under a well-formed
+  cap, an offering with a missing leg is ineligible (fail closed);
+  without a cap, unpriceable offerings still just sort last. Caps
+  apply to every routed candidate and every sticky pin, on both
+  `/v1/chat/completions` and `/v1/responses`.
