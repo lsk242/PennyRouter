@@ -77,3 +77,40 @@ adds value on its own. Detail and acceptance criteria live in
 Deferred (see [docs/future.md](docs/future.md), not committed): additional
 backends, parallel fan-out (fastest/all/judge), traffic review via a local or
 cheap judge model, classifier-based routing.
+
+## Next (planned — detail in [docs/roadmap.md](docs/roadmap.md))
+
+- [ ] **Iter 9 — Resilience bounds.** Bounded upstream concurrency +
+      queue depth with explicit 429/503 shedding + graceful shutdown.
+      Test: soak sheds cleanly; SIGTERM drains.
+- [ ] **Iter 10 — Catalog freshness.** Periodic `CATALOG_DB` reload +
+      atomic snapshot publication + last-good fallback; resolve
+      routing-vs-operations contradiction. Test: new artifact picked
+      up without restart; corrupt artifact keeps serving.
+- [ ] **Iter 11 — Bug-review fixes.** F01–F11 (keys done separately) +
+      A01–A05: provider-field preservation, gzip, endpoint/precision
+      enforcement, upstream body bounds, SSE failure rule, atomic
+      publish, Terraform `/api` base, readiness loop,
+      None-scores-first, promos→free filter; hashed session keys + TTL.
+      Test: one regression test per finding.
+- [ ] **Iter 12 — Hot-path hygiene + fresh baseline.** Raw-envelope
+      passthrough, stream-or-bound bodies, buffered logging, less lock
+      contention; re-run `tests/load`, record numbers. Test: load
+      compare vs Iter 3 baseline.
+- [ ] **Iter 13 — Virtual model catalog, free-first.** Six virtual ids
+      (`openrouter/pair/free`, `/low`, `/think` + `/privacy/…`
+      variants; provider-first, OpenRouter-only for now); tier
+      definitions; blended
+      input/output/cache price metric with FP-resolution classes and
+      eligibility-first comparison; retry/fallback policy; free-tier
+      rate-limit awareness (model info + 429 history); curated local
+      `GET /v1/models`. Test: each virtual id routes; models list
+      returns exactly the six.
+- [ ] **Iter 14 — Product gaps.** Quality floor, strict-budget
+      fail-closed, live free eligibility, affinity, Responses routing.
+      Test: over-budget fails closed; ineligible never wins on price.
+- [ ] **Iter 15 — Decision-model catalog + selection.** Catalog which
+      judge model serves which backend, selection policy
+      (recorded vs live, sampling), cost caps, judgment audit trail;
+      judges stay offline batch, never on the request path. Test:
+      each cataloged judge reproduces fixtures; spend capped.

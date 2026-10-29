@@ -168,7 +168,115 @@ Development delivers Docker images, platform delivers deployments.
 - **Later:** more providers on the same patterns; Terraform
   plan/apply automation per environment.
 
-## After Iter 8
+## Iter 9 — Resilience bounds (planned)
+
+- Goal: close the architecture deviation — bounded upstream concurrency
+  and queue depth with explicit load-shedding, plus graceful shutdown.
+  See [architecture.md](architecture.md) and
+  [performance.md](performance.md).
+- Value: the gateway degrades with 429/503 instead of collapsing under
+  a burst; deploys stop dropping in-flight requests.
+- Test: soak past the concurrency bound sheds with 503 (no error
+  cascade); SIGTERM drains in-flight requests before exit.
+
+## Iter 10 — Catalog freshness (planned)
+
+- Goal: close the freshness deviation — periodic `CATALOG_DB` reload
+  with atomic snapshot publication and last-good fallback, so ranking
+  and price updates reach a running gateway without restart.
+- Value: re-ranking and promo windows actually take effect; resolves
+  the routing-vs-operations contradiction (startup-once vs automatic
+  pickup) and wires `CATALOG_DB` in prod compose/Terraform.
+- Test: drop a new artifact → gateway serves it without restart;
+  corrupt artifact → last-good snapshot keeps serving.
+
+## Iter 11 — Bug-review fixes (planned)
+
+- Goal: fix the
+  [security-and-bug review](review/PennyRouter-security-and-bug-review.md)
+  findings F01–F11 (keys already addressed separately) plus hardening
+  notes A01–A05: preserve provider fields (`max_price`/`only`/ZDR) on
+  rewrite, gzip handling, endpoint/precision enforcement, bound
+  upstream bodies, SSE failure rule, atomic publish, Terraform `/api`
+  base, readiness loop, None-scores-first ordering, promos reaching the
+  free filter; hash session keys with TTL/eviction.
+- Value: routing stops silently dropping caller constraints or
+  misrouting on stale/promo data.
+- Test: one regression test per finding; full `cargo test` green.
+
+## Iter 12 — Hot-path hygiene + fresh baseline (planned)
+
+- Goal: act on the
+  [resource-efficiency review](review/PennyRouter-resource-efficiency-review.md) —
+  raw-envelope passthrough (no full parse + re-serialize when no rewrite
+  applies), stream-or-bound non-streaming bodies, buffered structured
+  logging (no `println!` per request), less per-request lock contention;
+  re-run `tests/load` and record post-Iter-8 numbers (Iter 3 baseline is
+  stale).
+- Value: the "dumb and fast" path stays allocation-lean; every later
+  change has a current baseline to prove against.
+- Test: load compare vs the Iter 3 baseline recorded here; no
+  allocation growth on the unrouted path.
+
+## Iter 13 — Virtual model catalog, free-first (planned)
+
+- Goal: serve six virtual models and nothing else. Ids carry the
+  provider first so future providers slot in (today only OpenRouter,
+  BYOK key forwarded as now): `openrouter/pair/free`,
+  `openrouter/pair/low`, `openrouter/pair/think`,
+  `openrouter/pair/privacy/free`, `openrouter/pair/privacy/low`,
+  `openrouter/pair/privacy/think`.
+- Tiers: `free` = zero-cost offering; `low` = cheapest at basic level
+  (DeepSeek 4.1 Flash class); `think` = flagship reasoning (ChatGPT
+  Luna 6 MAX class). No speed/latency axis in v1.
+- Price metric: `effective_cost` blended over input/output/cache-read/
+  cache-write under the documented workload profile; FP resolution is
+  a separate comparison class, never silently substituted; eligibility
+  (modality, context, ZDR) filters before price compares.
+- Availability: retry/fallback policy per virtual model (revisit
+  `allow_fallbacks: false`); for `free`, track rate limits from model
+  info plus organic 429 history so routing avoids exhausted offerings.
+- `GET /v1/models` answers locally with exactly the six curated
+  entries (no upstream proxy leak); chat with a virtual id routes to a
+  real backend offering. See [api.md](api.md), [routing.md](routing.md),
+  [pricing.md](pricing.md).
+- Value: clients see a stable 6-model menu; the gateway owns mapping,
+  price math, and failover.
+- Test: each virtual id routes to an eligible offering in fixtures;
+  `/v1/models` returns exactly the six; unknown ids keep current
+  passthrough behavior.
+
+## Iter 14 — Product gaps (planned)
+
+- Goal: close the remaining
+  [product-viability gaps](review/PennyRouter-product-viability-review.md):
+  quality floor per tier, strict-budget fail-closed, live free
+  eligibility, provider affinity, Responses-routing coverage.
+- Value: the free-first coding policy is trustworthy on paid tiers too.
+- Test: over-budget request fails closed with an OpenAI-shaped error;
+  ineligible providers never win on price alone.
+
+## Iter 15 — Decision-model catalog + selection (planned)
+
+- Goal: answer "which model judges, and how is it chosen" with a
+  cataloged, reviewable setup. Today judges run only as an offline
+  batch — `catalog-process --judge <file>` (recorded) or
+  `--judge-backend baseten|modal` (live OpenAI-compatible chat calls
+  via the shared `judge_openai` core) — writing `quality_tier`/
+  `quality_score`/`judged_at` into the DB; the gateway never calls a
+  judge and no endpoint serves judging. Keep that separation.
+- Value: judge choice becomes config, not tribal knowledge; judging
+  cost stays bounded and auditable.
+- Decisions to record: the judge-model catalog (which judge model per
+  backend, with base URL/model/auth source); selection policy (when
+  recorded suffices vs live, sampling rate, per-endpoint scoping);
+  cost caps per rebuild; judgment audit trail (model + prompt version
+  stored with each judgment); no request-path judge calls, ever.
+- Test: `catalog-process` with each cataloged judge reproduces
+  fixture judgments; unknown backend rejected; live-judge spend per
+  rebuild logged and capped.
+
+## After Iter 15
 
 Deferred ideas in [future.md](future.md): more backends, parallel fan-out,
 judge models, classifier routing. Each becomes roadmap items only when
