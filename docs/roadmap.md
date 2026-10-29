@@ -365,8 +365,45 @@ Development delivers Docker images, platform delivers deployments.
   error, audit meta read back).
   `cargo test --workspace`, clippy, fmt clean.
 
-## After Iter 15
+## Iter 16 — Provider alternatives to OpenRouter (done)
 
-Deferred ideas in [future.md](future.md): more backends, parallel fan-out,
-judge models, classifier routing. Each becomes roadmap items only when
-pulled forward deliberately.
+- Goal: serve Modal and Baseten as first-class upstreams alongside
+  OpenRouter, on the caller's own keys.
+- Value: one gateway, one caller token, three upstreams — no
+  gateway-held serving keys, no billing surface.
+- Shipped: provider-pinned direct routes (`modal/<model>`,
+  `baseten/<model>`) on both routed endpoints; catalog bypass (no
+  router needed); prefix stripped, OpenRouter `provider` object
+  dropped; caller headers incl. `Authorization` forwarded unchanged;
+  unset provider fails closed with `provider_not_configured` (400);
+  exactly-once, `x-pennyrouter-provider` echoed. `MODAL_BASE_URL`
+  (unset by default) / `BASETEN_BASE_URL` (defaults to Baseten's
+  public inference API). Proven by `tests/providers.rs` (5 tests:
+  per-upstream routing, auth forwarding, field stripping, default
+  passthrough intact, fail-closed unset, empty-remainder boundary).
+  `cargo test --workspace`, clippy, fmt clean.
+
+## Iter 17 — Debug UIs, off by default (done)
+
+- Goal: operator visibility into both systems without touching the
+  request path: gateway ranking state, catalog runs and artifacts.
+- Value: tiers and judgments become inspectable in a browser instead
+  of sqlite; UIs cost nothing when off.
+- Shipped: gateway `GET /ui` (snapshot, virtual menu, per-model
+  offerings + default ranking order, free offers, metrics), gated by
+  `GATEWAY_UI=1` with no route registered otherwise; `catalog-ui`
+  binary (runs, models, endpoints, ranking, audit meta, log tail)
+  gated by `CATALOG_UI=1`; localhost bind; catalog Docker image
+  ships the binary. Fixed `/` landing pages in both systems show
+  binary version + build hash (`build.rs`, `unknown` without git),
+  config status, and links. Proven by `tests/ui.rs` (gateway, 4 tests:
+  disabled falls through, enabled content, router-less, path
+  intact) and `catalog-ui/tests/ui.rs` (refusal + full page tour
+  against a published fixture dir).
+  `cargo test --workspace`, clippy, fmt clean.
+
+## After Iter 17
+
+Deferred ideas in [future.md](future.md): classifier routing,
+parallel fan-out, more judge models. Each becomes roadmap items only
+when pulled forward deliberately.

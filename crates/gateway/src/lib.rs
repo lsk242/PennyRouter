@@ -12,6 +12,7 @@ use axum::{
 };
 use serde::Serialize;
 use std::{
+    collections::HashMap,
     io::Write,
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -164,6 +165,7 @@ impl Default for ConcurrencyLimits {
 #[derive(Clone)]
 pub struct AppState {
     upstream_base_url: String,
+    extra_upstreams: HashMap<String, String>,
     client: reqwest::Client,
     timeouts: Timeouts,
     metrics: Arc<Metrics>,
@@ -200,6 +202,7 @@ impl AppState {
         let max_upstream = limits.max_upstream.max(1);
         Self {
             upstream_base_url: base.trim_end_matches('/').to_string(),
+            extra_upstreams: HashMap::new(),
             client,
             timeouts,
             metrics: Arc::new(Metrics::new()),
@@ -207,6 +210,33 @@ impl AppState {
             upstream_slots: Arc::new(Semaphore::new(max_upstream)),
             queue_slots: Arc::new(Semaphore::new(limits.max_queued)),
         }
+    }
+
+    /// Register a provider-pinned upstream (Iter 16): `modal/<model>`
+    /// and `baseten/<model>` forward there instead of OpenRouter.
+    pub fn with_upstream(mut self, provider: &str, base_url: &str) -> Self {
+        self.extra_upstreams.insert(
+            provider.to_string(),
+            base_url.trim_end_matches('/').to_string(),
+        );
+        self
+    }
+
+    /// Base URL for a pinned provider, if configured.
+    pub fn pinned_upstream(&self, provider: &str) -> Option<&str> {
+        self.extra_upstreams.get(provider).map(String::as_str)
+    }
+
+    /// Default (OpenRouter) upstream base URL (Iter 17: landing page).
+    pub fn upstream_base(&self) -> &str {
+        &self.upstream_base_url
+    }
+
+    /// Configured provider-pinned upstreams, sorted (Iter 17).
+    pub fn extra_upstream_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.extra_upstreams.keys().cloned().collect();
+        names.sort();
+        names
     }
 
     /// State with provider routing: recognized models are rewritten to
@@ -244,7 +274,24 @@ impl AppState {
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(DEFAULT_MAX_QUEUED),
         };
-        let state = Self::with_limits(base, Timeouts::default(), limits);
+        let mut state = Self::with_limits(base, Timeouts::default(), limits);
+        // Provider-pinned upstreams (Iter 16): unset means the
+        // provider's routes fail closed with provider_not_configured.
+        // Baseten defaults to its public inference API (same URL the
+        // catalog judge uses); Modal has no shared deployment, so it
+        // stays unset until configured.
+        if let Ok(url) = std::env::var("MODAL_BASE_URL") {
+            if !url.is_empty() {
+                state = state.with_upstream("modal", &url);
+            }
+        }
+        if let Ok(url) = std::env::var("BASETEN_BASE_URL") {
+            if !url.is_empty() {
+                state = state.with_upstream("baseten", &url);
+            }
+        } else {
+            state = state.with_upstream("baseten", "https://inference.baseten.co/v1");
+        }
         match std::env::var("CATALOG_DB") {
             Err(_) => state,
             Ok(path) => match routing::Router::load(&path) {
@@ -297,9 +344,31 @@ pub fn spawn_reload_task(
     })
 }
 
+/// Binary version and build hash for the landing page (Iter 17).
+/// The hash comes from `build.rs` (`git rev-parse --short HEAD`) and
+/// degrades to `unknown` in checkouts without git metadata.
+pub fn build_version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}
+
+pub fn build_hash() -> &'static str {
+    option_env!("GIT_HASH").unwrap_or("unknown")
+}
+
+/// Debug UI flag (Iter 17): `GATEWAY_UI=1` (also `true`/`yes`)
+/// registers `GET /ui`. Anything else — including unset — leaves the
+/// path unregistered: no handler, no middleware branch, zero
+/// request-path cost.
+fn ui_enabled() -> bool {
+    std::env::var("GATEWAY_UI")
+        .map(|value| matches!(value.to_lowercase().as_str(), "1" | "true" | "yes"))
+        .unwrap_or(false)
+}
+
 pub fn app_with_state(state: AppState) -> Router {
     let metrics = state.metrics.clone();
-    Router::new()
+    let router = Router::new()
+        .route("/", get(landing))
         .route("/health", get(health))
         .route("/metrics", get(metrics_handler))
         .route("/v1/chat/completions", post(routed_completion))
@@ -308,10 +377,195 @@ pub fn app_with_state(state: AppState) -> Router {
         .route("/v1/responses", post(routed_completion))
         // Curated menu (Iter 13): clients discover exactly the virtual
         // models; this path used to proxy upstream.
-        .route("/v1/models", get(models_list))
+        .route("/v1/models", get(models_list));
+    // Debug UI (Iter 17): registered only when enabled. Disabled
+    // means no route at all — the path falls through to the
+    // fallback proxy like any unknown path.
+    let router = if ui_enabled() {
+        router.route("/ui", get(ui_page))
+    } else {
+        router
+    };
+    router
         .fallback(fallback_proxy)
         .layer(middleware::from_fn_with_state(metrics, track))
         .with_state(state)
+}
+
+/// Fixed landing page (Iter 17): binary version + build hash and
+/// display/config status with links. Always registered — it answers
+/// only its own path, so API traffic is unaffected.
+async fn landing(State(state): State<AppState>) -> Response {
+    fn esc(text: &str) -> String {
+        text.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;")
+    }
+    let mut pinned = state.extra_upstream_names();
+    if pinned.is_empty() {
+        pinned.push("(none)".to_string());
+    }
+    let ui = if ui_enabled() {
+        "<a href=\"/ui\">debug UI</a> (enabled)".to_string()
+    } else {
+        "debug UI (disabled — set GATEWAY_UI=1)".to_string()
+    };
+    let page = format!(
+        "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\">\
+        <title>PennyRouter gateway</title>\
+        <style>body{{font-family:system-ui,sans-serif;margin:2em;max-width:72em}}</style>\
+        </head><body><h1>PennyRouter gateway</h1>\
+        <p>version <strong>{}</strong> (build <strong>{}</strong>)</p>\
+        <h2>Config</h2><ul>\
+        <li>routing: {}</li>\
+        <li>debug UI: {}</li>\
+        <li>default upstream: {}</li>\
+        <li>pinned upstreams: {}</li></ul>\
+        <h2>Links</h2><ul>\
+        <li><a href=\"/ui\">/ui</a> ranking + metrics (needs the flag)</li>\
+        <li><a href=\"/metrics\">/metrics</a> Prometheus text</li>\
+        <li><a href=\"/health\">/health</a> liveness</li>\
+        <li><a href=\"/v1/models\">/v1/models</a> virtual menu</li></ul>\
+        </body></html>",
+        esc(build_version()),
+        esc(build_hash()),
+        if state.router_handle().is_some() {
+            "on (catalog)"
+        } else {
+            "off (passthrough)"
+        },
+        ui,
+        esc(state.upstream_base()),
+        esc(&pinned.join(", ")),
+    );
+    (
+        StatusCode::OK,
+        [("content-type", "text/html; charset=utf-8")],
+        page,
+    )
+        .into_response()
+}
+
+/// Debug UI (Iter 17): read-only operator page. Snapshot version
+/// and counts, virtual menu, per-model offerings with the ranking's
+/// default-orientation provider order, free offers, and the raw
+/// metrics text. Rendered on demand from short read locks; nothing
+/// here runs on the request path.
+async fn ui_page(State(state): State<AppState>) -> Response {
+    fn esc(text: &str) -> String {
+        text.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;")
+    }
+    fn money(value: Option<f64>) -> String {
+        value
+            .map(|v| format!("{v:.7}"))
+            .unwrap_or_else(|| "-".to_string())
+    }
+    fn text(value: &Option<String>) -> String {
+        value.as_deref().map(esc).unwrap_or_else(|| "-".to_string())
+    }
+    let mut page = String::from(
+        "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\">\
+        <title>PennyRouter gateway</title>\
+        <style>body{font-family:system-ui,sans-serif;margin:2em;max-width:72em}\
+        table{border-collapse:collapse;margin:1em 0}\
+        th,td{border:1px solid #999;padding:.3em .6em;text-align:left;font-size:.9em}\
+        th{background:#eee}pre{background:#f4f4f4;padding:1em;overflow:auto}</style>\
+        </head><body><h1>PennyRouter gateway</h1>",
+    );
+    match state.router_handle() {
+        None => page.push_str("<p>Routing: <strong>off</strong> (no catalog).</p>"),
+        Some(router) => {
+            let summary = router.ui_summary();
+            let models = summary.models.len();
+            let offerings: usize = summary.models.iter().map(|(_, o)| o.len()).sum();
+            page.push_str(&format!(
+                "<p>Snapshot: <strong>{}</strong> — {models} models, {offerings} offerings.</p>",
+                summary
+                    .artifact_version
+                    .as_deref()
+                    .map(esc)
+                    .unwrap_or_else(|| "unversioned".to_string()),
+            ));
+            page.push_str("<h2>Virtual menu</h2><ul>");
+            for id in routing::VIRTUAL_MODELS {
+                page.push_str(&format!("<li>{}</li>", esc(id)));
+            }
+            page.push_str("</ul><h2>Models</h2>");
+            for (model_id, entries) in &summary.models {
+                page.push_str(&format!("<h3>{}</h3>", esc(model_id)));
+                page.push_str(
+                    "<table><tr><th>provider</th><th>tag</th>\
+                    <th>prompt $/tok</th><th>completion $/tok</th><th>class</th>\
+                    <th>tier</th><th>score</th></tr>",
+                );
+                for entry in entries {
+                    page.push_str(&format!(
+                        "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td>\
+                        <td>{}</td><td>{}</td><td>{}</td></tr>",
+                        esc(&entry.provider),
+                        text(&entry.tag),
+                        money(entry.price_prompt),
+                        money(entry.price_completion),
+                        text(&entry.precision_class),
+                        text(&entry.quality_tier),
+                        entry
+                            .quality_score
+                            .map(|s| format!("{s:.3}"))
+                            .unwrap_or_else(|| "-".to_string()),
+                    ));
+                }
+                page.push_str("</table>");
+                if let Some((_, classes)) = summary.ranking.iter().find(|(id, _)| id == model_id) {
+                    page.push_str("<p>Ranking order (default): ");
+                    let orders: Vec<String> = classes
+                        .iter()
+                        .map(|rank| {
+                            format!(
+                                "{}: {}",
+                                rank.class.as_deref().unwrap_or("any"),
+                                rank.order
+                                    .iter()
+                                    .map(|name| esc(name))
+                                    .collect::<Vec<_>>()
+                                    .join(" &gt; ")
+                            )
+                        })
+                        .collect();
+                    page.push_str(&orders.join("<br>"));
+                    page.push_str("</p>");
+                }
+            }
+            if !summary.free_offers.is_empty() {
+                page.push_str("<h2>Free offers</h2><table>\
+                    <tr><th>model</th><th>provider</th><th>tag</th><th>valid until (unix)</th></tr>");
+                for (model_id, provider, tag, until) in &summary.free_offers {
+                    page.push_str(&format!(
+                        "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+                        esc(model_id),
+                        esc(provider),
+                        tag.as_deref().map(esc).unwrap_or_else(|| "-".to_string()),
+                        until
+                            .map(|u| u.to_string())
+                            .unwrap_or_else(|| "permanent".to_string()),
+                    ));
+                }
+                page.push_str("</table>");
+            }
+        }
+    }
+    page.push_str("<h2>Metrics</h2><pre>");
+    page.push_str(&esc(&state.metrics.render()));
+    page.push_str("</pre></body></html>");
+    (
+        StatusCode::OK,
+        [("content-type", "text/html; charset=utf-8")],
+        page,
+    )
+        .into_response()
 }
 
 /// Curated virtual-model menu (Iter 13): exactly the six ids, OpenAI
@@ -424,6 +678,15 @@ async fn routed_completion(
         Err(response) => return *response,
     };
 
+    // Provider-pinned direct routes (Iter 16): `modal/<model>` and
+    // `baseten/<model>` bypass the catalog and address that
+    // provider's upstream, with or without a router. Pure BYOK: the
+    // caller's Authorization header is forwarded unchanged.
+    if let Some(model) = raw_model(&buffered) {
+        if let Some((provider, _)) = routing::split_pinned(&model) {
+            return forward_pinned(&state, permit, &headers, uri, buffered, &model, provider).await;
+        }
+    }
     // Virtual requests keep a copy for one retry (Iter 13): the permit
     // is per-attempt, the body is reusable.
     let retry_body = is_virtual_request(&buffered).then(|| buffered.clone());
@@ -448,8 +711,10 @@ async fn routed_completion(
         .path_and_query()
         .map(|path_and_query| path_and_query.as_str().to_string())
         .unwrap_or_else(|| "/v1/chat/completions".to_string());
+    let default_base = state.upstream_base_url.clone();
     let mut response = forward_upstream(
         &state,
+        &default_base,
         permit,
         &Method::POST,
         &path,
@@ -485,9 +750,19 @@ async fn routed_completion(
                         return service_unavailable();
                     }
                 };
-                response =
-                    forward_upstream(&state, permit, &Method::POST, &path, &headers, rewritten)
-                        .await;
+                // Retries only happen for virtual requests, which
+                // resolve inside the OpenRouter catalog: default base.
+                let retry_base = state.upstream_base_url.clone();
+                response = forward_upstream(
+                    &state,
+                    &retry_base,
+                    permit,
+                    &Method::POST,
+                    &path,
+                    &headers,
+                    rewritten,
+                )
+                .await;
                 if let Ok(provider) = retry_decision.provider.parse() {
                     response
                         .headers_mut()
@@ -559,8 +834,10 @@ async fn fallback_proxy(State(state): State<AppState>, request: Request) -> Resp
         Ok(buffered) => buffered,
         Err(response) => return *response,
     };
+    let fallback_base = state.upstream_base_url.clone();
     forward_upstream(
         &state,
+        &fallback_base,
         permit,
         &parts.method,
         &path,
@@ -723,15 +1000,86 @@ fn is_hop_by_hop(name: &axum::http::HeaderName, nominated: &[String]) -> bool {
 /// then map the response (streams chunk-by-chunk, buffered bodies
 /// byte-for-byte, errors wrapped OpenAI-style). The caller holds an
 /// admission permit for the whole call (Iter 11, F02).
+/// Raw `model` field of a buffered body, if it parses as JSON with a
+/// string model (Iter 16: pinned dispatch needs it before routing).
+fn raw_model(buffered: &[u8]) -> Option<String> {
+    serde_json::from_slice::<serde_json::Value>(buffered)
+        .ok()?
+        .get("model")?
+        .as_str()
+        .map(str::to_string)
+}
+
+/// Unconfigured pinned provider (Iter 16): explicit 400, never a
+/// leak to the default upstream (which would 404 opaquely) and never
+/// a guess at the provider's URL.
+fn provider_not_configured(provider: &str) -> Response {
+    error_response(
+        StatusCode::BAD_REQUEST,
+        "invalid_request_error",
+        "provider_not_configured",
+        format!(
+            "provider {provider:?} has no upstream configured (set {}_BASE_URL)",
+            provider.to_uppercase()
+        ),
+    )
+}
+
+/// Forward a provider-pinned request (Iter 16): stripped model,
+/// OpenRouter-specific fields dropped, caller's headers (including
+/// Authorization) unchanged, answered from that provider's upstream.
+#[allow(clippy::too_many_arguments)]
+async fn forward_pinned(
+    state: &AppState,
+    permit: UpstreamPermit,
+    headers: &HeaderMap,
+    uri: axum::http::Uri,
+    buffered: Vec<u8>,
+    model: &str,
+    provider: &str,
+) -> Response {
+    let Some(base) = state.pinned_upstream(provider) else {
+        return provider_not_configured(provider);
+    };
+    let base = base.to_string();
+    let path = uri
+        .path_and_query()
+        .map(|path_and_query| path_and_query.as_str().to_string())
+        .unwrap_or_else(|| "/v1/chat/completions".to_string());
+    let json: serde_json::Value = serde_json::from_slice(&buffered).unwrap_or_default();
+    let (forwarded_body, decision) = routing::route_pinned(model, json)
+        .map(|(body, decision)| (body, Some(decision)))
+        .unwrap_or((buffered, None));
+    let mut response = forward_upstream(
+        state,
+        &base,
+        permit,
+        &Method::POST,
+        &path,
+        headers,
+        forwarded_body,
+    )
+    .await;
+    if let Some(decision) = decision {
+        if let Ok(value) = decision.provider.parse() {
+            response
+                .headers_mut()
+                .insert(routing::PROVIDER_HEADER, value);
+        }
+    }
+    response
+}
+
 async fn forward_upstream(
     state: &AppState,
+    base_url: &str,
     _permit: UpstreamPermit,
     method: &Method,
     path: &str,
     headers: &HeaderMap,
     body: Vec<u8>,
 ) -> Response {
-    let url = format!("{}{}", state.upstream_base_url, path);
+    let url = format!("{base_url}{path}");
     let nominated: Vec<String> = headers
         .get(axum::http::header::CONNECTION)
         .and_then(|value| value.to_str().ok())

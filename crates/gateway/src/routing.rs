@@ -1086,6 +1086,148 @@ impl Router {
     }
 }
 
+/// Compact read-only projection for the debug UI (Iter 17): no
+/// payloads, no sessions, no throttle map — only what an operator
+/// needs to see current routing state.
+#[derive(Debug, Clone)]
+pub struct UiOffering {
+    pub provider: String,
+    pub tag: Option<String>,
+    pub price_prompt: Option<f64>,
+    pub price_completion: Option<f64>,
+    pub precision_class: Option<String>,
+    pub quality_tier: Option<String>,
+    pub quality_score: Option<f64>,
+}
+
+/// Default-orientation provider order for one (model, class).
+#[derive(Debug, Clone)]
+pub struct UiClassRanking {
+    pub class: Option<String>,
+    pub order: Vec<String>,
+}
+
+/// Default-orientation provider order per (model, class), plus free
+/// offers with expiry, as the ranking artifact records them.
+#[derive(Debug, Clone)]
+pub struct UiSummary {
+    pub artifact_version: Option<String>,
+    pub models: Vec<(String, Vec<UiOffering>)>,
+    pub ranking: Vec<(String, Vec<UiClassRanking>)>,
+    pub free_offers: Vec<(String, String, Option<String>, Option<u64>)>,
+}
+
+impl Router {
+    /// Read-only snapshot projection for `GET /ui` (Iter 17). Takes
+    /// the same short read locks as routing; never blocks writers
+    /// beyond a clone.
+    pub fn ui_summary(&self) -> UiSummary {
+        let snapshot = self.snapshot.read().unwrap_or_else(|e| e.into_inner());
+        let mut models: Vec<(String, Vec<UiOffering>)> = snapshot
+            .models
+            .iter()
+            .map(|(model_id, offerings)| {
+                let mut entries: Vec<UiOffering> = offerings
+                    .iter()
+                    .map(|o| UiOffering {
+                        provider: o.provider_name.clone(),
+                        tag: o.tag.clone(),
+                        price_prompt: o.price_prompt,
+                        price_completion: o.price_completion,
+                        precision_class: o.precision_class.clone(),
+                        quality_tier: o.quality_tier.clone(),
+                        quality_score: o.quality_score,
+                    })
+                    .collect();
+                entries.sort_by(|a, b| a.provider.cmp(&b.provider));
+                (model_id.clone(), entries)
+            })
+            .collect();
+        models.sort_by(|a, b| a.0.cmp(&b.0));
+        let artifact_version = snapshot.artifact_version.clone();
+        drop(snapshot);
+        let ranking = self.ranking.read().unwrap_or_else(|e| e.into_inner());
+        let mut rank_rows = Vec::new();
+        let mut free_rows = Vec::new();
+        if let Some(doc) = ranking.as_ref() {
+            for (model_id, classes) in &doc.models {
+                let mut class_rows = Vec::new();
+                for class in classes {
+                    let order: Vec<String> = class
+                        .default
+                        .iter()
+                        .map(|entry| match &entry.tag {
+                            Some(tag) => format!("{} ({tag})", entry.provider),
+                            None => entry.provider.clone(),
+                        })
+                        .collect();
+                    class_rows.push(UiClassRanking {
+                        class: class.class.clone(),
+                        order,
+                    });
+                }
+                rank_rows.push((model_id.clone(), class_rows));
+            }
+            for (model_id, offers) in &doc.free_offers {
+                for offer in offers {
+                    free_rows.push((
+                        model_id.clone(),
+                        offer.provider.clone(),
+                        offer.tag.clone(),
+                        offer.valid_until_unix,
+                    ));
+                }
+            }
+        }
+        UiSummary {
+            artifact_version,
+            models,
+            ranking: rank_rows,
+            free_offers: free_rows,
+        }
+    }
+}
+
+/// Providers with their own upstream, addressed by id prefix
+/// (Iter 16). Anything else routes via OpenRouter as before.
+pub const PINNED_PROVIDERS: &[&str] = &["modal", "baseten"];
+
+/// Split `modal/<model>` / `baseten/<model>` into (provider, model).
+/// Empty remainders and other prefixes are not pinned routes.
+pub fn split_pinned(model_field: &str) -> Option<(&str, &str)> {
+    let (provider, rest) = model_field.split_once('/')?;
+    if PINNED_PROVIDERS.contains(&provider) && !rest.is_empty() {
+        Some((provider, rest))
+    } else {
+        None
+    }
+}
+
+/// Rewrite a pinned body (Iter 16): the model becomes the stripped
+/// remainder and the OpenRouter-specific `provider` object (order
+/// pins, quantizations, zdr) is dropped — foreign upstreams speak
+/// plain OpenAI chat and must never see it. Pure BYOK: auth travels
+/// in the caller's headers, untouched here.
+pub fn route_pinned(model_field: &str, mut json: serde_json::Value) -> Option<(Vec<u8>, Decision)> {
+    let (provider, rest) = split_pinned(model_field)?;
+    json["model"] = serde_json::Value::String(rest.to_string());
+    if let Some(object) = json.as_object_mut() {
+        object.remove("provider");
+    }
+    let rewritten = serde_json::to_vec(&json).ok()?;
+    Some((
+        rewritten,
+        Decision {
+            model_id: rest.to_string(),
+            provider: provider.to_string(),
+            tag: None,
+            precision_class: None,
+            orientation: Orientation::Default,
+            sticky: false,
+        },
+    ))
+}
+
 /// Resolve an artifact path to (db file, version). Directories take
 /// the newest *verifying* manifest (invalid candidates are skipped for
 /// older valid ones); manifest files are verified; `.db` files open

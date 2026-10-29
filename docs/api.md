@@ -35,6 +35,9 @@ path lives only in logs).
 |---|---|
 | `POST /v1/chat/completions` | Custom handler: guard, provider routing, streaming |
 | `POST /v1/responses` | Same routed handler as chat (Iter 14): model rewrite, budget, floor, retry, rejections |
+| `modal/<model>`, `baseten/<model>` on either routed endpoint | Provider-pinned direct route (Iter 16): stripped model forwarded to that provider's upstream, OpenRouter fields dropped, caller auth unchanged |
+| `GET /` | Landing page: binary version + build hash, config status, links; always served locally (never proxied) |
+| `GET /ui` | Debug UI (Iter 17): read-only snapshot, ranking, metrics page; registered only with `GATEWAY_UI=1`, otherwise falls through to fallback |
 | `GET /v1/models` | Curated menu (Iter 13): exactly the six virtual ids, served locally |
 | `POST /v1/embeddings`, `POST /v1/completions`, `/v1/audio/*`, `/v1/images/*`, `/v1/moderations`, `/v1/files`, `/v1/batches`, `/v1/fine_tuning/*`, `/v1/vector_stores` | Proxied + logged |
 | OpenRouter extras `/api/v1/auth/key`, `/api/v1/credits`, `/api/v1/generation` | No `/v1` alias exists, so these don't compose through the gateway (`{base}{path}` would double `/api`); call OpenRouter directly (verified live: 200). A gateway call is still logged, then answers upstream 404. |
@@ -51,7 +54,11 @@ configuration exists for now.
 
 The `model` field carries the OpenRouter model plus optional suffix filters
 (see [routing.md](routing.md)). Unknown or absent filters fall back to the
-default route — never an error. From Iter 5, routed requests are
+default route — never an error. A `modal/` or `baseten/` prefix instead
+pins the request to that provider's upstream (see [routing.md](routing.md)):
+the prefix is stripped, the rest of the model id passes through verbatim,
+and the caller's `Authorization` header is forwarded unchanged — one
+caller token serves all upstreams (pure BYOK). From Iter 5, routed requests are
 forwarded with the stripped model id plus a forced `provider.order`,
 and responses carry the chosen provider in `x-pennyrouter-provider`.
 From Iter 7, `openrouter/free` routes to any free offering (rewritten

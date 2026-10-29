@@ -112,3 +112,11 @@ cheap judge model, classifier-based routing.
       (recorded vs live, sampling), cost caps, judgment audit trail;
       judges stay offline batch, never on the request path. Test:
       each cataloged judge reproduces fixtures; spend capped.
+- [x] **Iter 16 — Provider alternatives (modal, baseten).**
+      Provider-pinned direct routes with pure BYOK (caller token
+      forwarded unchanged); unset provider fails closed. Test:
+      per-upstream routing + auth forwarding + field stripping.
+- [x] **Iter 17 — Debug UIs, off by default.** Gateway `GET /ui`
+      (ranking + metrics) behind `GATEWAY_UI=1`; `catalog-ui`
+      browser (runs, catalog, ranking, log) behind `CATALOG_UI=1`.
+      Test: disabled falls through / refuses; pages serve.

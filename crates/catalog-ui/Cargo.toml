@@ -1,0 +1,15 @@
+[package]
+name = "pennyrouter-catalog-ui"
+version = "0.11.0"
+edition = "2021"
+
+[[bin]]
+name = "catalog-ui"
+path = "src/main.rs"
+
+[dependencies]
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
+serde_json = "1"
+# Read-only browser over the published artifacts; shares the DB format.
+pennyrouter-catalog = { path = "../catalog" }

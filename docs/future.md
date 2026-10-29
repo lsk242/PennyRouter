@@ -24,5 +24,8 @@ realtime scoring or offline index improvement.
 ## More backends and classifier routing
 
 Additional upstream targets beyond OpenRouter, and a real request
-classifier for content-aware routing and exact price prediction. Both wait
-until lookup-based routing and the price abstraction prove out.
+classifier for content-aware routing and exact price prediction. The
+classifier still waits until lookup-based routing and the price
+abstraction prove out; provider-pinned direct routes (`modal/…`,
+`baseten/…`, Iter 16) already cover the multi-upstream case that
+needs no catalog.

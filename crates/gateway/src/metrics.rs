@@ -23,6 +23,7 @@ pub enum Route {
     Health,
     Chat,
     Responses,
+    Ui,
     Metrics,
     Other,
 }
@@ -30,9 +31,11 @@ pub enum Route {
 impl Route {
     pub fn from_path(path: &str) -> Self {
         match path {
+            "/" => Self::Ui,
             "/health" => Self::Health,
             "/v1/chat/completions" => Self::Chat,
             "/v1/responses" => Self::Responses,
+            "/ui" => Self::Ui,
             "/metrics" => Self::Metrics,
             _ => Self::Other,
         }
@@ -43,6 +46,7 @@ impl Route {
             Self::Health => "health",
             Self::Chat => "chat",
             Self::Responses => "responses",
+            Self::Ui => "ui",
             Self::Metrics => "metrics",
             Self::Other => "other",
         }
@@ -53,8 +57,9 @@ impl Route {
             Self::Health => 0,
             Self::Chat => 1,
             Self::Responses => 2,
-            Self::Metrics => 3,
-            Self::Other => 4,
+            Self::Ui => 3,
+            Self::Metrics => 4,
+            Self::Other => 5,
         }
     }
 }
@@ -122,7 +127,7 @@ impl RouteMetrics {
 }
 
 pub struct Metrics {
-    routes: [RouteMetrics; 5],
+    routes: [RouteMetrics; 6],
     upstream_errors: [AtomicU64; 4],
     guard_rejections: AtomicU64,
     load_shed: AtomicU64,
@@ -137,6 +142,7 @@ impl Metrics {
     pub fn new() -> Self {
         Self {
             routes: [
+                RouteMetrics::new(),
                 RouteMetrics::new(),
                 RouteMetrics::new(),
                 RouteMetrics::new(),

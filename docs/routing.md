@@ -124,3 +124,15 @@ session.
   and counts under `route="responses"` in metrics/logs. Other
   fallback endpoints still proxy untouched (virtual ids only exist
   on the two routed endpoints).
+- Provider-pinned direct routes (Iter 16): `modal/<model>` and
+  `baseten/<model>` bypass the catalog entirely and forward to that
+  provider's upstream (`MODAL_BASE_URL` / `BASETEN_BASE_URL`; no
+  router or catalog needed). The prefix is stripped, the remainder
+  passes through verbatim, and the OpenRouter-specific `provider`
+  object is dropped — foreign upstreams speak plain OpenAI chat.
+  Auth is pure BYOK: every header, including `Authorization`,
+  forwards unchanged, so one caller token serves all upstreams.
+  An unset provider fails closed with `provider_not_configured`
+  (400) — never a leak to OpenRouter, never a guessed URL. Pinned
+  requests are exactly-once (no retry, no throttle steering) and
+  carry the provider in `x-pennyrouter-provider` like routed ones.

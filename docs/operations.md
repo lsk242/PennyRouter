@@ -75,6 +75,11 @@ Keep config minimal and env-based (`.env`, see [`.env.example`](../.env.example)
 `PORT` (container port), `HOST_PORT` (published port), `IMAGE` (dev:
 tag for the local build; prod: image to pull), `OPENROUTER_BASE_URL`
 (upstream for chat completions, default `https://openrouter.ai/api`),
+`MODAL_BASE_URL` (upstream for `modal/…` routes, unset by default),
+`BASETEN_BASE_URL` (upstream for `baseten/…` routes, default
+`https://inference.baseten.co/v1`), `GATEWAY_UI` (set to `1` to
+register the read-only `GET /ui` debug page on the gateway, unset
+means the route does not exist),
 `CATALOG_DB` (catalog artifact for routing: directory, manifest, or DB
 file — unset means plain passthrough). A directory also serves the
 newest verified ranking artifact when one exists (see
@@ -120,6 +125,31 @@ directory. Selection rules:
 - `--sample-rate`, `--max-calls`, `--max-spend-usd` override the
   file policy. Judges never run on the request path — this is all
   offline batch, before publish.
+
+## Debug UIs (Iter 17)
+
+Both UIs are read-only and completely off unless explicitly enabled
+with an env var — no routes, no background work, no request-path
+code runs when they are off.
+
+- Gateway: `GATEWAY_UI=1` registers `GET /ui` on the gateway port:
+  snapshot version and counts, the virtual menu, per-model
+  offerings with the ranking's default-orientation provider order,
+  free offers, and the metrics text. Rendered on demand from short
+  read locks; routing never waits on it and it never calls upstream.
+  Unset (the default) leaves `/ui` unregistered — the path falls
+  through to the fallback proxy like any unknown path. `GET /`
+  always serves a fixed landing page (version, build hash, config
+  status, links) instead of proxying upstream.
+- Catalog: `CATALOG_UI=1 catalog-ui --dir <artifact-dir>
+  [--port 8080] [--log-file <path>]` serves a browser over the
+  published artifacts: run history (manifests newest-first with
+  verify status), models, endpoints (with judge provenance),
+  ranking order, rebuild/audit meta, and the last 200 lines of the
+  log file when given. The binary refuses to start without the flag.
+  Nothing is cached or written, so it can run against the live
+  artifact dir safely. Bind is localhost-only; expose further only
+  behind your own firewall.
 
 ## Ranking
 

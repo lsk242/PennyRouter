@@ -667,6 +667,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "pennyrouter-catalog-ui"
+version = "0.11.0"
+dependencies = [
+ "axum",
+ "pennyrouter-catalog",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "pennyrouter-gateway"
 version = "0.11.0"
 dependencies = [

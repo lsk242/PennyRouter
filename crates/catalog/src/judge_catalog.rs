@@ -102,12 +102,9 @@ impl JudgePolicy {
     }
 
     fn in_scope(&self, endpoint: &EndpointRow) -> bool {
-        (self.only_models.is_empty() || self.only_models.iter().any(|m| *m == endpoint.model_id))
+        (self.only_models.is_empty() || self.only_models.contains(&endpoint.model_id))
             && (self.only_providers.is_empty()
-                || self
-                    .only_providers
-                    .iter()
-                    .any(|p| *p == endpoint.provider_name))
+                || self.only_providers.contains(&endpoint.provider_name))
     }
 }
 

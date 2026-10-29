@@ -283,6 +283,17 @@ impl Catalog {
         Ok(())
     }
 
+    /// Every sync_meta row, ordered by key (Iter 17: the catalog UI
+    /// shows the full rebuild/audit trail, including keys added by
+    /// later iterations).
+    pub fn all_meta(&self) -> Result<Vec<(String, String)>, Error> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT key, value FROM sync_meta ORDER BY key")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Error::from)
+    }
+
     pub fn get_meta(&self, key: &str) -> Result<Option<String>, Error> {
         self.conn
             .query_row(
