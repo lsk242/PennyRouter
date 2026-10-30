@@ -22,7 +22,7 @@ struct UiState {
 }
 
 fn usage() -> &'static str {
-    "usage: CATALOG_UI=1 catalog-ui --dir <artifact-dir> [--port <port>] [--log-file <path>]"
+    "usage: CATALOG_UI=1 catalog-ui --dir <artifact-dir> [--port <port> | PORT=<port>] [--log-file <path>]"
 }
 
 fn esc(text: &str) -> String {
@@ -349,7 +349,13 @@ fn run() -> Result<(), String> {
     }
     let argv: Vec<String> = std::env::args().collect();
     let mut dir: Option<PathBuf> = None;
-    let mut port: u16 = 8080;
+    let mut port: u16 = match std::env::var("PORT") {
+        Err(_) => 8080,
+        Ok(raw) if raw.is_empty() => 8080,
+        Ok(raw) => raw
+            .parse()
+            .map_err(|_| format!("PORT needs a numeric value, got {raw:?}"))?,
+    };
     let mut log_file: Option<PathBuf> = None;
     let mut it = argv.iter().skip(1);
     while let Some(arg) = it.next() {

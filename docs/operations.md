@@ -149,7 +149,11 @@ code runs when they are off.
   log file when given. The binary refuses to start without the flag.
   Nothing is cached or written, so it can run against the live
   artifact dir safely. Bind is localhost-only; expose further only
-  behind your own firewall.
+  behind your own firewall. In Docker the `catalog-ui` compose
+  service (profile `ui`, off by default) serves the shared volume:
+  `docker compose --profile ui up catalog-ui --build`, then open
+  http://localhost:8080 (host port from `CATALOG_UI_PORT`). The
+  container port comes from `PORT` (default 8080, `--port` wins).
 
 ## Ranking
 

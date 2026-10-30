@@ -34,6 +34,23 @@ services:
     environment:
       SYNC_INTERVAL: ${SYNC_INTERVAL:-3600}
     restart: unless-stopped
+  # Opt-in catalog browser (Iter 17): only starts with
+  #   docker compose --profile ui up catalog-ui
+  # then open http://localhost:${CATALOG_UI_PORT:-8080} in a browser.
+  catalog-ui:
+    profiles: ["ui"]
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.catalog
+    image: ${CATALOG_IMAGE:-pennyrouter-catalog:dev}
+    command: ["catalog-ui", "--dir", "/catalog"]
+    ports:
+      - "${CATALOG_UI_PORT:-8080}:8080"
+    volumes:
+      - catalog-data:/catalog:ro
+    environment:
+      CATALOG_UI: "1"
+      PORT: "8080"
 
 volumes:
   catalog-data:

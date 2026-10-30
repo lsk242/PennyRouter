@@ -21,6 +21,8 @@ COPY --from=builder /app/target/release/catalog-sync /usr/local/bin/catalog-sync
 COPY --from=builder /app/target/release/catalog-process /usr/local/bin/catalog-process
 COPY --from=builder /app/target/release/catalog-rank /usr/local/bin/catalog-rank
 COPY --from=builder /app/target/release/catalog-ui /usr/local/bin/catalog-ui
+# Port of the opt-in catalog-ui browser (compose maps it explicitly).
+EXPOSE 8080
 RUN chmod +x /usr/local/bin/catalog-entrypoint \
  && mkdir -p /catalog /input && chown app:app /catalog
 USER app

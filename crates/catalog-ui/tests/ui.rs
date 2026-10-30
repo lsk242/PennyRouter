@@ -165,6 +165,31 @@ impl Drop for Server {
 }
 
 #[test]
+fn port_env_selects_listen_port() {
+    let out = artifact_dir("port-env");
+    let mut child = Command::new(bin())
+        .arg("--dir")
+        .arg(&out)
+        .env("CATALOG_UI", "1")
+        .env("PORT", "0")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let mut lines = BufReader::new(stdout).lines();
+    let first = lines.next().expect("address line").expect("readable");
+    let addr = first
+        .strip_prefix("catalog-ui on http://")
+        .expect("address format")
+        .to_string();
+    let server = Server { child, addr };
+    let index = get(&server, "/");
+    assert!(index.contains("200 OK"), "got: {index}");
+    assert!(index.contains("catalog-"));
+}
+
+#[test]
 fn serves_runs_models_ranking_meta_and_log() {
     let out = artifact_dir("serve");
     let log = out.join("pipe.log");
