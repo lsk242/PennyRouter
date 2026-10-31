@@ -17,3 +17,4 @@ All product documentation lives here, Markdown only.
 - [catalog-sync-architecture.md](catalog-sync-architecture.md) — sync process design, schema, DB contract.
 - [catalog-sync-roadmap.md](catalog-sync-roadmap.md) — phased sync plan.
 - [catalog-sync-todo.md](catalog-sync-todo.md) — sync iteration checklist.
+- [review/PennyRouter-full-review-2026-10-31.md](review/PennyRouter-full-review-2026-10-31.md) — full review (Iter 18): bugs, improvements, missing features.
