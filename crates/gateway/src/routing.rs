@@ -10,8 +10,9 @@
 //! Selection rules (see `docs/routing.md`):
 //! - Split the `model` field by longest-prefix match against known model
 //!   ids; the rest are tags. Unknown models pass through untouched.
-//! - Orientation tags pick price (`price`, `low_cost`, `cost`, `cheap`)
-//!   or quality (`quality`, `best`); the first recognized orientation
+//! - Orientation tags pick price (`price`, `low_cost`, `cost`, `cheap`),
+//!   quality (`quality`, `best`), or cross-model cheapest-paid
+//!   (`lowest`, no quality floor); the first recognized orientation
 //!   wins and every other tag is ignored.
 //! - The default compares within the model's most common precision class
 //!   (ties keep load order) and prefers the best quality tier, then the
@@ -62,12 +63,16 @@ pub struct Snapshot {
     pub artifact_version: Option<String>,
 }
 
-/// Routing orientation: explicit price/quality tags, or the default.
+/// Routing orientation: explicit price/quality/lowest tags, or the
+/// default.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Orientation {
     Default,
     Price,
     Quality,
+    /// `lowest` tag (Iter 19): cheapest paid offering across models,
+    /// no quality floor — the fallback when free turns run out.
+    Lowest,
 }
 
 /// A routing decision: the stripped model id plus the chosen offering.
@@ -598,11 +603,19 @@ impl Router {
             return self.decide_free(&snapshot, &tags, authorization, constraints, FREE_MODEL);
         }
         let (model_id, tags) = split_model(&snapshot, model_field)?;
+        let orientation = orientation_from(&tags);
+        // `lowest` rewrites the model cross-model; like virtual ids it
+        // degrades to passthrough only on the direct decide() path —
+        // route_inner fails closed instead.
+        if orientation == Orientation::Lowest {
+            return self
+                .decide_lowest(&snapshot, authorization, constraints, model_field)
+                .ok();
+        }
         let offerings = snapshot.models.get(&model_id)?;
         if offerings.is_empty() {
             return None;
         }
-        let orientation = orientation_from(&tags);
         let key = authorization.map(|auth| self.session_key(auth, &model_id));
         let ranking = self.ranking.read().unwrap_or_else(|e| e.into_inner());
 
@@ -845,6 +858,96 @@ impl Router {
         })
     }
 
+    /// Cross-model pick for the `lowest` tag (Iter 19): cheapest
+    /// paid priceable offering with a known precision class, no
+    /// quality floor — the fallback when free turns run out. Same
+    /// filters, budget, throttle, stickiness, and deterministic
+    /// tie-breaks as the `low` tier, minus the judged-tier floor.
+    /// Exactly-once: tags never retry, only virtual ids do.
+    fn decide_lowest(
+        &self,
+        snapshot: &Snapshot,
+        authorization: Option<&str>,
+        constraints: &ProviderConstraints,
+        session_ns: &str,
+    ) -> Result<Decision, RouteRejection> {
+        let base: Vec<&Offering> = snapshot
+            .models
+            .values()
+            .flatten()
+            .filter(|o| {
+                constraints.allows(&o.provider_name)
+                    // Paid only: zero-cost serves the free paths.
+                    && inline_cost(o).is_some_and(|cost| cost > 0.0)
+                    && is_known_precision_class(o.precision_class.as_deref().unwrap_or("unknown"))
+            })
+            .collect();
+        if base.is_empty() {
+            return Err(RouteRejection {
+                code: "no_eligible_offering",
+                message: "no paid offering is currently eligible".to_string(),
+            });
+        }
+        let budgeted: Vec<&Offering> = base
+            .into_iter()
+            .filter(|o| constraints.budget_allows(o))
+            .collect();
+        if budgeted.is_empty() {
+            return Err(RouteRejection {
+                code: "budget_exceeded",
+                message: "no paid offering fits the price ceiling".to_string(),
+            });
+        }
+        let candidates = self.skip_throttled(budgeted);
+        let key = authorization.map(|auth| self.session_key(auth, session_ns));
+        if let Some(key) = &key {
+            if let Some(pin) = self.lookup_pin(key) {
+                if let Some(pick) = candidates.iter().find(|o| {
+                    o.provider_name == pin.provider && o.precision_class == pin.precision_class
+                }) {
+                    return Ok(Decision {
+                        model_id: pick.model_id.clone(),
+                        provider: pick.provider_name.clone(),
+                        tag: pick.tag.clone(),
+                        precision_class: pick.precision_class.clone(),
+                        orientation: Orientation::Lowest,
+                        sticky: true,
+                    });
+                }
+            }
+        }
+        let pick = candidates
+            .into_iter()
+            .min_by(|a, b| {
+                inline_cost(a)
+                    .partial_cmp(&inline_cost(b))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.model_id.cmp(&b.model_id))
+                    .then_with(|| a.provider_name.cmp(&b.provider_name))
+            })
+            .ok_or_else(|| RouteRejection {
+                code: "no_eligible_offering",
+                message: "no paid offering is currently eligible".to_string(),
+            })?;
+        if let Some(key) = key {
+            self.store_pin(
+                key,
+                Pin {
+                    provider: pick.provider_name.clone(),
+                    precision_class: pick.precision_class.clone(),
+                },
+            );
+        }
+        Ok(Decision {
+            model_id: pick.model_id.clone(),
+            provider: pick.provider_name.clone(),
+            tag: pick.tag.clone(),
+            precision_class: pick.precision_class.clone(),
+            orientation: Orientation::Lowest,
+            sticky: false,
+        })
+    }
+
     /// Quality-tier rank for floors (Iter 14): mirrors the catalog
     /// ordering (high 3, standard 2, low 1, unknown 0).
     fn quality_rank(tier: Option<&str>) -> u8 {
@@ -1034,6 +1137,19 @@ impl Router {
             let decision =
                 self.decide_virtual(&snapshot, &virtual_model, &model_field, auth, &constraints)?;
             return Ok(Self::finish_route(&model_field, json, decision));
+        }
+        // The `lowest` tag (Iter 19) also rewrites the model id, so it
+        // fails closed here for the same reason. First recognized
+        // orientation wins, shared with `decide_constrained`.
+        {
+            let snapshot = self.snapshot.read().unwrap_or_else(|e| e.into_inner());
+            if let Some((_, tags)) = split_model(&snapshot, &model_field) {
+                if orientation_from(&tags) == Orientation::Lowest {
+                    let decision =
+                        self.decide_lowest(&snapshot, auth, &constraints, &model_field)?;
+                    return Ok(Self::finish_route(&model_field, json, decision));
+                }
+            }
         }
         let decision = match self.decide_constrained(&model_field, auth, &constraints) {
             Some(decision) => decision,
@@ -1404,6 +1520,7 @@ fn orientation_from(tags: &[String]) -> Orientation {
         match tag.as_str() {
             "price" | "low_cost" | "cost" | "cheap" => return Orientation::Price,
             "quality" | "best" => return Orientation::Quality,
+            "lowest" => return Orientation::Lowest,
             _ => {}
         }
     }
@@ -1436,6 +1553,9 @@ fn rank_orientation(orientation: Orientation) -> RankOrientation {
         Orientation::Default => RankOrientation::Default,
         Orientation::Price => RankOrientation::Price,
         Orientation::Quality => RankOrientation::Quality,
+        // Lowest routes cross-model and never reaches the ranked
+        // path; price order is the sane fallback if it ever does.
+        Orientation::Lowest => RankOrientation::Price,
     }
 }
 
@@ -1458,6 +1578,7 @@ fn ordered<'o>(
             Orientation::Default => &class_ranking.default,
             Orientation::Price => &class_ranking.price,
             Orientation::Quality => &class_ranking.quality,
+            Orientation::Lowest => &class_ranking.price,
         })
     {
         let mut order: Vec<&Offering> = Vec::with_capacity(candidates.len());
@@ -2139,6 +2260,171 @@ mod tests {
         r.note_throttled("m/mid", "Mid");
         let low = r.decide("openrouter/pair/low", None).unwrap();
         assert_eq!(low.provider, "Cheap");
+    }
+
+    /// Dedicated snapshot for `lowest` tests: the cheapest paid
+    /// offering is unjudged, so the `low` tier (floor) and `lowest`
+    /// (no floor) diverge on the same data.
+    fn lowest_router() -> Router {
+        let unpriceable = Offering {
+            model_id: "m/d".to_string(),
+            ..offering("D", None, None)
+        };
+        Router {
+            source: PathBuf::from("test"),
+            snapshot: RwLock::new(Snapshot {
+                models: HashMap::from([
+                    (
+                        "m/a".to_string(),
+                        vec![priced("m/a", "A", 2.0, Some("low"))],
+                    ),
+                    ("m/b".to_string(), vec![priced("m/b", "B", 0.5, None)]),
+                    (
+                        "m/c".to_string(),
+                        vec![priced("m/c", "C", 0.0, Some("standard"))],
+                    ),
+                    ("m/d".to_string(), vec![unpriceable]),
+                ]),
+                artifact_version: None,
+            }),
+            ranking: RwLock::new(None),
+            sessions: RwLock::new(HashMap::new()),
+            seed: 0,
+            throttled: RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Iter 19: `lowest` picks the cheapest paid offering across
+    /// models with no quality floor (unlike `low`), skipping free
+    /// and unpriceable offerings.
+    #[test]
+    fn lowest_picks_cheapest_paid_without_floor() {
+        let r = lowest_router();
+        let d = r.decide("m/a/lowest", None).unwrap();
+        assert_eq!(d.orientation, Orientation::Lowest);
+        assert_eq!(d.provider, "B");
+        assert_eq!(d.model_id, "m/b");
+        assert!(!d.sticky);
+        // Same data, `low` keeps its judged floor and picks A instead.
+        let low = r.decide("openrouter/pair/low", None).unwrap();
+        assert_eq!(low.provider, "A");
+        assert_eq!(low.model_id, "m/a");
+    }
+
+    /// Iter 19: first recognized orientation wins; a `price` tag
+    /// before `lowest` stays same-model.
+    #[test]
+    fn lowest_obeys_first_orientation_wins() {
+        let r = lowest_router();
+        let d = r.decide("m/a/price/lowest", None).unwrap();
+        assert_eq!(d.orientation, Orientation::Price);
+        assert_eq!(d.provider, "A");
+        assert_eq!(d.model_id, "m/a");
+        let d = r.decide("m/a/lowest/price", None).unwrap();
+        assert_eq!(d.orientation, Orientation::Lowest);
+        assert_eq!(d.provider, "B");
+    }
+
+    /// Iter 19: unknown base models pass through untouched — the tag
+    /// cannot conjure a route from nothing.
+    #[test]
+    fn lowest_unknown_model_passes_through() {
+        let r = lowest_router();
+        assert!(r.decide("nope/unknown/lowest", None).is_none());
+        let body = routed_body("nope/unknown/lowest", serde_json::json!({}));
+        let out = r
+            .route_request_or_reject(&axum::http::HeaderMap::new(), &body)
+            .unwrap();
+        assert!(out.is_none());
+    }
+
+    /// Iter 19: no paid offering fails closed on the request path
+    /// (the direct decide() path degrades to passthrough, like
+    /// virtual ids).
+    #[test]
+    fn lowest_fails_closed_when_nothing_paid() {
+        let r = Router {
+            source: PathBuf::from("test"),
+            snapshot: RwLock::new(Snapshot {
+                models: HashMap::from([(
+                    "m/c".to_string(),
+                    vec![priced("m/c", "C", 0.0, Some("standard"))],
+                )]),
+                artifact_version: None,
+            }),
+            ranking: RwLock::new(None),
+            sessions: RwLock::new(HashMap::new()),
+            seed: 0,
+            throttled: RwLock::new(HashMap::new()),
+        };
+        assert!(r.decide("m/c/lowest", None).is_none());
+        let body = routed_body("m/c/lowest", serde_json::json!({}));
+        let err = r
+            .route_request_or_reject(&axum::http::HeaderMap::new(), &body)
+            .unwrap_err();
+        assert_eq!(err.code, "no_eligible_offering");
+    }
+
+    /// Iter 19: a price ceiling below the cheapest paid offering
+    /// fails closed with budget_exceeded.
+    #[test]
+    fn lowest_budget_cap_fails_closed() {
+        let r = lowest_router();
+        let body = routed_body(
+            "m/a/lowest",
+            serde_json::json!({"max_price": {"prompt": 0.1, "completion": 0.1}}),
+        );
+        let err = r
+            .route_request_or_reject(&axum::http::HeaderMap::new(), &body)
+            .unwrap_err();
+        assert_eq!(err.code, "budget_exceeded");
+    }
+
+    /// Iter 19: ties break deterministically by model id, then
+    /// provider.
+    #[test]
+    fn lowest_tie_break_is_deterministic() {
+        let r = Router {
+            source: PathBuf::from("test"),
+            snapshot: RwLock::new(Snapshot {
+                models: HashMap::from([
+                    ("m/x".to_string(), vec![priced("m/x", "P2", 1.0, None)]),
+                    (
+                        "m/a".to_string(),
+                        vec![
+                            priced("m/a", "P2", 1.0, None),
+                            priced("m/a", "P1", 1.0, None),
+                        ],
+                    ),
+                ]),
+                artifact_version: None,
+            }),
+            ranking: RwLock::new(None),
+            sessions: RwLock::new(HashMap::new()),
+            seed: 0,
+            throttled: RwLock::new(HashMap::new()),
+        };
+        let d = r.decide("m/x/lowest", None).unwrap();
+        assert_eq!(d.model_id, "m/a");
+        assert_eq!(d.provider, "P1");
+    }
+
+    /// Iter 19: the rewritten body carries the picked backend model
+    /// id with the provider forced.
+    #[test]
+    fn lowest_rewrites_model_on_the_wire() {
+        let r = lowest_router();
+        let body = routed_body("m/a/lowest", serde_json::json!({}));
+        let (rewritten, decision) = r
+            .route_request(&axum::http::HeaderMap::new(), &body)
+            .unwrap();
+        assert_eq!(decision.model_id, "m/b");
+        let out: serde_json::Value = serde_json::from_slice(&rewritten).unwrap();
+        assert_eq!(out.get("model").unwrap(), "m/b");
+        assert_eq!(
+            out["provider"].get("order").unwrap(),
+            &serde_json::json!(["B"])
+        );
     }
 
     #[test]

@@ -126,3 +126,8 @@ cheap judge model, classifier-based routing.
       boundary; `FETCH_OPENROUTER=1` flips the container off fixtures.
       Test: stub-server fetch tests; live one-shot synced 456 models /
       1483 endpoints with 18 zero-price offerings.
+- [ ] **Iter 19 — `lowest` tag.** Cross-model cheapest-paid pick with
+      no quality floor (fallback when free turns run out); fail-closed
+      rejections, exactly-once. Test: 7 routing unit tests (pick,
+      first-wins, passthrough, fail-closed, budget, tie-break, wire
+      rewrite).

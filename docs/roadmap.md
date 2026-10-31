@@ -421,7 +421,23 @@ Development delivers Docker images, platform delivers deployments.
   `cargo test -p pennyrouter-catalog`, clippy, fmt clean; workspace
   check clean.
 
-## After Iter 18
+## Iter 19 — `lowest` tag (in progress)
+
+- Goal: a model suffix filter for the cheapest paid offering
+  catalog-wide, with no quality floor — the fallback agents use
+  when free turns run out.
+- Value: one tag covers the "just make it cheap" case without
+  curating per-model suffixes; stricter callers keep `low`.
+- Shipped: `lowest` orientation (`Orientation::Lowest`) sharing the
+  `low` tier's paid-only filter, budget, throttle skip, stickiness
+  (full tagged-id namespace), and deterministic tie-breaks
+  (cost, model id, provider), minus the judged-tier floor.
+  Fail-closed (`no_eligible_offering` 503, `budget_exceeded` 400)
+  on the request path; exactly-once (no tag retry); unknown base
+  models pass through; first orientation wins. Proven by 7 routing
+  unit tests. `cargo test`, clippy, fmt clean.
+
+## After Iter 19
 
 Deferred ideas in [future.md](future.md): classifier routing,
 parallel fan-out, more judge models. Each becomes roadmap items only
