@@ -78,7 +78,8 @@ tag for the local build; prod: image to pull), `OPENROUTER_BASE_URL`
 (upstream for chat completions, default `https://openrouter.ai/api`),
 `MODAL_BASE_URL` (upstream for `modal/…` routes, unset by default),
 `BASETEN_BASE_URL` (upstream for `baseten/…` routes, default
-`https://inference.baseten.co/v1`), `GATEWAY_UI` (set to `1` to
+`https://inference.baseten.co`, no `/v1` prefix — the gateway appends
+the request path itself and strips a trailing `/v1`), `GATEWAY_UI` (set to `1` to
 register the read-only `GET /ui` debug page on the gateway, unset
 means the route does not exist),
 `CATALOG_DB` (catalog artifact for routing: directory, manifest, or DB

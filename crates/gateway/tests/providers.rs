@@ -193,6 +193,71 @@ async fn unconfigured_provider_fails_closed() {
     assert_eq!(default.lock().unwrap().hits, 0);
 }
 
+#[test]
+fn with_upstream_strips_a_trailing_v1() {
+    // The gateway appends the full incoming `/v1/…` path itself, so a
+    // base that already ends in `/v1` (the documented Baseten form)
+    // must be normalized at registration, not doubled per request.
+    let state = pennyrouter_gateway::AppState::new("http://127.0.0.1:9")
+        .with_upstream("baseten", "https://inference.baseten.co/v1");
+    assert_eq!(
+        state.pinned_upstream("baseten"),
+        Some("https://inference.baseten.co")
+    );
+    let state = pennyrouter_gateway::AppState::new("http://127.0.0.1:9")
+        .with_upstream("baseten", "https://inference.baseten.co/v1/");
+    assert_eq!(
+        state.pinned_upstream("baseten"),
+        Some("https://inference.baseten.co")
+    );
+    // Other bases pass through untouched (trailing slash aside).
+    let state = pennyrouter_gateway::AppState::new("http://127.0.0.1:9")
+        .with_upstream("modal", "https://example.modal.direct/");
+    assert_eq!(
+        state.pinned_upstream("modal"),
+        Some("https://example.modal.direct")
+    );
+    let state = pennyrouter_gateway::AppState::new("http://127.0.0.1:9")
+        .with_upstream("modal", "https://example.modal.direct/v10");
+    assert_eq!(
+        state.pinned_upstream("modal"),
+        Some("https://example.modal.direct/v10")
+    );
+}
+
+#[tokio::test]
+async fn v1_suffixed_pinned_base_does_not_double_the_path() {
+    // End-to-end form of the above: with a `/v1`-suffixed base the
+    // mock must see the single-prefix path (it has no `/v1/v1/…`
+    // route, so a doubled path would 404, as Baseten did live).
+    let baseten = Arc::new(Mutex::new(Seen::default()));
+    let unused = Arc::new(Mutex::new(Seen::default()));
+    let a = spawn_mock(unused.clone()).await;
+    let c = spawn_mock(baseten.clone()).await;
+    let state = pennyrouter_gateway::AppState::new(format!("http://{a}"))
+        .with_upstream("baseten", &format!("http://{c}/v1"));
+    let app = pennyrouter_gateway::app_with_state(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let gw = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let res = post_model(
+        gw,
+        "/v1/chat/completions",
+        r#"{"model":"baseten/other-model","messages":[]}"#,
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(
+        res.headers().get("x-pennyrouter-provider").unwrap(),
+        "baseten"
+    );
+    let baseten = baseten.lock().unwrap();
+    assert_eq!(baseten.hits, 1);
+    assert_eq!(baseten.models, vec!["other-model".to_string()]);
+    assert_eq!(unused.lock().unwrap().hits, 0);
+}
+
 #[tokio::test]
 async fn empty_remainder_is_not_a_pinned_route() {
     let default = Arc::new(Mutex::new(Seen::default()));
