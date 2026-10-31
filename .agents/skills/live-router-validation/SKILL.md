@@ -42,6 +42,10 @@ set -a; . tests/live/.env; set +a   # deploy values flow into the remote .env
 COMPOSE_FILE=compose.dev.yaml ./scripts/deploy.sh
 ```
 
+`tests/live/.env` carries `FETCH_OPENROUTER` (0 = fixture catalog,
+1 = live OpenRouter fetch, Iter 18): set it to 1 before deploying
+for a live test so the gateway routes over real data.
+
 Preview with `DRY_RUN=1`. The script pulls, restarts, and health-checks.
 For variable meanings see the header of `scripts/deploy.sh`.
 

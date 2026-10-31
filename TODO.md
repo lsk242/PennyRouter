@@ -120,3 +120,9 @@ cheap judge model, classifier-based routing.
       (ranking + metrics) behind `GATEWAY_UI=1`; `catalog-ui`
       browser (runs, catalog, ranking, log) behind `CATALOG_UI=1`.
       Test: disabled falls through / refuses; pages serve.
+- [x] **Iter 18 — Live OpenRouter fetch.** `catalog-sync
+      --fetch-openrouter` pulls the public `GET /models` list plus one
+      per-model endpoints body (no auth, no keys) into the same fixture
+      boundary; `FETCH_OPENROUTER=1` flips the container off fixtures.
+      Test: stub-server fetch tests; live one-shot synced 456 models /
+      1483 endpoints with 18 zero-price offerings.

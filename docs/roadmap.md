@@ -402,7 +402,26 @@ Development delivers Docker images, platform delivers deployments.
   against a published fixture dir).
   `cargo test --workspace`, clippy, fmt clean.
 
-## After Iter 17
+## Iter 18 — Live OpenRouter fetch (done)
+
+- Goal: the catalog reflects the real provider landscape instead of
+  three fixture models — gather from OpenRouter's public endpoints.
+- Value: routing (including the free tier) decides over live data;
+  fixture input stays the offline default for tests and local work.
+- Shipped: `catalog-sync --fetch-openrouter` pulls `GET /v1/models`
+  plus one `GET /v1/models/{id}/endpoints` per model (public, no
+  auth; base from `OPENROUTER_BASE_URL`), feeding the unchanged
+  `run_fixture_sync` boundary; a failed models fetch aborts with no
+  publish (last good artifact keeps serving), failed per-model
+  endpoints skip with a count. `FETCH_OPENROUTER=1` flips the sync
+  container and compose services off fixtures (default 0). Proven by
+  `crates/catalog/tests/fetch.rs` (2 tests: full pull, skip on 404,
+  raw ids in paths) plus a live one-shot: 456 models, 1483
+  endpoints, 18 zero-price offerings, processed and published.
+  `cargo test -p pennyrouter-catalog`, clippy, fmt clean; workspace
+  check clean.
+
+## After Iter 18
 
 Deferred ideas in [future.md](future.md): classifier routing,
 parallel fan-out, more judge models. Each becomes roadmap items only

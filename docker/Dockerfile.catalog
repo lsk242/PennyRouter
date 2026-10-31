@@ -14,7 +14,8 @@ FROM debian:bookworm-slim
 RUN useradd -m app
 # Bake the fixture tree in as default /input so the image runs standalone
 # (server deploys have no checkout to mount); a volume mount still
-# overrides it for local fixture iteration. Goes away with live fetching.
+# overrides it for local fixture iteration. FETCH_OPENROUTER=1 pulls
+# live instead (Iter 18).
 COPY crates/catalog/tests/fixtures /input
 COPY docker/catalog-entrypoint.sh /usr/local/bin/catalog-entrypoint
 COPY --from=builder /app/target/release/catalog-sync /usr/local/bin/catalog-sync

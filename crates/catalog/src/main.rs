@@ -1,27 +1,30 @@
 //! catalog-sync: gather provider/model data into a versioned catalog DB.
 //!
-//! Phase 1 is fixture-driven: `--models` points at a `GET /models`
+//! Fixture-driven by default: `--models` points at a `GET /models`
 //! response body and `--endpoints-dir` holds one `GET
 //! /models/{id}/endpoints` body per model, named `<id with '/' as
-//! '__'>.json`. Live fetching plugs in later.
+//! '__'>.json`. With `--fetch-openrouter` the same bytes are pulled
+//! live from OpenRouter's public endpoints (no auth, no keys) instead.
 //!
 //! `--process` fills the indexed columns on the work DB before publish,
 //! so the artifact ships with processing applied.
 
 use pennyrouter_catalog::{
-    load_endpoints_dir, now_rfc3339, publish, run_fixture_sync, run_processing, Catalog,
+    fetch_openrouter, load_endpoints_dir, now_rfc3339, publish, run_fixture_sync, run_processing,
+    Catalog,
 };
 use std::fs;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 fn usage() -> &'static str {
-    "usage: catalog-sync --models <models.json> --endpoints-dir <dir> --out <dir> [--process]"
+    "usage: catalog-sync (--models <models.json> --endpoints-dir <dir> | --fetch-openrouter) --out <dir> [--process]"
 }
 
 struct Args {
-    models: PathBuf,
-    endpoints_dir: PathBuf,
+    models: Option<PathBuf>,
+    endpoints_dir: Option<PathBuf>,
+    fetch_openrouter: bool,
     out: PathBuf,
     process: bool,
 }
@@ -29,6 +32,7 @@ struct Args {
 fn parse_args(argv: &[String]) -> Result<Args, String> {
     let mut models = None;
     let mut endpoints_dir = None;
+    let mut fetch_openrouter_flag = false;
     let mut out = None;
     let mut process = false;
     let mut it = argv.iter().skip(1);
@@ -49,6 +53,12 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
         match key {
             "--models" => models = Some(PathBuf::from(value("--models")?)),
             "--endpoints-dir" => endpoints_dir = Some(PathBuf::from(value("--endpoints-dir")?)),
+            "--fetch-openrouter" => {
+                if inline.is_some() {
+                    return Err("--fetch-openrouter takes no value".to_string());
+                }
+                fetch_openrouter_flag = true;
+            }
             "--out" => out = Some(PathBuf::from(value("--out")?)),
             "--process" => {
                 if inline.is_some() {
@@ -60,9 +70,21 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
             other => return Err(format!("unknown flag: {other}")),
         }
     }
+    if fetch_openrouter_flag && (models.is_some() || endpoints_dir.is_some()) {
+        return Err("--fetch-openrouter replaces --models/--endpoints-dir".to_string());
+    }
+    if !fetch_openrouter_flag {
+        if models.is_none() {
+            return Err("--models is required (or --fetch-openrouter)".to_string());
+        }
+        if endpoints_dir.is_none() {
+            return Err("--endpoints-dir is required (or --fetch-openrouter)".to_string());
+        }
+    }
     Ok(Args {
-        models: models.ok_or_else(|| "--models is required".to_string())?,
-        endpoints_dir: endpoints_dir.ok_or_else(|| "--endpoints-dir is required".to_string())?,
+        models,
+        endpoints_dir,
+        fetch_openrouter: fetch_openrouter_flag,
         out: out.ok_or_else(|| "--out is required".to_string())?,
         process,
     })
@@ -78,9 +100,24 @@ fn run() -> Result<(), String> {
         }
     })?;
 
-    let models_json =
-        fs::read(&args.models).map_err(|e| format!("read {}: {e}", args.models.display()))?;
-    let endpoints = load_endpoints_dir(&args.endpoints_dir).map_err(|e| e.to_string())?;
+    // Whatever produces the bytes, the fixture boundary loads them:
+    // live fetch returns the same shapes the fixture files hold.
+    let (models_json, endpoints) = if args.fetch_openrouter {
+        let base = std::env::var("OPENROUTER_BASE_URL")
+            .unwrap_or_else(|_| "https://openrouter.ai/api".to_string());
+        let fetched = fetch_openrouter(&base).map_err(|e| e.to_string())?;
+        if !fetched.skipped.is_empty() {
+            println!("skipped {} models without endpoints", fetched.skipped.len());
+        }
+        (fetched.models, fetched.endpoints)
+    } else {
+        let models_path = args.models.as_ref().expect("validated above");
+        let endpoints_path = args.endpoints_dir.as_ref().expect("validated above");
+        let models_json =
+            fs::read(models_path).map_err(|e| format!("read {}: {e}", models_path.display()))?;
+        let endpoints = load_endpoints_dir(endpoints_path).map_err(|e| e.to_string())?;
+        (models_json, endpoints)
+    };
     fs::create_dir_all(&args.out).map_err(|e| format!("create {}: {e}", args.out.display()))?;
 
     let work_db = args.out.join(".catalog-work.db");

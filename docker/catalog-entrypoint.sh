@@ -10,7 +10,11 @@ set -eu
 : "${ASSIST:=/input/rank-assist.json}"
 : "${PROMOS:=/input/promos.json}"
 while true; do
-  catalog-sync --models "$MODELS" --endpoints-dir "$ENDPOINTS_DIR" --out "$OUT_DIR" --process
+  if [ "${FETCH_OPENROUTER:-0}" = "1" ]; then
+    catalog-sync --fetch-openrouter --out "$OUT_DIR" --process
+  else
+    catalog-sync --models "$MODELS" --endpoints-dir "$ENDPOINTS_DIR" --out "$OUT_DIR" --process
+  fi
   DB=$(ls -t "$OUT_DIR"/catalog-*.db | head -1)
   RANK_ARGS=""
   [ -f "$TRENDS" ] && RANK_ARGS="$RANK_ARGS --trends $TRENDS"

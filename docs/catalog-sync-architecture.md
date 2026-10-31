@@ -71,9 +71,9 @@ remote hosts later.
   `SYNC_INTERVAL` (seconds) to loop on a schedule.
 - Local compose (`compose.yaml`): the `catalog-sync` service writes to
   the shared `catalog-data` volume, which the gateway mounts read-only.
-  Input is the fixture tree mounted at `/input` until live fetching
-  lands. Prod compose stays gateway-only; remote catalog delivery is a
-  later step.
+  Input is the fixture tree mounted at `/input` by default;
+  `FETCH_OPENROUTER=1` pulls live instead (Iter 18). Prod compose
+  stays gateway-only; remote catalog delivery is a later step.
 - CI (`rust.yml`): workspace test/fmt/clippy gate plus a catalog image
   build with a one-shot sync smoke test.
 

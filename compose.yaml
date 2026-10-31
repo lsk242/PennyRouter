@@ -37,6 +37,7 @@ services:
       - ./crates/catalog/tests/fixtures:/input:ro
     environment:
       SYNC_INTERVAL: ${SYNC_INTERVAL:-3600}
+      FETCH_OPENROUTER: ${FETCH_OPENROUTER:-0}
     restart: unless-stopped
   # Opt-in catalog browser (Iter 17): only starts with
   #   docker compose --profile ui up catalog-ui

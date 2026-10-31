@@ -63,9 +63,11 @@ set -a; . tests/live/.env; set +a
   baseten `meta-models/muse-spark-open-1026`
 - [ ] Live key for the smoke chat probe (`SMOKE_API_KEY` currently
   reads `[REDACTED]` — real key needed, or we skip the probe)
-- [ ] Provider-config gap fixed in compose + deploy script
-- [ ] Gateway redeployed with provider config
-- [ ] Smoke green against deployed router
+- [x] Provider-config gap fixed in compose + deploy script
+- [x] Gateway redeployed with provider config (both containers fresh,
+  `MODAL/BASETEN_BASE_URL` + `GATEWAY_UI=1` live, `/ui` 200)
+- [x] Smoke: health/models/ui pass; free chat 503 (`no_eligible_offering`,
+  fixture catalog — clears with Iter 18 image + `FETCH_OPENROUTER=1`)
 - [ ] Live validation: free tier via agent
 - [ ] Live validation: modal route via agent
 - [ ] Live validation: baseten route via agent
