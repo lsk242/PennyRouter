@@ -25,6 +25,9 @@ meta/muse-spark-open/privacy/low_cost/speed
 
 Initial tag vocabulary (grows with the index): price / latency / throughput
 orientations, `privacy` (zero data retention), region hints.
+`lowest` (Iter 19) is the cross-model cheapest-paid pick: it rewrites
+to whatever paid offering costs least catalog-wide, with no quality
+floor — the fallback when free turns run out.
 
 ## Why not OpenRouter sorts
 
@@ -58,6 +61,16 @@ session.
   signals — as are unknown tags.
 - Default: best quality tier, then cheapest prompt price, within the
   model's most common precision class.
+- `lowest` (Iter 19): cheapest paid priceable offering with a known
+  precision class across all models — same paid-only filter, budget,
+  throttle skip, stickiness (under the full tagged id namespace),
+  and deterministic tie-breaks (cost, model id, provider) as the
+  `low` tier, minus its judged-tier floor. Fails closed like
+  virtual ids (`no_eligible_offering` 503, `budget_exceeded` 400)
+  instead of leaking the tagged id upstream; exactly-once (tags
+  never retry). Unknown base models still pass through untouched,
+  and first recognized orientation wins (`price/lowest` stays
+  same-model).
 - Session = (`Authorization`, model). The first decision pins the
   provider and class; later requests keep the provider, with
   orientation tags refining only which of its offerings serves.
