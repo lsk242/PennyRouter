@@ -964,10 +964,12 @@ async fn acquire_upstream_slot(state: &AppState) -> Option<UpstreamPermit> {
 
 /// End-to-end response headers preserved on every path (Iter 11,
 /// F03): representation and negotiation metadata stay coherent with
-/// the bytes (transparent passthrough — the gateway never decodes),
-/// so compressed bodies, ranges, auth challenges, validators, and
-/// redirects survive. Everything else (framing, hop-by-hop) is
-/// rebuilt by our own stack.
+/// the bytes (transparent passthrough — success bodies are never
+/// decoded), so compressed bodies, ranges, auth challenges,
+/// validators, and redirects survive. Everything else (framing,
+/// hop-by-hop) is rebuilt by our own stack. Error bodies are the
+/// exception: the gateway reads them, so gzipped errors decode
+/// first and drop the encoding claim (Iter 20).
 const FORWARDED_RESPONSE_HEADERS: [&str; 7] = [
     "content-type",
     "content-encoding",
@@ -1289,10 +1291,14 @@ async fn upstream_error(
     // Error bodies are bounded like success bodies (Iter 11, F05):
     // the 200-char snippet is taken after a capped collection.
     let preserved = forwarded_response_headers(upstream.headers());
-    let bytes = match read_capped_upstream(upstream, total, metrics).await {
+    let raw = match read_capped_upstream(upstream, total, metrics).await {
         Ok(bytes) => bytes,
         Err(response) => return *response,
     };
+    // Upstreams may gzip error bodies even when the client
+    // negotiated identity (seen live: gzipped 4xx). Decode so the
+    // JSON detect and the snippet below read text, not binary.
+    let bytes = decode_error_body(&raw);
     if serde_json::from_slice::<serde_json::Value>(&bytes)
         .ok()
         .and_then(|json| json.get("error").cloned())
@@ -1300,6 +1306,12 @@ async fn upstream_error(
     {
         let mut response = Response::builder().status(status);
         for (name, value) in preserved.iter() {
+            // Decoded bytes must not keep the upstream encoding
+            // claim — it would lie about them (same F03 reasoning
+            // as the rewritten branch below).
+            if bytes != raw && name == axum::http::header::CONTENT_ENCODING {
+                continue;
+            }
             response = response.header(name, value);
         }
         return response
@@ -1333,6 +1345,26 @@ async fn upstream_error(
         }
     }
     response
+}
+
+/// Decode a gzipped upstream error body (Iter 20). Plain bodies
+/// pass through untouched; corrupt gzip falls back to raw bytes
+/// rather than failing the error mapping. Decode is capped: error
+/// snippets need 200 chars, so anything past 1 MiB of output is
+/// either corrupt or hostile.
+fn decode_error_body(bytes: &[u8]) -> Vec<u8> {
+    use std::io::Read as _;
+    const GZIP_MAGIC: [u8; 2] = [0x1f, 0x8b];
+    if bytes.len() < 2 || bytes[0..2] != GZIP_MAGIC {
+        return bytes.to_vec();
+    }
+    let mut decoder = flate2::read::GzDecoder::new(bytes);
+    let mut out = Vec::new();
+    let decoded = std::io::Read::take(&mut decoder, 1024 * 1024).read_to_end(&mut out);
+    match decoded {
+        Ok(n) if n > 0 => out,
+        _ => bytes.to_vec(),
+    }
 }
 
 fn snippet(bytes: &[u8]) -> String {
