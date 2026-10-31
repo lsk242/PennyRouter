@@ -38,13 +38,14 @@ the two-service dev file — always ship `compose.dev.yaml`, never
 `catalog-sync`):
 
 ```sh
-set -a; . tests/live/.env; set +a   # deploy values flow into the remote .env
-COMPOSE_FILE=compose.dev.yaml ./scripts/deploy.sh
+./scripts/deploy.sh   # ships compose.dev.yaml + repo-root .env, pulls, restarts, health-checks
 ```
 
-`tests/live/.env` carries `FETCH_OPENROUTER` (0 = fixture catalog,
-1 = live OpenRouter fetch, Iter 18): set it to 1 before deploying
-for a live test so the gateway routes over real data.
+Deploy config lives in the repo-root `.env` (provider URLs, judge
+keys, `FETCH_OPENROUTER`): 0 = fixture catalog, 1 = live OpenRouter
+fetch (Iter 18) — set it to 1 before deploying for a live test so
+the gateway routes over real data. `tests/live/.env` holds
+test-only values and is never shipped.
 
 Preview with `DRY_RUN=1`. The script pulls, restarts, and health-checks.
 For variable meanings see the header of `scripts/deploy.sh`.
@@ -70,7 +71,9 @@ curl -fsS http://gateway.apps.lan/health                           # confirm
 
 ## Rules
 
-- Backend keys travel inside each agent's own requests (pure BYOK).
-  No gateway-side serving keys exist; never put keys in the repo.
-  `tests/live/.env` is gitignored — only `.env.example` is committed.
+- The no-keys rule covers gateway *serving* keys: agents carry
+  their own backend keys inside each request (pure BYOK). Config
+  keys (catalog judge keys, provider URLs) live in the repo-root
+  `.env`, which deploys ship (chmod 600). Never commit any `.env` —
+  only `.env.example` templates are committed.
 - Never commit or push unless explicitly asked (repo rule).

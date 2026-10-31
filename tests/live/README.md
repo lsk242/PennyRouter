@@ -30,13 +30,14 @@ set -a; . tests/live/.env; set +a
 
 ## Secret rules
 
-- `tests/live/.env` is gitignored (`.env` basename rule). Only
-  `.env.example` (placeholders) is committed.
-- The live serving path is pure BYOK: backend keys travel inside each
-  agent's own requests. No gateway-side keys are needed for this test,
-  so none belong in `tests/live/.env`.
-- Catalog-judge keys (`BASETEN_API_KEY`, `MODAL_KEY_ID/SECRET`) stay
-  in the root `.env` only; they are never needed here.
+- `tests/live/.env` is gitignored (`.env` basename rule) and holds
+  test-only values (router, models, hosts, the smoke probe key).
+  Only `.env.example` (placeholders) is committed.
+- The no-keys rule covers gateway *serving* keys: agents carry their
+  own backend keys inside each request (pure BYOK).
+- Config keys (catalog judge keys, provider URLs) live in the
+  repo-root `.env`, which `deploy.sh` ships to the server as the
+  remote `.env` (chmod 600). They are never needed in `tests/live/`.
 
 ## Plan
 

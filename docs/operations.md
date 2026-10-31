@@ -18,9 +18,10 @@ cp -n .env.example .env                 # once; optional
 docker compose up --build               # local dev: builds from source
 ```
 
-Server deployment pulls the CI-built image from GitHub Packages and
-never builds — one command copies the pull-only compose file plus a
-generated `.env` to the server, pulls, restarts, and health-checks:
+Server deployment pulls the CI-built images from GitHub Packages
+and never builds — one command copies the pull-only compose file
+plus the repo-root `.env` to the server, pulls, restarts, and
+health-checks:
 
 ```sh
 DEPLOY_HOST=user@example.com make deploy   # or ./scripts/deploy.sh
@@ -34,16 +35,16 @@ COMPOSE_FILE=compose.dev.yaml DEPLOY_DIR=/opt/stacks/pennyrouter-dev \
   HOST_PORT=8003 DEPLOY_HOST=user@example.com ./scripts/deploy.sh
 ```
 
-Deploy settings are env vars (see the header of
-[`scripts/deploy.sh`](../scripts/deploy.sh)): `DEPLOY_HOST` (required),
-`DEPLOY_DIR` (default `pennyrouter`), `HOST_PORT` (default `3000`,
-published on the server), `PORT` (default `3000`, in-container),
-`IMAGE` (default the CI-built `ghcr.io` image), and
-`OPENROUTER_BASE_URL`. `DRY_RUN=1` prints what would run without
-touching the server. Gateway only: `catalog-sync` is a separate
-process on its own host and shares only the versioned DB artifact
-(see [architecture.md](architecture.md)), so it is not part of this
-deploy.
+Deploy targets are env vars (see the header of
+[`scripts/deploy.sh`](../scripts/deploy.sh)): `DEPLOY_HOST`
+(default `apps.lan`), `DEPLOY_DIR` (default
+`/opt/stacks/pennyrouter`), `COMPOSE_FILE` (default
+`compose.dev.yaml`); app config comes from the shipped root `.env`.
+`DRY_RUN=1` prints what would run (env redacted) without touching
+the server. The dev compose file runs `catalog-sync` beside the
+gateway on the shared volume; it is still a separate process that
+shares only the versioned DB artifact (see
+[architecture.md](architecture.md)).
 
 CI builds `ghcr.io/lsk242/pennyrouter:latest` and smoke-tests `/health`
 on every PR, and pushes it on merges to main. It also rejects any
