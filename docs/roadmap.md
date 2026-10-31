@@ -247,7 +247,7 @@ Development delivers Docker images, platform delivers deployments.
 ## Iter 12 — Hot-path hygiene + fresh baseline (done)
 
 - Goal: act on the
-  [resource-efficiency review](review/PennyRouter-resource-efficiency-review.md) —
+  [resource-efficiency review](review/PennyRouter-Rust-resource-efficiency-review.md) —
   buffered structured logging (no `println!` per request), less
   per-request lock contention; re-run `tests/load` and record
   post-Iter-11 numbers (Iter 3 baseline was stale).

@@ -33,6 +33,7 @@ static sort orders miss.
 ## Non-goals (for now)
 
 - No request classifier yet — routing is lookup-based, not content-based.
-- No local key management — the caller supplies the backend key.
-- No multi-backend targets yet — OpenRouter first, others later.
+- No local serving-key management — the caller supplies the backend key.
+- No catalog-routed backends beyond OpenRouter yet — Modal/Baseten
+  serve via provider-pinned direct routes (Iter 16), not the index.
 - No judge/parallel fan-out features yet — see [future.md](future.md).

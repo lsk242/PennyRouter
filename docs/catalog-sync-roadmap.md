@@ -87,7 +87,19 @@ one. Gateway-side milestones stay in [roadmap.md](roadmap.md).
   endpoints on each backend with real varied verdicts; `cargo test`,
   clippy, and fmt pass.
 
+## Phase 5 — Live fetching (done, landed as gateway Iter 18)
+
+- Goal: `catalog-sync --fetch-openrouter` pulls the public `GET
+  /models` list plus one per-model endpoints body (no auth, no keys)
+  through the unchanged fixture boundary; `FETCH_OPENROUTER=1`
+  flips the container off fixtures.
+- Value: routing decides over live data instead of three fixture
+  models; fixtures stay the offline default for tests and local work.
+- Test: stub-server fetch tests; no live calls in tests. Live
+  one-shot synced 456 models / 1483 endpoints with 18 zero-price
+  offerings.
+
 ## Later
 
-Further sources, live fetching, remote artifact delivery, retention
-policy — pulled forward deliberately, never by default.
+Further sources, remote artifact delivery, retention policy —
+pulled forward deliberately, never by default.
