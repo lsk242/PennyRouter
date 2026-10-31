@@ -437,7 +437,19 @@ Development delivers Docker images, platform delivers deployments.
   models pass through; first orientation wins. Proven by 7 routing
   unit tests. `cargo test`, clippy, fmt clean.
 
-## After Iter 19
+## Iter 20 — Decode gzipped upstream errors (in progress)
+
+- Goal: readable error messages when upstreams gzip their 4xx/5xx
+  bodies (found live: a gzipped 404 reached an agent as raw bytes).
+- Value: agents see actionable errors and classify retries
+  correctly; success-path bytes stay untouched.
+- Shipped: `decode_error_body` (gzip-magic detect, 1 MiB bounded
+  decode, raw fallback on corrupt input) on the error path only;
+  decoded JSON errors forward without the encoding claim (F03
+  honesty). New `flate2` dependency (pure Rust, no C deps).
+  Proven by 2 passthrough tests. `cargo test`, clippy, fmt clean.
+
+## After Iter 20
 
 Deferred ideas in [future.md](future.md): classifier routing,
 parallel fan-out, more judge models. Each becomes roadmap items only

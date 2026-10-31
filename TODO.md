@@ -131,3 +131,8 @@ cheap judge model, classifier-based routing.
       rejections, exactly-once. Test: 7 routing unit tests (pick,
       first-wins, passthrough, fail-closed, budget, tie-break, wire
       rewrite).
+- [ ] **Iter 20 — Decode gzipped upstream errors.** Live-found: gzipped
+      4xx bodies were wrapped raw into error messages. Decode (bounded)
+      on the error path only; success bytes stay untouched. Test: 2
+      passthrough tests (readable wrap, decoded JSON forward without
+      encoding claim).
