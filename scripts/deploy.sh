@@ -22,6 +22,12 @@
 #   PORT                 Container port. Default: 3000.
 #   IMAGE                Image to pull. Default: ghcr.io/lsk242/pennyrouter:latest.
 #   OPENROUTER_BASE_URL  Upstream base URL. Default: https://openrouter.ai/api.
+#   MODAL_BASE_URL       Pinned upstream for `modal/…` routes. Empty by
+#                        default (those routes fail closed until set).
+#   BASETEN_BASE_URL     Pinned upstream for `baseten/…` routes. Default:
+#                        https://inference.baseten.co/v1.
+#   GATEWAY_UI           Set to 1 to register the read-only GET /ui debug
+#                        page. Empty by default (route does not exist).
 #   SSH_OPTS             Extra options for ssh/scp, e.g. "-i ~/.ssh/id -p 2222".
 #   DRY_RUN              Set to 1 to print what would run without touching
 #                        the server.
@@ -40,6 +46,9 @@ HOST_PORT="${HOST_PORT:-3000}"
 PORT="${PORT:-3000}"
 IMAGE="${IMAGE:-ghcr.io/lsk242/pennyrouter:latest}"
 OPENROUTER_BASE_URL="${OPENROUTER_BASE_URL:-https://openrouter.ai/api}"
+MODAL_BASE_URL="${MODAL_BASE_URL:-}"
+BASETEN_BASE_URL="${BASETEN_BASE_URL:-https://inference.baseten.co/v1}"
+GATEWAY_UI="${GATEWAY_UI:-}"
 DRY_RUN="${DRY_RUN:-0}"
 
 # shellcheck disable=SC2086
@@ -81,6 +90,9 @@ PORT=$PORT
 HOST_PORT=$HOST_PORT
 IMAGE=$IMAGE
 OPENROUTER_BASE_URL=$OPENROUTER_BASE_URL
+MODAL_BASE_URL=$MODAL_BASE_URL
+BASETEN_BASE_URL=$BASETEN_BASE_URL
+GATEWAY_UI=$GATEWAY_UI
 EOF
 fi
 

@@ -10,6 +10,7 @@ services:
       context: .
       dockerfile: docker/Dockerfile
     image: ${IMAGE:-pennyrouter:dev}
+    container_name: gateway
     ports:
       - "${HOST_PORT:-3000}:${PORT:-3000}"
     # Lets the container reach host-run mocks (perf comparison) via
@@ -19,6 +20,9 @@ services:
     environment:
       PORT: ${PORT:-3000}
       OPENROUTER_BASE_URL: ${OPENROUTER_BASE_URL:-https://openrouter.ai/api}
+      MODAL_BASE_URL: ${MODAL_BASE_URL:-}
+      BASETEN_BASE_URL: ${BASETEN_BASE_URL:-https://inference.baseten.co/v1}
+      GATEWAY_UI: ${GATEWAY_UI:-}
       CATALOG_DB: ${CATALOG_DB:-/catalog}
     volumes:
       - catalog-data:/catalog:ro

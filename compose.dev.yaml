@@ -11,11 +11,15 @@
 services:
   gateway:
     image: ${IMAGE:-ghcr.io/lsk242/pennyrouter:latest}
+    container_name: gateway
     ports:
       - "${HOST_PORT:-8003}:${PORT:-3000}"
     environment:
       PORT: ${PORT:-3000}
       OPENROUTER_BASE_URL: ${OPENROUTER_BASE_URL:-https://openrouter.ai/api}
+      MODAL_BASE_URL: ${MODAL_BASE_URL:-}
+      BASETEN_BASE_URL: ${BASETEN_BASE_URL:-https://inference.baseten.co/v1}
+      GATEWAY_UI: ${GATEWAY_UI:-}
       CATALOG_DB: /catalog
     volumes:
       - catalog-data:/catalog:ro
