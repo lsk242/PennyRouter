@@ -1,7 +1,7 @@
 # Architecture
 
 Long-term direction. Each layer arrives in its own small iteration per
-[roadmap.md](roadmap.md); nothing here is built yet.
+[roadmap.md](roadmap.md); per-layer build status lives there.
 
 ## Data flow
 
@@ -50,9 +50,10 @@ usage trends (per app/key) ──► ranker input
 - **Ranker**: periodic job that rebuilds the ranked index with AI assistance,
   blending live metrics with usage trends. Publishes versioned snapshots
   atomically. Never on the realtime path.
-- **Backend adapters**: one per upstream (OpenRouter first). Forwarding,
-  auth passthrough, response normalization. Preserve SSE bytes/order and
-  enforce connect, first-byte, idle, and total timeouts.
+- **Backend adapters**: one per upstream (OpenRouter first, plus
+  provider-pinned direct routes). Forwarding, auth passthrough,
+  response normalization. Preserve SSE bytes/order and enforce
+  connect, first-byte, idle, and total timeouts.
 
 ## Key design decisions
 
@@ -89,25 +90,28 @@ Deployment evolves in parallel to development (see
 from platform. Docker first; cloud providers later, all Terraform-managed.
 The gateway stays provider-agnostic — no cloud SDKs on the request path.
 
-## Repo layout (target)
+## Repo layout
 
 ```text
 PennyRouter/
-  README.md  TODO.md  LICENSE  AGENTS.md
-  Cargo.toml + Cargo.lock  # workspace root
+  README.md  TODO.md  LICENSE  AGENTS.md  Makefile
+  Cargo.toml + Cargo.lock  # workspace root (Rust: Axum + reqwest + rusqlite)
   .github/                # CI workflows, Dependabot
+  .agents/skills/         # project skills (live validation runbook)
   crates/
-    gateway/              # HTTP server, OpenAI compat
-    router/               # routing decisions
-    catalog/              # DB schema/queries + catalog-sync process
-    ranker/               # periodic ranking job
-    common/               # shared types, config, errors
-  tests/                  # integration + load tests
+    gateway/              # HTTP server, OpenAI compat, routing decisions
+    catalog/              # DB schema/queries + catalog-sync/rank processes
+    catalog-ui/           # artifact browser
+  tests/
+    integration/ load/    # integration + load harnesses
+    live/                 # live agent validation (hosts-only config + scripts)
   docs/                   # this folder
+  docker/                 # Dockerfiles + entrypoints
+  scripts/                # deploy.sh
+  terraform/              # Hetzner deployment
   compose.yaml            # local dev (builds from source)
-  compose.prod.yaml       # server deploy (pulls GHCR image, no build)
-  .env.example            # settings template (copy to .env)
-  docker/                 # Dockerfile
+  compose.dev.yaml        # server dev stack (pulls GHCR images, no build)
+  compose.prod.yaml       # server gateway-only (pulls GHCR image, no build)
+  compose.perf.yaml       # resource-capped perf profile
+  .env.example            # settings template (copy to .env; deploys ship .env)
 ```
-
-Toolchain and crate choices are deferred to Iter 1, not locked here.

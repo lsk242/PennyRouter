@@ -52,9 +52,10 @@ router keeps serving the last good index.
 ## Status (Iter 6)
 
 - `catalog-rank --db <catalog.db> --out <dir> [--trends <t.json>]
-  [--assist <a.json>]` rebuilds the ranking offline and publishes
-  `ranking-<version>.json` + manifest sidecar (content-hash versioned,
-  hash-verified on load, like the catalog artifact).
+  [--assist <a.json>] [--promos <p.json>]` rebuilds the ranking
+  offline and publishes `ranking-<version>.json` + manifest sidecar
+  (content-hash versioned, hash-verified on load, like the catalog
+  artifact).
 - Ordering per model, precision class, and orientation (default/price/
   quality). Formulas, best-first: default = tier, error rate, price,
   latency; price = price, error rate, tier, latency; quality = tier,
@@ -73,6 +74,7 @@ router keeps serving the last good index.
   stale entries are skipped and new offerings append, so a stale
   ranking never drops a live offering. `reload`/`swap_ranking` rotate
   artifacts without dropping the last good one.
-- Promo/free expiry stays out: the ranker reads `promo_discount` as a
-  plain fact; time-boxed promo semantics land with the price model
-  (Iter 7).
+- Promo/free windows landed with the price model (Iter 7): `--promos`
+  consumes provider-scoped windows (see [pricing.md](pricing.md)),
+  and promo-free eligibility publishes in the ranking document
+  (`free_offers`, Iter 11).

@@ -58,10 +58,10 @@ remote hosts later.
 ## Operations
 
 - Own schedule (periodic); independent deploy and scaling.
-- Gathering reads only public source endpoints — no API keys in config
-  or repo. Live judge backends (Phase 4) take keys from env vars only,
-  never from config, fixtures, or repo. (Gateway request keys still
-  travel with requests.)
+- Gathering reads only public source endpoints — no API keys
+  involved. Live judge backends (Phase 4) take keys from env vars
+  (repo-root `.env`, shipped by deploys), never from fixtures or
+  the repo. (Gateway serving keys still travel with requests.)
 - Never serves gateway traffic; never shares a process with the gateway.
 
 ## Deployment
