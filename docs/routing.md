@@ -127,7 +127,8 @@ session.
 - Provider-pinned direct routes (Iter 16): `modal/<model>` and
   `baseten/<model>` bypass the catalog entirely and forward to that
   provider's upstream (`MODAL_BASE_URL` / `BASETEN_BASE_URL`; no
-  router or catalog needed). The prefix is stripped, the remainder
+  router or catalog needed, and no `/v1` prefix on the base — the
+  gateway appends the incoming path itself). The prefix is stripped, the remainder
   passes through verbatim, and the OpenRouter-specific `provider`
   object is dropped — foreign upstreams speak plain OpenAI chat.
   Auth is pure BYOK: every header, including `Authorization`,

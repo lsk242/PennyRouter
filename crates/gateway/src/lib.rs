@@ -214,11 +214,14 @@ impl AppState {
 
     /// Register a provider-pinned upstream (Iter 16): `modal/<model>`
     /// and `baseten/<model>` forward there instead of OpenRouter.
+    ///
+    /// Bases carry no route path (like the OpenRouter base): the gateway
+    /// appends the full incoming `/v1/…` path itself, so a trailing
+    /// `/v1` is stripped — otherwise requests double it (`/v1/v1/…`)
+    /// and the upstream 404s.
     pub fn with_upstream(mut self, provider: &str, base_url: &str) -> Self {
-        self.extra_upstreams.insert(
-            provider.to_string(),
-            base_url.trim_end_matches('/').to_string(),
-        );
+        self.extra_upstreams
+            .insert(provider.to_string(), normalize_pinned_base(base_url));
         self
     }
 
@@ -277,9 +280,12 @@ impl AppState {
         let mut state = Self::with_limits(base, Timeouts::default(), limits);
         // Provider-pinned upstreams (Iter 16): unset means the
         // provider's routes fail closed with provider_not_configured.
-        // Baseten defaults to its public inference API (same URL the
-        // catalog judge uses); Modal has no shared deployment, so it
-        // stays unset until configured.
+        // Baseten defaults to its public inference host (same host the
+        // catalog judge uses, without the judge's `/v1` route prefix —
+        // the gateway appends the incoming `/v1/…` path itself; an
+        // explicitly configured trailing `/v1` is stripped at
+        // registration). Modal has no shared deployment, so it stays
+        // unset until configured.
         if let Ok(url) = std::env::var("MODAL_BASE_URL") {
             if !url.is_empty() {
                 state = state.with_upstream("modal", &url);
@@ -290,7 +296,7 @@ impl AppState {
                 state = state.with_upstream("baseten", &url);
             }
         } else {
-            state = state.with_upstream("baseten", "https://inference.baseten.co/v1");
+            state = state.with_upstream("baseten", "https://inference.baseten.co");
         }
         match std::env::var("CATALOG_DB") {
             Err(_) => state,
@@ -303,6 +309,19 @@ impl AppState {
             },
         }
     }
+}
+
+/// Normalize a pinned-provider base URL: strip trailing slashes and
+/// any trailing `/v1` segments. The gateway appends the full incoming
+/// `/v1/…` path itself, so a base that already ends in `/v1` would
+/// double it (`/v1/v1/…`) and 404 upstream. Idempotent; other paths
+/// (including `/v10`) pass through untouched.
+fn normalize_pinned_base(base_url: &str) -> String {
+    let mut base = base_url.trim_end_matches('/').to_string();
+    while let Some(stripped) = base.strip_suffix("/v1") {
+        base = stripped.trim_end_matches('/').to_string();
+    }
+    base
 }
 
 pub fn app() -> Router {
