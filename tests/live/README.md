@@ -58,7 +58,8 @@ set -a; . tests/live/.env; set +a
   (gateway + catalog-sync running, image `ghcr.io/...:latest`)
 - [x] Agent log access — [scripts/agent-logs.sh](scripts/agent-logs.sh):
   `router` (docker logs), `hermes` (`~/.hermes/logs/agent.log`),
-  `openclaw` (no log files yet, foreground session — shows state)
+  `openclaw` (no log files yet, foreground session — shows state),
+  `openhands` (tmux `canvas:0` capture, read-only)
 - [x] Exact model ids — in `.env`: free `openrouter/pair/free`,
   modal `muse-spark-open-816b-a42b`,
   baseten `meta-models/muse-spark-open-1026`
@@ -67,8 +68,8 @@ set -a; . tests/live/.env; set +a
 - [x] Provider-config gap fixed in compose + deploy script
 - [x] Gateway redeployed with provider config (both containers fresh,
   `MODAL/BASETEN_BASE_URL` + `GATEWAY_UI=1` live, `/ui` 200)
-- [x] Smoke: health/models/ui pass; free chat 503 (`no_eligible_offering`,
-  fixture catalog — clears with Iter 18 image + `FETCH_OPENROUTER=1`)
+- [x] Smoke: 4/4 green against the deployed router (health, models,
+  `/ui` off as configured, free chat probe 200 via `openrouter/free`)
 - [ ] Live validation: free tier via agent
 - [ ] Live validation: modal route via agent
 - [ ] Live validation: baseten route via agent

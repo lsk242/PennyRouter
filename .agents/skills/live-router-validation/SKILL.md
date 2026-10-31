@@ -16,6 +16,8 @@ URLs, model ids); this skill holds the procedure.
   (services `gateway` + `catalog-sync`, container name `gateway`).
 - `openclaw.lan` — OpenClaw agent (foreground session, no log files yet).
 - `hermes.lan` — Hermes agent, logs at `~/.hermes/logs/agent.log`.
+- `openhands.lan` — OpenHands agent server in tmux `canvas:0`
+  (logs via read-only pane capture).
 - Agent-facing router URL: `http://gateway.apps.lan`
   (`/health` → `{"status":"ok"}`, `/v1/models` → six virtual ids).
 
@@ -28,6 +30,7 @@ set -a; . tests/live/.env; set +a
 ./tests/live/scripts/agent-logs.sh router [--tail N] [--follow]   # gateway JSON logs
 ./tests/live/scripts/agent-logs.sh hermes [--tail N]              # agent log
 ./tests/live/scripts/agent-logs.sh openclaw [--tail N]            # state (no log files yet)
+./tests/live/scripts/agent-logs.sh openhands [--tail N]           # tmux capture
 ```
 
 ## Deploy
