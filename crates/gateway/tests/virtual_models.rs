@@ -159,23 +159,32 @@ fn mock_app(
             );
             let hit = seen.hits[&order];
             if throttle.contains(&order.as_str()) {
+                let mut headers = axum::http::HeaderMap::new();
+                headers.insert("content-type", "application/json".parse().unwrap());
+                headers.insert("x-ratelimit-limit", "50".parse().unwrap());
+                headers.insert("x-ratelimit-remaining", "0".parse().unwrap());
+                headers.insert("x-ratelimit-reset", "1793491200000".parse().unwrap());
                 return (
-                        StatusCode::TOO_MANY_REQUESTS,
-                        [("content-type", "application/json")],
-                        r#"{"error":{"message":"slow down","type":"server_error","code":"rate_limited"}}"#.to_string(),
-                    );
+                    StatusCode::TOO_MANY_REQUESTS,
+                    headers,
+                    r#"{"error":{"message":"slow down","type":"server_error","code":"rate_limited"}}"#.to_string(),
+                );
             }
             if fail_once.contains(&order.as_str()) && hit == 1 {
+                let mut headers = axum::http::HeaderMap::new();
+                headers.insert("content-type", "application/json".parse().unwrap());
                 return (
                     StatusCode::SERVICE_UNAVAILABLE,
-                    [("content-type", "application/json")],
+                    headers,
                     r#"{"error":{"message":"flaky","type":"server_error","code":"flaky"}}"#
                         .to_string(),
                 );
             }
+            let mut headers = axum::http::HeaderMap::new();
+            headers.insert("content-type", "application/json".parse().unwrap());
             (
                 StatusCode::OK,
-                [("content-type", "application/json")],
+                headers,
                 format!(r#"{{"id":"ok","provider":"{order}"}}"#),
             )
         }
@@ -634,4 +643,46 @@ async fn free_tier_fails_over_on_throttle() {
     let guard = seen.lock().unwrap();
     assert_eq!(guard.hits.get("Freebie"), Some(&1), "no second Freebie hit");
     assert_eq!(guard.hits.get("Free2"), Some(&2));
+}
+
+/// Iter 21: `free/fallback/low` serves paid when the free leg 429s —
+/// one free attempt, no usable retry, then exactly one fallback call.
+#[tokio::test]
+async fn free_fallback_serves_paid_after_free_429() {
+    let db = scratch_db("free-fallback");
+    build_db(&db);
+    let seen = Arc::new(Mutex::new(Upstream::default()));
+    let mock = spawn_mock(mock_app(seen.clone(), vec!["Freebie"], vec![])).await;
+    let gw = spawn_gateway(mock, &db).await;
+
+    let res = post_chat(gw, "openrouter/pair/free/fallback/low").await;
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(
+        res.headers().get("x-pennyrouter-provider").unwrap(),
+        "Cheap"
+    );
+    let guard = seen.lock().unwrap();
+    assert_eq!(guard.hits.get("Freebie"), Some(&1));
+    assert_eq!(guard.hits.get("Cheap"), Some(&1));
+    assert_eq!(guard.models.get("Cheap").unwrap(), "m/cheap");
+}
+
+/// Iter 21: upstream quota headers reach the client on 429s instead
+/// of being stripped.
+#[tokio::test]
+async fn upstream_ratelimit_headers_reach_client_on_429() {
+    let db = scratch_db("ratelimit-headers");
+    build_db(&db);
+    let seen = Arc::new(Mutex::new(Upstream::default()));
+    let mock = spawn_mock(mock_app(seen.clone(), vec!["Cheap", "Dear"], vec![])).await;
+    let gw = spawn_gateway(mock, &db).await;
+
+    let res = post_chat(gw, "openrouter/pair/low").await;
+    assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(res.headers().get("x-ratelimit-remaining").unwrap(), "0");
+    assert_eq!(res.headers().get("x-ratelimit-limit").unwrap(), "50");
+    assert_eq!(
+        res.headers().get("x-ratelimit-reset").unwrap(),
+        "1793491200000"
+    );
 }

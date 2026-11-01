@@ -136,3 +136,8 @@ cheap judge model, classifier-based routing.
       on the error path only; success bytes stay untouched. Test: 2
       passthrough tests (readable wrap, decoded JSON forward without
       encoding claim).
+- [ ] **Iter 21 — Free fallback + header-driven 429s.** `…/free/fallback/
+      <tier>` serves free, then one tier pick on exhaustion; 429s cool
+      offerings for the header-stated duration and surface reset info.
+      Test: unit (headers, parse, triggers) + 2 integration (fallback
+      200, 429 headers).

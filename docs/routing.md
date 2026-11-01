@@ -28,6 +28,12 @@ orientations, `privacy` (zero data retention), region hints.
 `lowest` (Iter 19) is the cross-model cheapest-paid pick: it rewrites
 to whatever paid offering costs least catalog-wide, with no quality
 floor — the fallback when free turns run out.
+`openrouter/pair/free/fallback/<tier>` (Iter 21) chains them: serves
+free while any free offering is eligible, else exactly one pick from
+the named tier (`low`, `think`, `lowest` — resolved through the
+shared tier dispatch, so future tiers plug in automatically).
+Unknown tier names fail closed; auth/config errors surface, never
+fallback; the fallback leg gets no further retry.
 
 ## Why not OpenRouter sorts
 
@@ -71,6 +77,15 @@ session.
   never retry). Unknown base models still pass through untouched,
   and first recognized orientation wins (`price/lowest` stays
   same-model).
+- Free-fallback chains (Iter 21): `openrouter/pair/free/fallback/<tier>`
+  (`low` | `think` | `lowest`). Free leg first with existing free
+  semantics; on free exhaustion (`no_eligible_offering`) or upstream
+  429/502/503/504 after the single virtual retry, one fallback pick
+  that skips the just-failed provider. Session pins under the full
+  chain id. Upstream 429s cool offerings for the header-stated
+  duration (`Retry-After`, else `X-RateLimit-Reset` epoch-ms, else
+  60s) instead of a flat timer, and 429 responses carry the
+  upstream's `X-RateLimit-*` headers to the client.
 - Session = (`Authorization`, model). The first decision pins the
   provider and class; later requests keep the provider, with
   orientation tags refining only which of its offerings serves.

@@ -449,7 +449,22 @@ Development delivers Docker images, platform delivers deployments.
   honesty). New `flate2` dependency (pure Rust, no C deps).
   Proven by 2 passthrough tests. `cargo test`, clippy, fmt clean.
 
-## After Iter 20
+## Iter 21 — Free fallback + header-driven 429s (in progress)
+
+- Goal: survive free-tier exhaustion (50/day walls hit live) without
+  client changes: `openrouter/pair/free/fallback/<tier>` serves free,
+  then exactly one tier pick; 429s carry real reset info.
+- Value: agents ride free until it's gone, then paid, with honest
+  signals throughout — no fixed timers, no invented quota state.
+- Shipped: header-derived cool-down (`Retry-After` → reset epoch-ms
+  → 60s default, 24h clamp); preserved `X-RateLimit-*` on 429s;
+  4-segment fallback ids through shared tier dispatch (`low`,
+  `think`, `lowest`; unknown fails closed); post-retry fallback leg
+  skipping the burned provider; no fallback on auth/config errors.
+  Multi-account quota pooling stays a documented non-goal (ToS).
+  Proven by unit + integration tests. `cargo test`, clippy, fmt clean.
+
+## After Iter 21
 
 Deferred ideas in [future.md](future.md): classifier routing,
 parallel fan-out, more judge models. Each becomes roadmap items only
