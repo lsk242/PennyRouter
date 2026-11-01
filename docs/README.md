@@ -18,6 +18,7 @@ All product documentation lives here, Markdown only.
 - [catalog-sync-roadmap.md](catalog-sync-roadmap.md) — phased sync plan.
 - [catalog-sync-todo.md](catalog-sync-todo.md) — sync iteration checklist.
 - [review/PennyRouter-full-review-2026-10-31.md](review/PennyRouter-full-review-2026-10-31.md) — full review (Iter 18): bugs, improvements, missing features.
+- [review/bug-todo-2026-10-31.md](review/bug-todo-2026-10-31.md) — triaged TODO of still-open findings from the 2026-10-31 reviews (fix order + repro).
 - [review/PennyRouter-security-and-bug-review.md](review/PennyRouter-security-and-bug-review.md) — security and bug review (Iter 8).
 - [review/PennyRouter-product-viability-review.md](review/PennyRouter-product-viability-review.md) — product viability review for free-first coding use.
 - [review/PennyRouter-Rust-resource-efficiency-review.md](review/PennyRouter-Rust-resource-efficiency-review.md) — Rust and resource-efficiency review.
