@@ -161,19 +161,28 @@ pub const FREE_MODEL: &str = "openrouter/free";
 /// metric (blended input/output/cache effective cost) with
 /// eligibility before price; FP resolution is a separate class,
 /// never a silent substitute.
+///
+/// `smart` (Iter 26) is not a tier but a classifier mode: the gateway
+/// calls a decision model to pick one of `free`/`lowest`/`low`
+/// (`smart/max` additionally allows `think`), then dispatches through
+/// the normal tier path with no session pinning.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VirtualTier {
     Free,
     Low,
     Think,
     Decision,
+    Smart,
+    SmartMax,
 }
 
 /// A virtual model id: `<provider>/pair/[privacy/]<free|low|think|\
-/// decision>` with an optional `/free` cost scope on `decision`, plus
-/// the fallback form `<provider>/pair/[privacy/]<free|decision/free>/\
-/// fallback/<tier>` (Iter 21). The provider segment is first so
-/// future providers slot in; only OpenRouter exists today.
+/// decision|smart|smart/max>` with an optional `/free` cost scope on
+/// `decision`, plus the fallback form `<provider>/pair/[privacy/]\
+/// <free|decision/free>/fallback/<tier>` (Iter 21). The provider
+/// segment is first so future providers slot in; only OpenRouter
+/// exists today. Smart ids never take a `/fallback/` suffix (see
+/// [`is_smart_fallback`]): the classifier replaces the chain.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VirtualModel {
     pub tier: VirtualTier,
@@ -211,6 +220,8 @@ pub fn parse_virtual(model_field: &str) -> Option<VirtualModel> {
             "think" => (VirtualTier::Think, false, None),
             "decision" => (VirtualTier::Decision, false, None),
             "decision/free" => (VirtualTier::Decision, true, None),
+            "smart" => (VirtualTier::Smart, false, None),
+            "smart/max" => (VirtualTier::SmartMax, false, None),
             _ => return None,
         },
     };
@@ -223,19 +234,69 @@ pub fn parse_virtual(model_field: &str) -> Option<VirtualModel> {
 }
 
 /// Canonical virtual ids served by `GET /v1/models` (Iter 13; decision
-/// ids from Iter 24).
-pub const VIRTUAL_MODELS: [&str; 10] = [
+/// ids from Iter 24; smart ids from Iter 26). The menu is static: smart
+/// ids list even when no classifier is configured, in which case they
+/// fail closed with `classifier_not_configured` instead of serving.
+pub const VIRTUAL_MODELS: [&str; 14] = [
     "openrouter/pair/free",
     "openrouter/pair/low",
     "openrouter/pair/think",
     "openrouter/pair/decision",
     "openrouter/pair/decision/free",
+    "openrouter/pair/smart",
+    "openrouter/pair/smart/max",
     "openrouter/pair/privacy/free",
     "openrouter/pair/privacy/low",
     "openrouter/pair/privacy/think",
     "openrouter/pair/privacy/decision",
     "openrouter/pair/privacy/decision/free",
+    "openrouter/pair/privacy/smart",
+    "openrouter/pair/privacy/smart/max",
 ];
+
+/// A parsed smart classifier id (Iter 26): which tier set the
+/// classifier may pick from, and whether the privacy fields ride both
+/// legs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SmartId {
+    /// True for `smart/max` (the classifier may also pick `think`).
+    pub max: bool,
+    pub privacy: bool,
+}
+
+/// Parse a smart classifier id. Anything else — including the plain
+/// tiers and any `/fallback/` form — returns `None`.
+pub fn parse_smart(model_field: &str) -> Option<SmartId> {
+    let rest = model_field.strip_prefix("openrouter/pair/")?;
+    let (privacy, rest) = match rest.strip_prefix("privacy/") {
+        Some(rest) => (true, rest),
+        None => (false, rest),
+    };
+    match rest {
+        "smart" => Some(SmartId {
+            max: false,
+            privacy,
+        }),
+        "smart/max" => Some(SmartId { max: true, privacy }),
+        _ => None,
+    }
+}
+
+/// True for `smart`/`smart/max` ids with a `/fallback/` suffix. Those
+/// never compose (the classifier replaces the chain), and they must
+/// fail closed — never decay into untouched passthrough of a
+/// gateway-owned id.
+pub fn is_smart_fallback(model_field: &str) -> bool {
+    let rest = match model_field.strip_prefix("openrouter/pair/") {
+        Some(rest) => rest,
+        None => return false,
+    };
+    let rest = rest.strip_prefix("privacy/").unwrap_or(rest);
+    matches!(
+        rest.split_once("/fallback/"),
+        Some(("smart", _)) | Some(("smart/max", _))
+    )
+}
 
 /// Fallback cool-down when a 429 carries no usable timing headers
 /// (Iter 13 legacy default, kept by Iter 21).
@@ -1020,10 +1081,73 @@ impl Router {
                     }
                 }
             }
+            // Smart ids never route synchronously: the classifier leg
+            // is async and lives in the handler (`lib.rs`). Reaching
+            // here means the handler missed the intercept, so fail
+            // closed rather than serve a tier nobody chose.
+            VirtualTier::Smart | VirtualTier::SmartMax => Err(RouteRejection {
+                code: "smart_requires_classifier",
+                message: "smart ids need a configured classifier leg".to_string(),
+            }),
             tier => {
                 self.decide_ordered_virtual(snapshot, authorization, constraints, model_field, tier)
             }
         }
+    }
+
+    /// Route one leg of a smart request (Iter 26): resolve the named
+    /// tier with the caller's constraints, but never consult or store a
+    /// session pin. The classifier runs per request ("easy now, hard
+    /// later" must not be sticky), and a stale pin must never override
+    /// the classifier's pick — so `authorization` is deliberately not
+    /// taken here. `failed_provider` (the completion retry) joins
+    /// `ignore` so the retry lands elsewhere, staying inside the
+    /// classified tier.
+    pub fn route_smart(
+        &self,
+        body: &[u8],
+        model_field: &str,
+        tier: &str,
+        failed_provider: Option<&str>,
+    ) -> Result<(Vec<u8>, Decision), RouteRejection> {
+        let snapshot = self.snapshot.read().unwrap_or_else(|e| e.into_inner());
+        let json: serde_json::Value = serde_json::from_slice(body).map_err(|_| RouteRejection {
+            code: "invalid_body",
+            message: "request body is not valid JSON".to_string(),
+        })?;
+        let mut constraints = ProviderConstraints::from_body(&json);
+        if let Some(provider) = failed_provider {
+            constraints.ignore.push(provider.to_string());
+        }
+        let decision = self.decide_smart_tier(&snapshot, tier, model_field, &constraints)?;
+        Self::finish_route(model_field, json, decision).ok_or_else(|| RouteRejection {
+            code: "no_eligible_offering",
+            message: "failed to rewrite the smart request body".to_string(),
+        })
+    }
+
+    /// Smart tier dispatch (Iter 26): the classified tier through the
+    /// normal path. Unlike [`Router::decide_tier`] (fallback targets,
+    /// never free), this covers `free` too — the classifier may pick
+    /// it. Sessions stay unpinned either way.
+    fn decide_smart_tier(
+        &self,
+        snapshot: &Snapshot,
+        tier: &str,
+        model_field: &str,
+        constraints: &ProviderConstraints,
+    ) -> Result<Decision, RouteRejection> {
+        if tier == "free" {
+            return self
+                .decide_free(snapshot, &[], None, constraints, model_field)
+                .and_then(|decision| {
+                    decision.ok_or_else(|| RouteRejection {
+                        code: "no_eligible_offering",
+                        message: "no free offering is currently eligible".to_string(),
+                    })
+                });
+        }
+        self.decide_tier(snapshot, tier, model_field, None, constraints)
     }
 
     /// Quality-tier floor per virtual tier (Iter 14): `low` needs a
@@ -1039,6 +1163,9 @@ impl Router {
             // (it has its own pick without a judged floor, like
             // `lowest`); the arm exists for exhaustiveness.
             VirtualTier::Decision => 0,
+            // Smart modes never reach the ordered path either (their
+            // legs dispatch through `decide_tier` per classified tier).
+            VirtualTier::Smart | VirtualTier::SmartMax => 0,
         }
     }
 
@@ -1062,6 +1189,8 @@ impl Router {
             VirtualTier::Think => "think",
             // Same note as `tier_floor`: unreachable via this path.
             VirtualTier::Decision => "decision",
+            VirtualTier::Smart => "smart",
+            VirtualTier::SmartMax => "smart/max",
         };
         let base: Vec<&Offering> = snapshot
             .models
@@ -2717,8 +2846,97 @@ mod tests {
         assert_eq!(parse_virtual("openrouter/pair/free/extra"), None);
         assert_eq!(parse_virtual("openrouter/free"), None);
         assert_eq!(parse_virtual("meta/muse-spark"), None);
-        assert_eq!(VIRTUAL_MODELS.len(), 10);
+        assert_eq!(VIRTUAL_MODELS.len(), 14);
         assert!(VIRTUAL_MODELS.iter().all(|id| parse_virtual(id).is_some()));
+    }
+
+    /// Iter 26: smart ids parse into tiers (routed by the async
+    /// classifier leg, never synchronously) and into smart specs; the
+    /// fallback suffix on smart ids is called out for fail-closed
+    /// handling instead of silent passthrough.
+    #[test]
+    fn smart_ids_parse() {
+        assert_eq!(
+            parse_virtual("openrouter/pair/smart"),
+            Some(VirtualModel {
+                tier: VirtualTier::Smart,
+                privacy: false,
+                free_only: false,
+                fallback: None
+            })
+        );
+        assert_eq!(
+            parse_virtual("openrouter/pair/privacy/smart/max"),
+            Some(VirtualModel {
+                tier: VirtualTier::SmartMax,
+                privacy: true,
+                free_only: false,
+                fallback: None
+            })
+        );
+        assert_eq!(
+            parse_smart("openrouter/pair/smart"),
+            Some(SmartId {
+                max: false,
+                privacy: false
+            })
+        );
+        assert_eq!(
+            parse_smart("openrouter/pair/smart/max"),
+            Some(SmartId {
+                max: true,
+                privacy: false
+            })
+        );
+        assert_eq!(
+            parse_smart("openrouter/pair/privacy/smart"),
+            Some(SmartId {
+                max: false,
+                privacy: true
+            })
+        );
+        assert_eq!(parse_smart("openrouter/pair/low"), None);
+        assert_eq!(parse_smart("openrouter/pair/smart/fallback/low"), None);
+        assert!(is_smart_fallback("openrouter/pair/smart/fallback/low"));
+        assert!(is_smart_fallback(
+            "openrouter/pair/privacy/smart/max/fallback/think"
+        ));
+        assert!(!is_smart_fallback("openrouter/pair/smart"));
+        assert!(!is_smart_fallback("openrouter/pair/free/fallback/low"));
+        assert!(!is_smart_fallback("openrouter/pair/low"));
+    }
+
+    /// Iter 26: `route_smart` resolves the named tier through the
+    /// normal dispatch (floors, budgets, tools all apply) but never
+    /// pins: the classifier runs per request.
+    #[test]
+    fn route_smart_resolves_tiers_without_pinning() {
+        let router = virtual_router();
+        let body = serde_json::json!({"model": "openrouter/pair/smart", "messages": []});
+        let raw = serde_json::to_vec(&body).unwrap();
+        let (rewritten, low) = router
+            .route_smart(&raw, "openrouter/pair/smart", "low", None)
+            .unwrap();
+        assert_eq!(low.provider, "Cheap");
+        assert!(!low.sticky);
+        let rewritten: serde_json::Value = serde_json::from_slice(&rewritten).unwrap();
+        assert_eq!(rewritten["model"], serde_json::json!("m/cheap"));
+        let (_, think) = router
+            .route_smart(&raw, "openrouter/pair/smart/max", "think", None)
+            .unwrap();
+        assert_eq!(think.provider, "Dear");
+        // Unknown tiers fail closed, like any virtual rejection.
+        assert!(router
+            .route_smart(&raw, "openrouter/pair/smart", "frontier", None)
+            .is_err());
+        // The sync decide path cannot serve smart ids (the classifier
+        // leg is async): it yields no decision rather than a guess.
+        assert_eq!(
+            router
+                .decide("openrouter/pair/smart", None)
+                .map(|d| d.provider),
+            None
+        );
     }
 
     /// Dedicated snapshot for virtual-tier tests: four models with

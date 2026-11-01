@@ -38,7 +38,7 @@ path lives only in logs).
 | `modal/<model>`, `baseten/<model>` on either routed endpoint | Provider-pinned direct route (Iter 16): stripped model forwarded to that provider's upstream, OpenRouter fields dropped, caller auth unchanged |
 | `GET /` | Landing page: binary version + build hash, config status, links; always served locally (never proxied) |
 | `GET /ui` | Debug UI (Iter 17): read-only snapshot, ranking, metrics page; registered only with `GATEWAY_UI=1`, otherwise falls through to fallback |
-| `GET /v1/models` | Curated menu (Iter 13): exactly the six virtual ids, served locally |
+| `GET /v1/models` | Curated menu: exactly the fourteen virtual ids, served locally (smart ids list even when unconfigured, in which case they fail closed) |
 | `POST /v1/embeddings`, `POST /v1/completions`, `/v1/audio/*`, `/v1/images/*`, `/v1/moderations`, `/v1/files`, `/v1/batches`, `/v1/fine_tuning/*`, `/v1/vector_stores` | Proxied + logged |
 | OpenRouter extras `/api/v1/auth/key`, `/api/v1/credits`, `/api/v1/generation` | No `/v1` alias exists, so these don't compose through the gateway (`{base}{path}` would double `/api`); call OpenRouter directly (verified live: 200). A gateway call is still logged, then answers upstream 404. |
 | Ollama-native `/api/chat`, `/api/generate`, `/api/tags`, `/api/show`, `/api/embed`, `/api/ps`, `/api/version` | Proxied as-is to the configured upstream + logged. OpenRouter hosts no such paths (upstream 404, still logged); with an Ollama upstream they pass straight through. No Ollama↔OpenAI translation yet. |
@@ -84,6 +84,17 @@ request has no tool-capable endpoint (disable `tools` or pick a
 tool-capable route), `quality_floor_unmet` / `no_eligible_offering`
 (503 + `Retry-After: 1`) when the tier floor or eligibility leaves
 nothing to serve. `POST /v1/responses` shares this whole contract.
+From Iter 26, `openrouter/pair/smart[/max]` (plus `privacy/`
+variants) classifies each request into a tier first (see
+[routing.md](routing.md)): unconfigured → `classifier_not_configured`
+(503 + `Retry-After: 1`); classifier auth failure →
+`classifier_auth_error` (502); any other classifier failure serves
+the configured fallback tier; `smart/.../fallback/...` →
+`invalid_model` (400). Responses carry `x-pennyrouter-smart-tier`,
+`x-pennyrouter-smart-classifier`,
+`x-pennyrouter-classifier-confidence`, and
+`x-pennyrouter-classifier-latency-ms`, plus
+`x-pennyrouter-classifier-fallback: true` when the fallback fired.
 
 ## Limits
 

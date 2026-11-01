@@ -22,10 +22,13 @@ use std::{
 };
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
+pub mod classifier;
 mod metrics;
 pub mod routing;
 
-pub use metrics::{Metrics, Route, UpstreamErrorKind};
+pub use metrics::{
+    ClassifierResult, ClassifierSummary, ClassifierTier, Metrics, Route, UpstreamErrorKind,
+};
 
 /// Token guard (Iter 2): requests estimating over 1M tokens are rejected
 /// before touching the backend. The estimate is bytes/4, the standard rough
@@ -160,6 +163,84 @@ impl Default for ConcurrencyLimits {
     }
 }
 
+/// Smart classifier leg config (Iter 26): which decision model serves
+/// `openrouter/pair/smart[/max]`, and on which upstream. `None` means
+/// smart ids fail closed with `classifier_not_configured` — every other
+/// id keeps the pure-local routing contract.
+#[derive(Clone, Debug)]
+pub struct ClassifierConfig {
+    pub model: String,
+    pub base_url: String,
+    pub api_key: Option<String>,
+    pub timeout: Duration,
+    /// Tier served when the classifier leg fails: `low` or `lowest`.
+    pub fallback_tier: String,
+    pub max_tokens: u32,
+    /// Classifier input budget in serialized-JSON characters.
+    pub max_input_chars: usize,
+}
+
+/// Defaults for the classifier leg (Iter 26): one short call, small
+/// output, fail over fast rather than stall the completion.
+const DEFAULT_CLASSIFIER_TIMEOUT_MS: u64 = 8000;
+const DEFAULT_CLASSIFIER_MAX_TOKENS: u32 = 64;
+const DEFAULT_CLASSIFIER_MAX_INPUT_CHARS: usize = 32_000;
+/// Upper bound on a classifier reply body: completions are capped at
+/// `max_tokens`, so anything past this is not a verdict.
+const MAX_CLASSIFIER_BYTES: usize = 64 * 1024;
+
+impl ClassifierConfig {
+    /// Load from `CLASSIFIER_*` (`None` when `CLASSIFIER_MODEL` is
+    /// unset or empty: smart disabled). `openrouter_default` is the
+    /// already-resolved `OPENROUTER_BASE_URL` value. An unknown
+    /// fallback tier degrades to `low` with a stderr note — the
+    /// classifier replaces the chain, so the fallback is one value,
+    /// never recursive.
+    pub fn from_env(openrouter_default: &str) -> Option<Self> {
+        let model = std::env::var("CLASSIFIER_MODEL").ok()?;
+        if model.is_empty() {
+            return None;
+        }
+        let base_url = std::env::var("CLASSIFIER_BASE_URL")
+            .ok()
+            .filter(|url| !url.is_empty())
+            .unwrap_or_else(|| openrouter_default.to_string());
+        let fallback_tier = match std::env::var("CLASSIFIER_FALLBACK_TIER")
+            .as_deref()
+            .unwrap_or("low")
+        {
+            "lowest" => "lowest".to_string(),
+            "low" => "low".to_string(),
+            other => {
+                eprintln!("gateway: unknown CLASSIFIER_FALLBACK_TIER {other:?}, using \"low\"");
+                "low".to_string()
+            }
+        };
+        Some(Self {
+            model,
+            base_url: base_url.trim_end_matches('/').to_string(),
+            api_key: std::env::var("CLASSIFIER_API_KEY")
+                .ok()
+                .filter(|key| !key.is_empty()),
+            timeout: Duration::from_millis(
+                std::env::var("CLASSIFIER_TIMEOUT_MS")
+                    .ok()
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(DEFAULT_CLASSIFIER_TIMEOUT_MS),
+            ),
+            fallback_tier,
+            max_tokens: std::env::var("CLASSIFIER_MAX_TOKENS")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(DEFAULT_CLASSIFIER_MAX_TOKENS),
+            max_input_chars: std::env::var("CLASSIFIER_MAX_INPUT_CHARS")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(DEFAULT_CLASSIFIER_MAX_INPUT_CHARS),
+        })
+    }
+}
+
 /// Shared gateway state: where chat completions are forwarded upstream,
 // plus shared metrics and the optional provider router.
 #[derive(Clone)]
@@ -170,6 +251,7 @@ pub struct AppState {
     timeouts: Timeouts,
     metrics: Arc<Metrics>,
     router: Option<Arc<routing::Router>>,
+    classifier: Option<ClassifierConfig>,
     upstream_slots: Arc<Semaphore>,
     queue_slots: Arc<Semaphore>,
 }
@@ -207,6 +289,7 @@ impl AppState {
             timeouts,
             metrics: Arc::new(Metrics::new()),
             router: None,
+            classifier: None,
             upstream_slots: Arc::new(Semaphore::new(max_upstream)),
             queue_slots: Arc::new(Semaphore::new(limits.max_queued)),
         }
@@ -249,6 +332,18 @@ impl AppState {
         self
     }
 
+    /// State with a smart classifier leg (Iter 26): enables
+    /// `openrouter/pair/smart[/max]`. Without it those ids fail closed.
+    pub fn with_classifier(mut self, config: ClassifierConfig) -> Self {
+        self.classifier = Some(config);
+        self
+    }
+
+    /// Classifier leg config, if one is configured.
+    pub fn classifier_config(&self) -> Option<ClassifierConfig> {
+        self.classifier.clone()
+    }
+
     /// Router handle for the background reload task (Iter 10).
     pub fn router_handle(&self) -> Option<Arc<routing::Router>> {
         self.router.clone()
@@ -280,7 +375,12 @@ impl AppState {
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(DEFAULT_MAX_QUEUED),
         };
+        // Smart classifier leg (Iter 26): unset `CLASSIFIER_MODEL`
+        // disables the smart ids (fail closed); anything else keeps the
+        // pure-local routing contract for every other id.
+        let classifier = ClassifierConfig::from_env(&base);
         let mut state = Self::with_limits(base, Timeouts::default(), limits);
+        state.classifier = classifier;
         // Provider-pinned upstreams (Iter 16): unset means the
         // provider's routes fail closed with provider_not_configured.
         // Baseten defaults to its public inference host (same host the
@@ -579,6 +679,49 @@ async fn ui_page(State(state): State<AppState>) -> Response {
             }
         }
     }
+    page.push_str("<h2>Smart classifier</h2>");
+    match state.classifier_config() {
+        None => page.push_str("<p>Classifier: <strong>off</strong> (set CLASSIFIER_MODEL) — smart ids fail closed.</p>"),
+        Some(config) => {
+            page.push_str(&format!(
+                "<p>Classifier: <strong>{}</strong> via {} — fallback tier {}, timeout {}ms, max tokens {}, input cap {} chars.</p>",
+                esc(&config.model),
+                esc(&config.base_url),
+                esc(&config.fallback_tier),
+                config.timeout.as_millis(),
+                config.max_tokens,
+                config.max_input_chars,
+            ));
+        }
+    }
+    {
+        let summary = state.metrics.classifier_summary();
+        page.push_str("<table><tr><th>result</th><th>tier</th><th>count</th></tr>");
+        for (result, tier, count) in &summary.counts {
+            if *count == 0 {
+                continue;
+            }
+            page.push_str(&format!(
+                "<tr><td>{}</td><td>{}</td><td>{}</td></tr>",
+                esc(result),
+                esc(tier),
+                count
+            ));
+        }
+        page.push_str("</table>");
+        let avg_ms = if summary.latency_count > 0 {
+            summary.latency_sum_ms / summary.latency_count as f64
+        } else {
+            0.0
+        };
+        page.push_str(&format!(
+            "<p>Legs: {} (avg {avg_ms:.1} ms) — fallbacks: low {} / lowest {}.</p>",
+            summary.latency_count, summary.fallback_low, summary.fallback_lowest,
+        ));
+        if !summary.last_error.is_empty() {
+            page.push_str(&format!("<p>Last error: {}</p>", esc(&summary.last_error)));
+        }
+    }
     page.push_str("<h2>Metrics</h2><pre>");
     page.push_str(&esc(&state.metrics.render()));
     page.push_str("</pre></body></html>");
@@ -707,6 +850,28 @@ async fn routed_completion(
     if let Some(model) = raw_model(&buffered) {
         if let Some((provider, _)) = routing::split_pinned(&model) {
             return forward_pinned(&state, permit, &headers, uri, buffered, &model, provider).await;
+        }
+    }
+    // Smart classifier ids (Iter 26): the `/fallback/` suffix never
+    // composes with smart — fail closed instead of leaking a
+    // gateway-owned id upstream. Other smart ids run the classifier
+    // leg first, then the normal tier dispatch with no session pin.
+    if let Some(model) = raw_model(&buffered) {
+        if routing::is_smart_fallback(&model) {
+            return rejection_response(&routing::RouteRejection {
+                code: "invalid_model",
+                message: format!(
+                    "{model:?} is not a virtual model: smart ids take no /fallback/ suffix"
+                ),
+            });
+        }
+        if let Some(smart) = routing::parse_smart(&model) {
+            let path = uri
+                .path_and_query()
+                .map(|path_and_query| path_and_query.as_str().to_string())
+                .unwrap_or_else(|| "/v1/chat/completions".to_string());
+            return smart_completion(&state, &headers, permit, &path, buffered, &model, smart)
+                .await;
         }
     }
     // Virtual requests keep a copy for one retry (Iter 13): the permit
@@ -885,6 +1050,506 @@ async fn routed_completion(
                 .headers_mut()
                 .insert(routing::PROVIDER_HEADER, value);
         }
+    }
+    response
+}
+
+/// Diagnostic context for one smart request (Iter 26): what the
+/// classifier chose (or fell back to), on which decision model, and how
+/// long the leg took. Surfaced in `x-pennyrouter-*` headers and logs —
+/// never the prompt.
+struct SmartCtx {
+    tier: String,
+    classifier: String,
+    confidence: Option<f64>,
+    latency_ms: u64,
+    fallback: bool,
+    result: &'static str,
+}
+
+impl SmartCtx {
+    fn new(
+        tier: String,
+        config: &ClassifierConfig,
+        confidence: Option<f64>,
+        latency: Duration,
+        fallback: bool,
+        result: &'static str,
+    ) -> Self {
+        Self {
+            tier,
+            classifier: config.model.clone(),
+            confidence,
+            latency_ms: latency.as_millis().min(u128::from(u64::MAX)) as u64,
+            fallback,
+            result,
+        }
+    }
+}
+
+/// Outcome of the classifier leg: a validated in-domain tier, or a
+/// failure with its metric slot. Only `AuthError` answers the user
+/// directly (502); every other failure serves the fallback tier.
+enum ClassifierOutcome {
+    Classified {
+        tier: String,
+        confidence: Option<f64>,
+        latency: Duration,
+    },
+    Failed {
+        result: ClassifierResult,
+        detail: String,
+        latency: Option<Duration>,
+    },
+}
+
+/// Run the classifier leg (Iter 26): one short non-streaming chat call
+/// to the configured decision model. No retry here — the completion
+/// leg owns the single retry budget, and a failed classification falls
+/// back immediately rather than stall the user request.
+async fn call_classifier(
+    state: &AppState,
+    headers: &HeaderMap,
+    json: &serde_json::Value,
+    smart: &routing::SmartId,
+    config: &ClassifierConfig,
+) -> ClassifierOutcome {
+    let fail =
+        |result: ClassifierResult, detail: String, start: Instant| ClassifierOutcome::Failed {
+            result,
+            detail,
+            latency: Some(start.elapsed()),
+        };
+    let start = Instant::now();
+    let set = classifier::tier_set(smart.max);
+    let Some(input) = classifier::extract_input(json) else {
+        return ClassifierOutcome::Failed {
+            result: ClassifierResult::NoInput,
+            detail: "request carried no classifiable input".to_string(),
+            latency: None,
+        };
+    };
+    let input = classifier::truncate_input(input, config.max_input_chars);
+    let request = classifier::build_request(
+        &config.model,
+        &set,
+        &input,
+        config.max_tokens,
+        smart.privacy,
+    );
+    // Auth for this leg only: the operator key wins when set,
+    // otherwise the caller's key rides along (BYOK preserved). With
+    // neither, the call goes out unauthenticated (e.g. a local
+    // classifier with no auth). Operators take note: without
+    // `CLASSIFIER_API_KEY`, a foreign `CLASSIFIER_BASE_URL` receives
+    // the caller's key — set the override for cross-vendor legs.
+    let auth = config
+        .api_key
+        .clone()
+        .map(|key| format!("Bearer {key}"))
+        .or_else(|| {
+            headers
+                .get(axum::http::header::AUTHORIZATION)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string)
+        });
+    let url = format!("{}/chat/completions", config.base_url);
+    let send = {
+        let mut send = state.client.post(&url).json(&request);
+        if let Some(auth) = auth {
+            send = send.header(axum::http::header::AUTHORIZATION, auth);
+        }
+        send
+    };
+    let (status, bytes) = match tokio::time::timeout(config.timeout, async {
+        let response = send.send().await.map_err(|_| "transport")?;
+        let status = response.status();
+        let bytes = response.bytes().await.map_err(|_| "transport")?;
+        Ok::<_, &'static str>((status, bytes))
+    })
+    .await
+    {
+        Err(_) => {
+            return fail(
+                ClassifierResult::Timeout,
+                format!(
+                    "classifier timed out after {}ms",
+                    config.timeout.as_millis()
+                ),
+                start,
+            );
+        }
+        Ok(Err(_)) => {
+            return fail(
+                ClassifierResult::Unavailable,
+                "classifier transport error".to_string(),
+                start,
+            )
+        }
+        Ok(Ok((status, bytes))) => (status, bytes),
+    };
+    let code = status.as_u16();
+    match code {
+        401 | 403 => {
+            let whose = if config.api_key.is_some() {
+                "the configured CLASSIFIER_API_KEY"
+            } else {
+                "the request credentials"
+            };
+            return fail(
+                ClassifierResult::AuthError,
+                format!("classifier upstream rejected {whose} (HTTP {code})"),
+                start,
+            );
+        }
+        429 | 500..=599 => {
+            return fail(
+                ClassifierResult::Unavailable,
+                format!("classifier upstream answered HTTP {code}"),
+                start,
+            );
+        }
+        200..=299 => {}
+        _ => {
+            return fail(
+                ClassifierResult::Invalid,
+                format!("classifier upstream answered HTTP {code}"),
+                start,
+            );
+        }
+    }
+    if bytes.len() > MAX_CLASSIFIER_BYTES {
+        return fail(
+            ClassifierResult::Invalid,
+            "classifier reply exceeds the size bound".to_string(),
+            start,
+        );
+    }
+    let content = serde_json::from_slice::<serde_json::Value>(&bytes)
+        .ok()
+        .and_then(|outer| {
+            outer
+                .get("choices")?
+                .as_array()?
+                .first()?
+                .get("message")?
+                .get("content")?
+                .as_str()
+                .map(str::to_string)
+        });
+    let Some(content) = content else {
+        return fail(
+            ClassifierResult::Invalid,
+            "classifier reply had no message content".to_string(),
+            start,
+        );
+    };
+    match classifier::parse_verdict(&content, &set) {
+        Ok(verdict) => ClassifierOutcome::Classified {
+            tier: verdict.tier,
+            confidence: verdict.confidence,
+            latency: start.elapsed(),
+        },
+        Err(error) => fail(
+            ClassifierResult::Invalid,
+            format!("classifier verdict rejected: {error:?}"),
+            start,
+        ),
+    }
+}
+
+/// Serve a smart request (Iter 26): classify, then dispatch through the
+/// normal tier path. The admission permit is held across both legs, so
+/// a smart request costs one slot for longer — bounded by the same
+/// concurrency limits as everything else.
+#[allow(clippy::too_many_arguments)]
+async fn smart_completion(
+    state: &AppState,
+    headers: &HeaderMap,
+    permit: UpstreamPermit,
+    path: &str,
+    buffered: Vec<u8>,
+    model_field: &str,
+    smart: routing::SmartId,
+) -> Response {
+    let json: serde_json::Value = match serde_json::from_slice(&buffered) {
+        Ok(json) => json,
+        Err(_) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_request_error",
+                "invalid_body",
+                "request body is not valid JSON".to_string(),
+            );
+        }
+    };
+    // Unconfigured means fail closed with no guess: a smart id must
+    // never decay into passthrough of a gateway-owned id.
+    let Some(config) = state.classifier_config() else {
+        state
+            .metrics
+            .classifier_report(ClassifierResult::NotConfigured, ClassifierTier::None);
+        state
+            .metrics
+            .classifier_error("smart classifier not configured (set CLASSIFIER_MODEL)");
+        log_line(
+            serde_json::json!({
+                "smart": true,
+                "model": model_field,
+                "classifier_result": "not_configured",
+            })
+            .to_string(),
+        );
+        return rejection_response(&routing::RouteRejection {
+            code: "classifier_not_configured",
+            message: "smart routing is not configured on this gateway (set CLASSIFIER_MODEL)"
+                .to_string(),
+        });
+    };
+    match call_classifier(state, headers, &json, &smart, &config).await {
+        ClassifierOutcome::Classified {
+            tier,
+            confidence,
+            latency,
+        } => {
+            state
+                .metrics
+                .classifier_report(ClassifierResult::Ok, ClassifierTier::of(&tier));
+            state.metrics.classifier_latency(latency);
+            let ctx = SmartCtx::new(tier.clone(), &config, confidence, latency, false, "ok");
+            log_smart(model_field, &ctx);
+            let Some(router) = &state.router else {
+                return with_smart_headers(
+                    rejection_response(&routing::RouteRejection {
+                        code: "no_eligible_offering",
+                        message: "no catalog is loaded, so no smart tier can serve".to_string(),
+                    }),
+                    &ctx,
+                );
+            };
+            // A rejected classified tier fails closed with the
+            // classifier headers attached — never silently re-picked
+            // into another tier.
+            let (rewritten, decision) =
+                match router.route_smart(&buffered, model_field, &tier, None) {
+                    Ok(route) => route,
+                    Err(rejection) => {
+                        return with_smart_headers(rejection_response(&rejection), &ctx)
+                    }
+                };
+            let base = state.upstream_base_url.clone();
+            let mut response = forward_upstream(
+                state,
+                &base,
+                permit,
+                &Method::POST,
+                path,
+                headers,
+                rewritten,
+            )
+            .await;
+            record_throttle(state, router, &decision, &response);
+            // One availability retry inside the classified tier only.
+            if is_retryable(response.status()) {
+                if let Ok((rewritten, retry_decision)) =
+                    router.route_smart(&buffered, model_field, &tier, Some(&decision.provider))
+                {
+                    let permit = match acquire_upstream_slot(state).await {
+                        Some(permit) => permit,
+                        None => {
+                            state.metrics.load_shed();
+                            return with_smart_headers(service_unavailable(), &ctx);
+                        }
+                    };
+                    let retry_base = state.upstream_base_url.clone();
+                    response = forward_upstream(
+                        state,
+                        &retry_base,
+                        permit,
+                        &Method::POST,
+                        path,
+                        headers,
+                        rewritten,
+                    )
+                    .await;
+                    record_throttle(state, router, &retry_decision, &response);
+                    return with_smart_headers(
+                        with_provider_header(response, &retry_decision.provider),
+                        &ctx,
+                    );
+                }
+            }
+            with_smart_headers(with_provider_header(response, &decision.provider), &ctx)
+        }
+        ClassifierOutcome::Failed {
+            result,
+            detail,
+            latency,
+        } => {
+            state
+                .metrics
+                .classifier_report(result, ClassifierTier::None);
+            if let Some(latency) = latency {
+                state.metrics.classifier_latency(latency);
+            }
+            state.metrics.classifier_error(detail.clone());
+            // Auth failures answer directly: no tier was chosen and no
+            // fallback should launder a credential problem.
+            if result == ClassifierResult::AuthError {
+                let response = error_response(
+                    StatusCode::BAD_GATEWAY,
+                    "invalid_request_error",
+                    "classifier_auth_error",
+                    detail,
+                );
+                return with_classifier_header(response, &config.model);
+            }
+            // Every other failure serves the one configured fallback
+            // tier. If that tier itself rejects, the rejection stands —
+            // the fallback is a value, not a chain.
+            let fallback = config.fallback_tier.clone();
+            state.metrics.smart_fallback(fallback == "lowest");
+            let ctx = SmartCtx::new(
+                fallback.clone(),
+                &config,
+                None,
+                latency.unwrap_or_default(),
+                true,
+                result.label(),
+            );
+            log_smart(model_field, &ctx);
+            let Some(router) = &state.router else {
+                return with_smart_headers(
+                    rejection_response(&routing::RouteRejection {
+                        code: "no_eligible_offering",
+                        message: "no catalog is loaded, so no smart tier can serve".to_string(),
+                    }),
+                    &ctx,
+                );
+            };
+            match router.route_smart(&buffered, model_field, &fallback, None) {
+                Ok((rewritten, decision)) => {
+                    let base = state.upstream_base_url.clone();
+                    let response = forward_upstream(
+                        state,
+                        &base,
+                        permit,
+                        &Method::POST,
+                        path,
+                        headers,
+                        rewritten,
+                    )
+                    .await;
+                    record_throttle(state, router, &decision, &response);
+                    with_smart_headers(with_provider_header(response, &decision.provider), &ctx)
+                }
+                Err(rejection) => with_smart_headers(rejection_response(&rejection), &ctx),
+            }
+        }
+    }
+}
+
+/// Log one smart request: tier, decision model, latency, fallback flag.
+/// The prompt, the verdict reasoning, and credentials never enter logs.
+fn log_smart(model_field: &str, ctx: &SmartCtx) {
+    log_line(
+        serde_json::json!({
+            "smart": true,
+            "model": model_field,
+            "classifier_model": ctx.classifier,
+            "classifier_tier": ctx.tier,
+            "classifier_confidence": ctx.confidence,
+            "classifier_latency_ms": ctx.latency_ms,
+            "classifier_fallback": ctx.fallback,
+            "classifier_result": ctx.result,
+        })
+        .to_string(),
+    );
+}
+
+/// Record 429 cool-down for a smart completion leg, mirroring the
+/// normal virtual path.
+fn record_throttle(
+    state: &AppState,
+    router: &routing::Router,
+    decision: &routing::Decision,
+    response: &Response,
+) {
+    if response.status() != StatusCode::TOO_MANY_REQUESTS {
+        return;
+    }
+    let headers = response.headers();
+    let retry_after = headers
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok());
+    let reset_ms = headers
+        .get("x-ratelimit-reset")
+        .and_then(|value| value.to_str().ok());
+    router.note_throttled(
+        &decision.model_id,
+        &decision.provider,
+        routing::throttle_until(retry_after, reset_ms),
+    );
+    state.metrics.throttled();
+}
+
+/// Attach the serving provider, like the normal routed path.
+fn with_provider_header(mut response: Response, provider: &str) -> Response {
+    if let Ok(value) = provider.parse() {
+        response
+            .headers_mut()
+            .insert(routing::PROVIDER_HEADER, value);
+    }
+    response
+}
+
+/// Attach the smart diagnostic headers. All optional, none leak the
+/// prompt: tier, decision model, numeric confidence, leg latency, and
+/// the fallback marker (present only when the fallback fired).
+fn with_smart_headers(mut response: Response, ctx: &SmartCtx) -> Response {
+    let headers = response.headers_mut();
+    if let Ok(value) = ctx.tier.parse() {
+        headers.insert(
+            axum::http::HeaderName::from_static("x-pennyrouter-smart-tier"),
+            value,
+        );
+    }
+    if let Ok(value) = ctx.classifier.parse() {
+        headers.insert(
+            axum::http::HeaderName::from_static("x-pennyrouter-smart-classifier"),
+            value,
+        );
+    }
+    if let Some(confidence) = ctx.confidence {
+        if let Ok(value) = format!("{confidence:.2}").parse() {
+            headers.insert(
+                axum::http::HeaderName::from_static("x-pennyrouter-classifier-confidence"),
+                value,
+            );
+        }
+    }
+    if let Ok(value) = ctx.latency_ms.to_string().parse() {
+        headers.insert(
+            axum::http::HeaderName::from_static("x-pennyrouter-classifier-latency-ms"),
+            value,
+        );
+    }
+    if ctx.fallback {
+        headers.insert(
+            axum::http::HeaderName::from_static("x-pennyrouter-classifier-fallback"),
+            axum::http::HeaderValue::from_static("true"),
+        );
+    }
+    response
+}
+
+/// Attach only the classifier identity (auth failures chose no tier).
+fn with_classifier_header(mut response: Response, classifier: &str) -> Response {
+    if let Ok(value) = classifier.parse() {
+        response.headers_mut().insert(
+            axum::http::HeaderName::from_static("x-pennyrouter-smart-classifier"),
+            value,
+        );
     }
     response
 }
@@ -1512,6 +2177,23 @@ fn rejection_response(rejection: &routing::RouteRejection) -> Response {
         ),
         "invalid_body" => error_response(
             StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            rejection.code,
+            rejection.message.clone(),
+        ),
+        // Unsupported id shapes (e.g. smart with a fallback suffix)
+        // are caller-fixable like a bad body (Iter 26).
+        "invalid_model" => error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            rejection.code,
+            rejection.message.clone(),
+        ),
+        // The classifier leg rejected the credentials: caller-fixable
+        // (BYOK) or operator-fixable (CLASSIFIER_API_KEY), reported as
+        // a 502 like other upstream credential failures (Iter 26).
+        "classifier_auth_error" => error_response(
+            StatusCode::BAD_GATEWAY,
             "invalid_request_error",
             rejection.code,
             rejection.message.clone(),

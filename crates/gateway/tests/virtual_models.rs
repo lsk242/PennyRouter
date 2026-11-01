@@ -199,7 +199,7 @@ fn mock_app(
 }
 
 #[tokio::test]
-async fn models_menu_lists_exactly_the_ten_virtual_ids() {
+async fn models_menu_lists_exactly_the_fourteen_virtual_ids() {
     let db = scratch_db("menu");
     build_db(&db);
     let mock = spawn_mock(mock_app(
@@ -236,7 +236,11 @@ async fn models_menu_lists_exactly_the_ten_virtual_ids() {
             "openrouter/pair/privacy/decision/free",
             "openrouter/pair/privacy/free",
             "openrouter/pair/privacy/low",
+            "openrouter/pair/privacy/smart",
+            "openrouter/pair/privacy/smart/max",
             "openrouter/pair/privacy/think",
+            "openrouter/pair/smart",
+            "openrouter/pair/smart/max",
             "openrouter/pair/think",
         ]
     );

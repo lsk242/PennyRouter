@@ -189,3 +189,47 @@ session.
   (400) — never a leak to OpenRouter, never a guessed URL. Pinned
   requests are exactly-once (no retry, no throttle steering) and
   carry the provider in `x-pennyrouter-provider` like routed ones.
+
+## Smart classifier (Iter 26)
+
+`openrouter/pair/smart` (tiers `free`/`lowest`/`low`),
+`openrouter/pair/smart/max` (plus `think`), and the `privacy/`
+variants call a decision model on the request path to pick the
+cheapest tier that can answer well. This is the one explicit,
+scoped exception to the realtime contract below: the caller opts
+into the extra leg by choosing the id. Every other id keeps pure
+local lookup with no network on the routing path.
+
+- Leg 1 (classify): one short non-streaming chat call to
+  `CLASSIFIER_MODEL` (`CLASSIFIER_BASE_URL`, default
+  `OPENROUTER_BASE_URL`), `temperature: 0`,
+  `response_format: {type: "json_object"}`, capped output
+  (`CLASSIFIER_MAX_TOKENS`, default 64) and input
+  (`CLASSIFIER_MAX_INPUT_CHARS`, default 32000, oldest dropped
+  first). The request carries the tier gate plus the buffered input
+  (chat `messages`, or Responses `input`); the reply must be exactly
+  `{"tier": ...}` inside the gate (`confidence`/`reasoning`
+  optional, anything else rejected).
+- Leg 2 (complete): the normal tier dispatch for the classified
+  tier — budget, `only`/`ignore`, tool-awareness, quality floors,
+  throttle-skip all still apply, and a rejected classified tier
+  fails closed (never silently re-picked into another tier). One
+  availability retry stays inside the classified tier.
+- No session pinning anywhere on the smart path: the classifier runs
+  per request, and the final pick never consults a pin (a stale pin
+  must not override the classifier).
+- Failures: `CLASSIFIER_MODEL` unset → `classifier_not_configured`
+  (503, fail closed, no guess); classifier 401/403 →
+  `classifier_auth_error` (502); timeout/429/5xx/bad verdict/empty
+  input → serve the one `CLASSIFIER_FALLBACK_TIER` (`low`|`lowest`,
+  default `low`), marked with `x-pennyrouter-classifier-fallback:
+  true`. The classifier leg itself never retries.
+- Auth: `CLASSIFIER_API_KEY` wins when set, else the incoming
+  `Authorization` rides along (BYOK preserved), else no auth. A
+  foreign classifier base without `CLASSIFIER_API_KEY` receives the
+  caller's key — set the override for cross-vendor legs.
+- `privacy/smart[/max]` enforces `zdr: true` +
+  `data_collection: "deny"` on both legs.
+- `smart` with a `/fallback/` suffix is rejected (`invalid_model`,
+  400): the classifier replaces the chain, so the forms never
+  compose.
