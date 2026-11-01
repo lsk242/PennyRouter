@@ -260,10 +260,13 @@ impl AppState {
     }
 
     /// State for the real server: upstream from `OPENROUTER_BASE_URL`,
-    /// defaulting to OpenRouter; routing from `CATALOG_DB` when set and
-    /// loadable, otherwise plain passthrough. Concurrency bounds from
-    /// `UPSTREAM_MAX_CONCURRENT` / `UPSTREAM_MAX_QUEUED`, defaulting to
-    /// the compiled defaults on missing or unparsable values.
+    /// defaulting to OpenRouter; routing from `CATALOG_DB` when set.
+    /// An unloadable catalog at boot still attaches a standby router
+    /// (Iter 23) — requests pass through until the periodic reload
+    /// heals it, instead of staying dark until a restart.
+    /// Concurrency bounds from `UPSTREAM_MAX_CONCURRENT` /
+    /// `UPSTREAM_MAX_QUEUED`, defaulting to the compiled defaults on
+    /// missing or unparsable values.
     pub fn from_env() -> Self {
         let base = std::env::var("OPENROUTER_BASE_URL")
             .unwrap_or_else(|_| "https://openrouter.ai/api".to_string());
@@ -303,8 +306,8 @@ impl AppState {
             Ok(path) => match routing::Router::load(&path) {
                 Ok(router) => state.with_router(Arc::new(router)),
                 Err(e) => {
-                    eprintln!("gateway: routing disabled ({e}), passing through");
-                    state
+                    eprintln!("gateway: routing standby ({e}), passing through until reload heals");
+                    state.with_router(Arc::new(routing::Router::standby(&path)))
                 }
             },
         }
@@ -449,7 +452,7 @@ async fn landing(State(state): State<AppState>) -> Response {
         </body></html>",
         esc(build_version()),
         esc(build_hash()),
-        if state.router_handle().is_some() {
+        if state.router_handle().is_some_and(|r| r.is_ready()) {
             "on (catalog)"
         } else {
             "off (passthrough)"
