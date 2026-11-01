@@ -24,3 +24,4 @@ All product documentation lives here, Markdown only.
 - [review/PennyRouter-Rust-resource-efficiency-review.md](review/PennyRouter-Rust-resource-efficiency-review.md) — Rust and resource-efficiency review.
 - [review-2026-10-31.md](review-2026-10-31.md) — full code review notes (2026-10-31).
 - [proposals/2026-11-01-openrouter-interface.md](proposals/2026-11-01-openrouter-interface.md) — proposal: OpenRouter-native interface, DNS vs `baseURL`, Opencode integration.
+- [proposals/2026-11-02-smart-classifier.md](proposals/2026-11-02-smart-classifier.md) — proposal: live per-request classifier `openrouter/pair/smart` (smart/max, privacy variants, failure contract).
