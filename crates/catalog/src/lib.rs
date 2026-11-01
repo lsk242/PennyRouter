@@ -19,7 +19,7 @@ mod store;
 mod sync;
 
 pub use artifact::{now_rfc3339, publish, sha256_hex, verify, Manifest};
-pub use fetch::{fetch_openrouter, Fetched};
+pub use fetch::{fetch_openrouter, fetch_openrouter_extra, Fetched};
 pub use judge::{
     endpoint_tag, run_judging, run_judging_selected, Judge, JudgeIdentity, JudgeSummary, NullJudge,
     RecordedJudge,

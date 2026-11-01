@@ -60,6 +60,12 @@ pub struct Offering {
     /// when unknown (old catalogs). Tool-bearing requests match only
     /// `Some(true)`; anything else is unaffected.
     pub supports_tools: Option<bool>,
+    /// Per-endpoint decision-modality support (Iter 24): `Some(true)`
+    /// when the parent model's `architecture.output_modalities` lists
+    /// `"decisions"`, `Some(false)` when it lists modalities but not
+    /// decisions, `None` when unknown. The `decision` tier matches
+    /// only `Some(true)`.
+    pub supports_decisions: Option<bool>,
 }
 
 /// In-memory routing snapshot: model id to its offerings in load order.
@@ -149,19 +155,23 @@ fn fresh_seed() -> u64 {
 pub const FREE_MODEL: &str = "openrouter/free";
 
 /// Virtual tiers (Iter 13): `free` = zero-cost offering, `low` =
-/// cheapest basic offering, `think` = best-quality offering. Tiers
-/// compare by the documented price metric (blended input/output/cache
-/// effective cost) with eligibility before price; FP resolution is a
-/// separate class, never a silent substitute.
+/// cheapest basic offering, `think` = best-quality offering,
+/// `decision` (Iter 24) = cheapest decisions-capable offering
+/// (behavior-scoring models). Tiers compare by the documented price
+/// metric (blended input/output/cache effective cost) with
+/// eligibility before price; FP resolution is a separate class,
+/// never a silent substitute.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VirtualTier {
     Free,
     Low,
     Think,
+    Decision,
 }
 
-/// A virtual model id: `<provider>/pair/[privacy/]<free|low|think>`
-/// plus the free-fallback form `<provider>/pair/[privacy/]free/\
+/// A virtual model id: `<provider>/pair/[privacy/]<free|low|think|\
+/// decision>` with an optional `/free` cost scope on `decision`, plus
+/// the fallback form `<provider>/pair/[privacy/]<free|decision/free>/\
 /// fallback/<tier>` (Iter 21). The provider segment is first so
 /// future providers slot in; only OpenRouter exists today.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -170,50 +180,61 @@ pub struct VirtualModel {
     /// Privacy variant: zero-retention fields enforced on the wire
     /// until the index carries privacy signals (Iter 13).
     pub privacy: bool,
-    /// Free-fallback target tier name (`low`, `think`, `lowest`, …),
-    /// present only on `free/fallback/<tier>` ids. Resolved through
-    /// [`Router::decide_tier`], so future tiers plug in with no
-    /// fallback-code change.
+    /// Zero-cost scope (Iter 24): only on `decision/free` ids. The
+    /// `free` tier is free-only by definition; `low`/`think` are
+    /// paid-only by definition.
+    pub free_only: bool,
+    /// Fallback target tier name (`low`, `think`, `lowest`, …),
+    /// present only on `<free|decision/free>/fallback/<tier>` ids.
+    /// Resolved through [`Router::decide_tier`], so future tiers plug
+    /// in with no fallback-code change.
     pub fallback: Option<String>,
 }
 
 /// Parse a virtual model id. Anything else (including unknown
 /// providers or tiers) returns `None` and passes through untouched.
-/// The fallback suffix is only valid on `free` ids.
+/// The fallback suffix is only valid on `free` and `decision/free`
+/// ids.
 pub fn parse_virtual(model_field: &str) -> Option<VirtualModel> {
     let rest = model_field.strip_prefix("openrouter/pair/")?;
     let (privacy, rest) = match rest.strip_prefix("privacy/") {
         Some(rest) => (true, rest),
         None => (false, rest),
     };
-    let (tier, fallback) = match rest.split_once("/fallback/") {
-        Some(("free", target)) => (VirtualTier::Free, Some(target.to_string())),
+    let (tier, free_only, fallback) = match rest.split_once("/fallback/") {
+        Some(("free", target)) => (VirtualTier::Free, false, Some(target.to_string())),
+        Some(("decision/free", target)) => (VirtualTier::Decision, true, Some(target.to_string())),
         Some(_) => return None,
-        None => (
-            match rest {
-                "free" => VirtualTier::Free,
-                "low" => VirtualTier::Low,
-                "think" => VirtualTier::Think,
-                _ => return None,
-            },
-            None,
-        ),
+        None => match rest {
+            "free" => (VirtualTier::Free, false, None),
+            "low" => (VirtualTier::Low, false, None),
+            "think" => (VirtualTier::Think, false, None),
+            "decision" => (VirtualTier::Decision, false, None),
+            "decision/free" => (VirtualTier::Decision, true, None),
+            _ => return None,
+        },
     };
     Some(VirtualModel {
         tier,
         privacy,
+        free_only,
         fallback,
     })
 }
 
-/// Canonical virtual ids served by `GET /v1/models` (Iter 13).
-pub const VIRTUAL_MODELS: [&str; 6] = [
+/// Canonical virtual ids served by `GET /v1/models` (Iter 13; decision
+/// ids from Iter 24).
+pub const VIRTUAL_MODELS: [&str; 10] = [
     "openrouter/pair/free",
     "openrouter/pair/low",
     "openrouter/pair/think",
+    "openrouter/pair/decision",
+    "openrouter/pair/decision/free",
     "openrouter/pair/privacy/free",
     "openrouter/pair/privacy/low",
     "openrouter/pair/privacy/think",
+    "openrouter/pair/privacy/decision",
+    "openrouter/pair/privacy/decision/free",
 ];
 
 /// Fallback cool-down when a 429 carries no usable timing headers
@@ -902,6 +923,9 @@ impl Router {
                 VirtualTier::Think,
             ),
             "lowest" => self.decide_lowest(snapshot, authorization, constraints, model_field),
+            "decision" => {
+                self.decide_decision(snapshot, authorization, constraints, model_field, false)
+            }
             _ => Err(RouteRejection {
                 code: "no_eligible_offering",
                 message: format!("unknown fallback tier {tier:?}"),
@@ -976,6 +1000,26 @@ impl Router {
                     }
                 }
             }
+            VirtualTier::Decision => {
+                // Same shape as the free leg: the `/free` scope serves
+                // first, then the fallback tier when configured. The
+                // bare scope has no fallback form (parse rejects it),
+                // so its rejection passes through unchanged.
+                let first = self.decide_decision(
+                    snapshot,
+                    authorization,
+                    constraints,
+                    model_field,
+                    virtual_model.free_only,
+                );
+                match (first, &virtual_model.fallback) {
+                    (Ok(decision), _) => Ok(decision),
+                    (Err(rejection), None) => Err(rejection),
+                    (Err(_), Some(target)) => {
+                        self.decide_tier(snapshot, target, model_field, authorization, constraints)
+                    }
+                }
+            }
             tier => {
                 self.decide_ordered_virtual(snapshot, authorization, constraints, model_field, tier)
             }
@@ -991,6 +1035,10 @@ impl Router {
             VirtualTier::Free => 0,
             VirtualTier::Low => 1,
             VirtualTier::Think => 3,
+            // Decision never routes through the floored ordered path
+            // (it has its own pick without a judged floor, like
+            // `lowest`); the arm exists for exhaustiveness.
+            VirtualTier::Decision => 0,
         }
     }
 
@@ -1012,6 +1060,8 @@ impl Router {
             VirtualTier::Free => "free",
             VirtualTier::Low => "low",
             VirtualTier::Think => "think",
+            // Same note as `tier_floor`: unreachable via this path.
+            VirtualTier::Decision => "decision",
         };
         let base: Vec<&Offering> = snapshot
             .models
@@ -1215,6 +1265,113 @@ impl Router {
             tag: pick.tag.clone(),
             precision_class: pick.precision_class.clone(),
             orientation: Orientation::Lowest,
+            sticky: false,
+        })
+    }
+
+    /// Cross-model pick for the `decision` tier (Iter 24): cheapest
+    /// decisions-capable offering (behavior-scoring models), any cost
+    /// by default, zero-cost only under the `/free` scope. No quality
+    /// floor (decision models are unjudged, like `lowest`) and no
+    /// precision-class requirement (scoring endpoints report
+    /// `unknown` quantization; capability match replaces it). Same
+    /// tool, budget, throttle, stickiness, and deterministic
+    /// tie-breaks as the other cross-model picks.
+    fn decide_decision(
+        &self,
+        snapshot: &Snapshot,
+        authorization: Option<&str>,
+        constraints: &ProviderConstraints,
+        session_ns: &str,
+        free_only: bool,
+    ) -> Result<Decision, RouteRejection> {
+        let scope = if free_only { "free " } else { "" };
+        let now = now_unix();
+        let ranking = self.ranking.read().unwrap_or_else(|e| e.into_inner());
+        let base: Vec<&Offering> = snapshot
+            .models
+            .values()
+            .flatten()
+            .filter(|o| {
+                constraints.allows(&o.provider_name)
+                    && o.supports_decisions == Some(true)
+                    // Tiers are disjoint by design, like `low`/`think`:
+                    // the bare scope serves paid only, zero-cost serves
+                    // the `/free` scope.
+                    && (free_only || inline_cost(o).is_some_and(|cost| cost > 0.0))
+                    && (!free_only
+                        || free_eligible(ranking.as_ref(), &o.model_id, o, now))
+            })
+            .collect();
+        if base.is_empty() {
+            return Err(RouteRejection {
+                code: "no_eligible_offering",
+                message: format!("no decisions-capable {scope}offering is currently eligible"),
+            });
+        }
+        let base: Vec<&Offering> = base
+            .into_iter()
+            .filter(|o| constraints.tool_allows(o))
+            .collect();
+        if base.is_empty() {
+            return Err(tools_unsupported());
+        }
+        let budgeted: Vec<&Offering> = base
+            .into_iter()
+            .filter(|o| constraints.budget_allows(o))
+            .collect();
+        if budgeted.is_empty() {
+            return Err(RouteRejection {
+                code: "budget_exceeded",
+                message: format!("no decisions-capable {scope}offering fits the price ceiling"),
+            });
+        }
+        let candidates = self.skip_throttled(budgeted);
+        let key = authorization.map(|auth| self.session_key(auth, session_ns));
+        if let Some(key) = &key {
+            if let Some(pin) = self.lookup_pin(key) {
+                if let Some(pick) = candidates.iter().find(|o| {
+                    o.provider_name == pin.provider && o.precision_class == pin.precision_class
+                }) {
+                    return Ok(Decision {
+                        model_id: pick.model_id.clone(),
+                        provider: pick.provider_name.clone(),
+                        tag: pick.tag.clone(),
+                        precision_class: pick.precision_class.clone(),
+                        orientation: Orientation::Default,
+                        sticky: true,
+                    });
+                }
+            }
+        }
+        let pick = candidates
+            .into_iter()
+            .min_by(|a, b| {
+                inline_cost(a)
+                    .partial_cmp(&inline_cost(b))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.model_id.cmp(&b.model_id))
+                    .then_with(|| a.provider_name.cmp(&b.provider_name))
+            })
+            .ok_or_else(|| RouteRejection {
+                code: "no_eligible_offering",
+                message: format!("no decisions-capable {scope}offering is currently eligible"),
+            })?;
+        if let Some(key) = key {
+            self.store_pin(
+                key,
+                Pin {
+                    provider: pick.provider_name.clone(),
+                    precision_class: pick.precision_class.clone(),
+                },
+            );
+        }
+        Ok(Decision {
+            model_id: pick.model_id.clone(),
+            provider: pick.provider_name.clone(),
+            tag: pick.tag.clone(),
+            precision_class: pick.precision_class.clone(),
+            orientation: Orientation::Default,
             sticky: false,
         })
     }
@@ -1751,6 +1908,7 @@ fn offering_from(ep: &EndpointRow) -> Offering {
         quality_tier: ep.quality_tier.clone(),
         quality_score: ep.quality_score,
         supports_tools: ep.supports_tools.map(|v| v != 0),
+        supports_decisions: ep.supports_decisions.map(|v| v != 0),
     }
 }
 
@@ -1959,6 +2117,7 @@ mod tests {
             quality_tier: tier.map(str::to_string),
             quality_score: None,
             supports_tools: None,
+            supports_decisions: None,
         }
     }
 
@@ -2500,6 +2659,7 @@ mod tests {
             Some(VirtualModel {
                 tier: VirtualTier::Low,
                 privacy: false,
+                free_only: false,
                 fallback: None
             })
         );
@@ -2508,16 +2668,56 @@ mod tests {
             Some(VirtualModel {
                 tier: VirtualTier::Think,
                 privacy: true,
+                free_only: false,
                 fallback: None
             })
         );
+        assert_eq!(
+            parse_virtual("openrouter/pair/decision"),
+            Some(VirtualModel {
+                tier: VirtualTier::Decision,
+                privacy: false,
+                free_only: false,
+                fallback: None
+            })
+        );
+        assert_eq!(
+            parse_virtual("openrouter/pair/decision/free"),
+            Some(VirtualModel {
+                tier: VirtualTier::Decision,
+                privacy: false,
+                free_only: true,
+                fallback: None
+            })
+        );
+        assert_eq!(
+            parse_virtual("openrouter/pair/decision/free/fallback/low"),
+            Some(VirtualModel {
+                tier: VirtualTier::Decision,
+                privacy: false,
+                free_only: true,
+                fallback: Some("low".to_string())
+            })
+        );
+        assert_eq!(
+            parse_virtual("openrouter/pair/privacy/decision/free/fallback/think"),
+            Some(VirtualModel {
+                tier: VirtualTier::Decision,
+                privacy: true,
+                free_only: true,
+                fallback: Some("think".to_string())
+            })
+        );
+        // Fallback stays exclusive to the free scopes.
+        assert_eq!(parse_virtual("openrouter/pair/decision/fallback/low"), None);
+        assert_eq!(parse_virtual("openrouter/pair/low/fallback/low"), None);
         assert_eq!(parse_virtual("azure/pair/free"), None);
         assert_eq!(parse_virtual("openrouter/pair/ultra"), None);
         assert_eq!(parse_virtual("openrouter/pair/privacy"), None);
         assert_eq!(parse_virtual("openrouter/pair/free/extra"), None);
         assert_eq!(parse_virtual("openrouter/free"), None);
         assert_eq!(parse_virtual("meta/muse-spark"), None);
-        assert_eq!(VIRTUAL_MODELS.len(), 6);
+        assert_eq!(VIRTUAL_MODELS.len(), 10);
         assert!(VIRTUAL_MODELS.iter().all(|id| parse_virtual(id).is_some()));
     }
 

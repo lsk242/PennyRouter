@@ -21,12 +21,23 @@ pub struct Fetched {
 /// models-list fetch aborts (no publish; the last good artifact keeps
 /// serving). A failed endpoints fetch skips just that model.
 pub fn fetch_openrouter(base_url: &str) -> Result<Fetched, Error> {
+    fetch_openrouter_extra(base_url, &[])
+}
+
+/// List fetch plus caller-nominated extras (Iter 24): the models
+/// list omits some servable models (e.g. scoring models with
+/// non-text output modalities), so `extra_ids` names ids to fetch
+/// even when absent from the list. Already-listed ids are not
+/// refetched; failed extras land in `skipped` like the rest. The
+/// endpoints body carries the model object, which joins the models
+/// array (sans its nested endpoints) so sync stores it whole.
+pub fn fetch_openrouter_extra(base_url: &str, extra_ids: &[String]) -> Result<Fetched, Error> {
     let base = base_url.trim_end_matches('/');
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(60))
         .build()?;
     let models = get_bytes(&client, &format!("{base}/v1/models"))?;
-    let root: Value = serde_json::from_slice(&models)?;
+    let mut root: Value = serde_json::from_slice(&models)?;
     let ids: Vec<String> = root
         .get("data")
         .and_then(Value::as_array)
@@ -42,6 +53,38 @@ pub fn fetch_openrouter(base_url: &str) -> Result<Fetched, Error> {
             Err(_) => skipped.push(id.clone()),
         }
     }
+    for id in extra_ids {
+        if ids.iter().any(|listed| listed == id) {
+            continue;
+        }
+        match get_bytes(&client, &format!("{base}/v1/models/{id}/endpoints")) {
+            Ok(body) => {
+                // The model row must exist before its endpoints (foreign
+                // key): keep the pair only when the body carries both.
+                let mut stored = false;
+                if let Ok(extra) = serde_json::from_slice::<Value>(&body) {
+                    if let Some(object) = extra.get("data") {
+                        let mut model = object.clone();
+                        if let Some(map) = model.as_object_mut() {
+                            map.remove("endpoints");
+                        }
+                        if let Some(list) = root.get_mut("data").and_then(Value::as_array_mut) {
+                            list.push(model);
+                            stored = true;
+                        }
+                    }
+                }
+                if stored {
+                    endpoints.push((id.clone(), body));
+                } else {
+                    skipped.push(id.clone());
+                }
+            }
+            Err(_) => skipped.push(id.clone()),
+        }
+    }
+    let models =
+        serde_json::to_vec(&root).map_err(|e| Error::Fetch(format!("re-serialize models: {e}")))?;
     Ok(Fetched {
         models,
         endpoints,

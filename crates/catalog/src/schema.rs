@@ -1,9 +1,9 @@
-//! Schema v4: fixed core columns + raw JSON payloads + indexed columns
+//! Schema v5: fixed core columns + raw JSON payloads + indexed columns
 //! (deterministic from Phase 2a, model-judged from Phase 2b, tool
-//! support from Iter 22).
+//! support from Iter 22, decision-modality support from Iter 24).
 
 /// Current schema version, recorded in `sync_meta` on init.
-pub const SCHEMA_VERSION: u32 = 4;
+pub const SCHEMA_VERSION: u32 = 5;
 
 pub const DDL: &str = "
 CREATE TABLE IF NOT EXISTS models (
@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS endpoints (
     promo_discount    REAL,
     processed_at      TEXT,
     supports_tools    INTEGER,
+    supports_decisions INTEGER,
     quality_tier      TEXT,
     quality_score     REAL,
     judged_at         TEXT,
@@ -53,6 +54,7 @@ pub const ENDPOINT_INDEXED_COLUMNS: &[(&str, &str)] = &[
     ("promo_discount", "REAL"),
     ("processed_at", "TEXT"),
     ("supports_tools", "INTEGER"),
+    ("supports_decisions", "INTEGER"),
     ("quality_tier", "TEXT"),
     ("quality_score", "REAL"),
     ("judged_at", "TEXT"),

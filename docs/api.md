@@ -70,8 +70,10 @@ From Iter 7, `openrouter/free` routes to any free offering (rewritten
 to its backend id) or passes through untouched when nothing is free.
 From Iter 13, the virtual catalog `openrouter/pair/[privacy/]<free|low|think>`
 is the stable menu (see [routing.md](routing.md)): `free` = zero-cost,
-`low` = cheapest basic, `think` = best quality; `privacy/` variants
-additionally enforce zero-retention provider fields. Virtual requests
+`low` = cheapest basic, `think` = best quality, `decision` =
+cheapest decisions-capable (plus a `decision/free` zero-cost scope);
+`privacy/` variants additionally enforce zero-retention provider
+fields. Virtual requests
 retry once on another provider when the first attempt is retryable
 (429/502/503/504); anything else keeps exactly-once semantics.
 From Iter 14, virtual requests that cannot be served fail closed
