@@ -23,3 +23,4 @@ All product documentation lives here, Markdown only.
 - [review/PennyRouter-product-viability-review.md](review/PennyRouter-product-viability-review.md) — product viability review for free-first coding use.
 - [review/PennyRouter-Rust-resource-efficiency-review.md](review/PennyRouter-Rust-resource-efficiency-review.md) — Rust and resource-efficiency review.
 - [review-2026-10-31.md](review-2026-10-31.md) — full code review notes (2026-10-31).
+- [proposals/2026-11-01-openrouter-interface.md](proposals/2026-11-01-openrouter-interface.md) — proposal: OpenRouter-native interface, DNS vs `baseURL`, Opencode integration.
