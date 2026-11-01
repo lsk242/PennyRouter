@@ -154,33 +154,50 @@ pub enum VirtualTier {
     Think,
 }
 
-/// A virtual model id: `<provider>/pair/[privacy/]<free|low|think>`.
-/// The provider segment is first so future providers slot in; only
-/// OpenRouter exists today.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A virtual model id: `<provider>/pair/[privacy/]<free|low|think>`
+/// plus the free-fallback form `<provider>/pair/[privacy/]free/\
+/// fallback/<tier>` (Iter 21). The provider segment is first so
+/// future providers slot in; only OpenRouter exists today.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VirtualModel {
     pub tier: VirtualTier,
     /// Privacy variant: zero-retention fields enforced on the wire
     /// until the index carries privacy signals (Iter 13).
     pub privacy: bool,
+    /// Free-fallback target tier name (`low`, `think`, `lowest`, …),
+    /// present only on `free/fallback/<tier>` ids. Resolved through
+    /// [`Router::decide_tier`], so future tiers plug in with no
+    /// fallback-code change.
+    pub fallback: Option<String>,
 }
 
 /// Parse a virtual model id. Anything else (including unknown
 /// providers or tiers) returns `None` and passes through untouched.
+/// The fallback suffix is only valid on `free` ids.
 pub fn parse_virtual(model_field: &str) -> Option<VirtualModel> {
     let rest = model_field.strip_prefix("openrouter/pair/")?;
-    let (privacy, tier) = match rest.split_once('/') {
-        Some(("privacy", tier)) => (true, tier),
+    let (privacy, rest) = match rest.strip_prefix("privacy/") {
+        Some(rest) => (true, rest),
         None => (false, rest),
-        _ => return None,
     };
-    let tier = match tier {
-        "free" => VirtualTier::Free,
-        "low" => VirtualTier::Low,
-        "think" => VirtualTier::Think,
-        _ => return None,
+    let (tier, fallback) = match rest.split_once("/fallback/") {
+        Some(("free", target)) => (VirtualTier::Free, Some(target.to_string())),
+        Some(_) => return None,
+        None => (
+            match rest {
+                "free" => VirtualTier::Free,
+                "low" => VirtualTier::Low,
+                "think" => VirtualTier::Think,
+                _ => return None,
+            },
+            None,
+        ),
     };
-    Some(VirtualModel { tier, privacy })
+    Some(VirtualModel {
+        tier,
+        privacy,
+        fallback,
+    })
 }
 
 /// Canonical virtual ids served by `GET /v1/models` (Iter 13).
@@ -193,10 +210,88 @@ pub const VIRTUAL_MODELS: [&str; 6] = [
     "openrouter/pair/privacy/think",
 ];
 
-/// Throttled providers stay out of virtual picks for this long (Iter
-/// 13): 429 history steers around exhausted free offerings without
-/// any live rate-limit feed.
+/// Fallback cool-down when a 429 carries no usable timing headers
+/// (Iter 13 legacy default, kept by Iter 21).
 const THROTTLE_TTL: Duration = Duration::from_secs(60);
+
+/// Upper bound on any single cool-down (Iter 21): a garbage header
+/// value must not park an offering for years.
+const MAX_COOLDOWN: Duration = Duration::from_secs(24 * 3600);
+
+/// Cool-down expiry from upstream 429 headers (Iter 21): `Retry-After`
+/// (delay seconds or HTTP date) wins, else `X-RateLimit-Reset`
+/// (epoch milliseconds, as OpenRouter sends), else the flat default.
+/// Pure function of the two header values so tests pin it without
+/// network.
+pub fn throttle_until(retry_after: Option<&str>, reset_ms: Option<&str>) -> Instant {
+    let now = Instant::now();
+    if let Some(value) = retry_after {
+        let value = value.trim();
+        if let Ok(secs) = value.parse::<u64>() {
+            return now + MAX_COOLDOWN.min(Duration::from_secs(secs));
+        }
+        if let Some(until) = parse_http_date(value) {
+            return until.min(now + MAX_COOLDOWN);
+        }
+    }
+    if let Some(value) = reset_ms {
+        if let Ok(ms) = value.trim().parse::<u64>() {
+            let until = Instant::now()
+                + Duration::from_millis(ms.saturating_sub(now_unix() * 1000)).min(MAX_COOLDOWN);
+            return until.max(now);
+        }
+    }
+    now + THROTTLE_TTL
+}
+
+/// Parse an IMF-fixdate (`Sun, 06 Nov 1994 08:49:37 GMT`, the format
+/// `Retry-After` dates use) into an `Instant`. Anything else is
+/// rejected — the caller falls back to the flat default.
+fn parse_http_date(value: &str) -> Option<Instant> {
+    let value = value.trim();
+    let (_weekday, rest) = value.split_once(", ")?;
+    let mut parts = rest.split_whitespace();
+    let day: u64 = parts.next()?.parse().ok()?;
+    let month = match parts.next()? {
+        "Jan" => 1,
+        "Feb" => 2,
+        "Mar" => 3,
+        "Apr" => 4,
+        "May" => 5,
+        "Jun" => 6,
+        "Jul" => 7,
+        "Aug" => 8,
+        "Sep" => 9,
+        "Oct" => 10,
+        "Nov" => 11,
+        "Dec" => 12,
+        _ => return None,
+    };
+    let year: i64 = parts.next()?.parse().ok()?;
+    let time = parts.next()?;
+    if parts.next()? != "GMT" || parts.next().is_some() {
+        return None;
+    }
+    let mut clock = time.split(':');
+    let hour: i64 = clock.next()?.parse().ok()?;
+    let min: i64 = clock.next()?.parse().ok()?;
+    let sec: i64 = clock.next()?.parse().ok()?;
+    if clock.next().is_some() {
+        return None;
+    }
+    // Days from civil date (Howard Hinnant's algorithm), then Unix time.
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = y.div_euclid(400);
+    let yoe = (y - era * 400) as u64;
+    let mp = ((month as i64 + 9) % 12) as u64;
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era as u64 * 146097 + doe - 719468;
+    let stamp = days * 86400 + (hour as u64) * 3600 + (min as u64) * 60 + sec as u64;
+    let now_ms = now_unix() * 1000;
+    let target_ms = stamp.saturating_mul(1000);
+    Some(Instant::now() + Duration::from_millis(target_ms.saturating_sub(now_ms)))
+}
 
 /// Upper bound on remembered throttles; past it, expiry is reaped and
 /// only then is new information dropped.
@@ -371,18 +466,17 @@ impl Router {
         })
     }
 
-    /// Record a 429 from `(model_id, provider)` (Iter 13): virtual
-    /// picks steer around it until the cool-down elapses.
-    pub fn note_throttled(&self, model_id: &str, provider: &str) {
+    /// Record a 429 from `(model_id, provider)` (Iter 13, header
+    /// expiry since Iter 21): virtual picks steer around it until
+    /// `until` elapses; the caller derives it from the response
+    /// headers via [`throttle_until`].
+    pub fn note_throttled(&self, model_id: &str, provider: &str, until: Instant) {
         let mut throttled = self.throttled.write().unwrap_or_else(|e| e.into_inner());
         if throttled.len() >= MAX_THROTTLES {
             let now = Instant::now();
             throttled.retain(|_, until| *until > now);
         }
-        throttled.insert(
-            (model_id.to_string(), provider.to_string()),
-            Instant::now() + THROTTLE_TTL,
-        );
+        throttled.insert((model_id.to_string(), provider.to_string()), until);
     }
 
     /// Providers still in cool-down are skipped when alternatives
@@ -708,6 +802,73 @@ impl Router {
     /// priceable offering across models; `think` picks the best-quality
     /// offering across models. Throttled providers are skipped when
     /// alternatives exist.
+    /// Shared tier dispatch for fallback targets (Iter 21): one
+    /// match to extend when a new tier lands. Unknown names fail
+    /// closed rather than leaking upstream.
+    fn decide_tier(
+        &self,
+        snapshot: &Snapshot,
+        tier: &str,
+        model_field: &str,
+        authorization: Option<&str>,
+        constraints: &ProviderConstraints,
+    ) -> Result<Decision, RouteRejection> {
+        match tier {
+            "low" => self.decide_ordered_virtual(
+                snapshot,
+                authorization,
+                constraints,
+                model_field,
+                VirtualTier::Low,
+            ),
+            "think" => self.decide_ordered_virtual(
+                snapshot,
+                authorization,
+                constraints,
+                model_field,
+                VirtualTier::Think,
+            ),
+            "lowest" => self.decide_lowest(snapshot, authorization, constraints, model_field),
+            _ => Err(RouteRejection {
+                code: "no_eligible_offering",
+                message: format!("unknown fallback tier {tier:?}"),
+            }),
+        }
+    }
+
+    /// Post-retry fallback leg for lib.rs (Iter 21): the free attempt
+    /// (and its single retry) already failed upstream, so resolve the
+    /// named tier and rewrite once. No further retry — the response
+    /// returns as-is, headers included, so the client sees the real
+    /// reset info.
+    pub fn route_fallback(
+        &self,
+        body: &[u8],
+        model_field: &str,
+        fallback: &str,
+        authorization: Option<&str>,
+        ignore_provider: Option<&str>,
+    ) -> Option<(Vec<u8>, Decision)> {
+        let snapshot = self.snapshot.read().unwrap_or_else(|e| e.into_inner());
+        let json: serde_json::Value = serde_json::from_slice(body).ok()?;
+        let mut constraints = ProviderConstraints::from_body(&json);
+        // The failed free-leg provider just 429/5xx'd — don't hand
+        // the fallback leg the same burned provider.
+        if let Some(provider) = ignore_provider {
+            constraints.ignore.push(provider.to_string());
+        }
+        let decision = self
+            .decide_tier(
+                &snapshot,
+                fallback,
+                model_field,
+                authorization,
+                &constraints,
+            )
+            .ok()?;
+        Self::finish_route(model_field, json, decision)
+    }
+
     fn decide_virtual(
         &self,
         snapshot: &Snapshot,
@@ -717,12 +878,26 @@ impl Router {
         constraints: &ProviderConstraints,
     ) -> Result<Decision, RouteRejection> {
         match virtual_model.tier {
-            VirtualTier::Free => self
-                .decide_free(snapshot, &[], authorization, constraints, model_field)
-                .ok_or_else(|| RouteRejection {
-                    code: "no_eligible_offering",
-                    message: "no free offering is currently eligible".to_string(),
-                }),
+            VirtualTier::Free => {
+                let free = self
+                    .decide_free(snapshot, &[], authorization, constraints, model_field)
+                    .ok_or_else(|| RouteRejection {
+                        code: "no_eligible_offering",
+                        message: "no free offering is currently eligible".to_string(),
+                    });
+                match (free, &virtual_model.fallback) {
+                    // Free served: fallback never fires.
+                    (Ok(decision), _) => Ok(decision),
+                    // No fallback configured: fail closed as before.
+                    (Err(rejection), None) => Err(rejection),
+                    // Free exhausted with a fallback target: the
+                    // target tier applies its own budget check, so any
+                    // free-leg rejection falls through to it.
+                    (Err(_), Some(target)) => {
+                        self.decide_tier(snapshot, target, model_field, authorization, constraints)
+                    }
+                }
+            }
             tier => {
                 self.decide_ordered_virtual(snapshot, authorization, constraints, model_field, tier)
             }
@@ -2175,14 +2350,16 @@ mod tests {
             parse_virtual("openrouter/pair/low"),
             Some(VirtualModel {
                 tier: VirtualTier::Low,
-                privacy: false
+                privacy: false,
+                fallback: None
             })
         );
         assert_eq!(
             parse_virtual("openrouter/pair/privacy/think"),
             Some(VirtualModel {
                 tier: VirtualTier::Think,
-                privacy: true
+                privacy: true,
+                fallback: None
             })
         );
         assert_eq!(parse_virtual("azure/pair/free"), None);
@@ -2252,14 +2429,48 @@ mod tests {
     #[test]
     fn virtual_picks_skip_throttled_providers() {
         let r = virtual_router();
-        r.note_throttled("m/cheap", "Cheap");
+        r.note_throttled("m/cheap", "Cheap", throttle_until(None, None));
         let low = r.decide("openrouter/pair/low", None).unwrap();
         assert_eq!(low.provider, "Mid");
         // Everything throttled: availability wins, still serves.
-        r.note_throttled("m/dear", "Dear");
-        r.note_throttled("m/mid", "Mid");
+        r.note_throttled("m/dear", "Dear", throttle_until(None, None));
+        r.note_throttled("m/mid", "Mid", throttle_until(None, None));
         let low = r.decide("openrouter/pair/low", None).unwrap();
         assert_eq!(low.provider, "Cheap");
+    }
+
+    /// Iter 21: cool-down expiry derives from 429 headers —
+    /// `Retry-After` (delay or date) wins, else `X-RateLimit-Reset`
+    /// epoch milliseconds, else the flat default.
+    #[test]
+    fn throttle_until_reads_response_headers() {
+        use std::time::Duration;
+        let now = Instant::now();
+        // Delay seconds.
+        let until = throttle_until(Some("120"), None);
+        assert!(until > now + Duration::from_secs(119));
+        assert!(until <= now + Duration::from_secs(121));
+        // Reset epoch milliseconds (~1h out).
+        let reset_ms = (now_unix() + 3600).to_string() + "000";
+        let until = throttle_until(None, Some(&reset_ms));
+        assert!(until > now + Duration::from_secs(3590));
+        assert!(until <= now + Duration::from_secs(3610));
+        // Retry-After wins over reset.
+        let until = throttle_until(Some("5"), Some(&reset_ms));
+        assert!(until <= now + Duration::from_secs(10));
+        // Garbage everywhere falls back to the flat default.
+        let until = throttle_until(Some("nonsense"), Some("nonsense"));
+        assert!(until > now + Duration::from_secs(59));
+        assert!(until <= now + Duration::from_secs(61));
+        let until = throttle_until(None, None);
+        assert!(until > now + Duration::from_secs(59));
+        assert!(until <= now + Duration::from_secs(61));
+        // Absurd values clamp instead of parking for years.
+        let until = throttle_until(Some("9999999999"), None);
+        assert!(until <= now + Duration::from_secs(24 * 3600 + 1));
+        // HTTP-date Retry-After in the past cools nothing extra.
+        let until = throttle_until(Some("Sun, 06 Nov 1994 08:49:37 GMT"), None);
+        assert!(until <= now + Duration::from_secs(1));
     }
 
     /// Dedicated snapshot for `lowest` tests: the cheapest paid
@@ -2407,6 +2618,78 @@ mod tests {
         let d = r.decide("m/x/lowest", None).unwrap();
         assert_eq!(d.model_id, "m/a");
         assert_eq!(d.provider, "P1");
+    }
+
+    /// Iter 21: fallback ids parse only on free; anywhere else the
+    /// suffix is not a virtual id at all.
+    #[test]
+    fn fallback_suffix_parses_only_on_free() {
+        let vm = parse_virtual("openrouter/pair/free/fallback/lowest").unwrap();
+        assert_eq!(vm.tier, VirtualTier::Free);
+        assert!(!vm.privacy);
+        assert_eq!(vm.fallback.as_deref(), Some("lowest"));
+        let vm = parse_virtual("openrouter/pair/privacy/free/fallback/low").unwrap();
+        assert!(vm.privacy);
+        assert_eq!(vm.fallback.as_deref(), Some("low"));
+        assert!(parse_virtual("openrouter/pair/low/fallback/think").is_none());
+        assert!(parse_virtual("openrouter/pair/free/fallback/")
+            .unwrap()
+            .fallback
+            .is_some());
+    }
+
+    /// Iter 21: free served means the fallback leg never fires.
+    #[test]
+    fn fallback_id_serves_free_first() {
+        let r = virtual_router();
+        let d = r.decide("openrouter/pair/free/fallback/low", None).unwrap();
+        assert_eq!(d.provider, "Freebie");
+        assert_eq!(d.model_id, "m/free");
+    }
+
+    /// Iter 21: no eligible free offering falls through to the named
+    /// tier — `lowest` here to prove the shared dispatch.
+    #[test]
+    fn fallback_fires_when_free_is_exhausted() {
+        let r = Router {
+            source: PathBuf::from("test"),
+            snapshot: RwLock::new(Snapshot {
+                models: HashMap::from([("m/a".to_string(), vec![priced("m/a", "A", 2.0, None)])]),
+                artifact_version: None,
+            }),
+            ranking: RwLock::new(None),
+            sessions: RwLock::new(HashMap::new()),
+            seed: 0,
+            throttled: RwLock::new(HashMap::new()),
+        };
+        let d = r
+            .decide("openrouter/pair/free/fallback/lowest", None)
+            .unwrap();
+        assert_eq!(d.provider, "A");
+        assert_eq!(d.model_id, "m/a");
+        assert_eq!(d.orientation, Orientation::Lowest);
+    }
+
+    /// Iter 21: unknown fallback targets fail closed instead of
+    /// leaking the tagged id upstream.
+    #[test]
+    fn fallback_unknown_tier_fails_closed() {
+        let r = Router {
+            source: PathBuf::from("test"),
+            snapshot: RwLock::new(Snapshot {
+                models: HashMap::from([("m/a".to_string(), vec![priced("m/a", "A", 2.0, None)])]),
+                artifact_version: None,
+            }),
+            ranking: RwLock::new(None),
+            sessions: RwLock::new(HashMap::new()),
+            seed: 0,
+            throttled: RwLock::new(HashMap::new()),
+        };
+        let body = routed_body("openrouter/pair/free/fallback/nope", serde_json::json!({}));
+        let err = r
+            .route_request_or_reject(&axum::http::HeaderMap::new(), &body)
+            .unwrap_err();
+        assert_eq!(err.code, "no_eligible_offering");
     }
 
     /// Iter 19: the rewritten body carries the picked backend model

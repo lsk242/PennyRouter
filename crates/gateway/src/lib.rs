@@ -743,9 +743,21 @@ async fn routed_completion(
     .await;
     if let Some(decision) = &decision {
         if response.status() == StatusCode::TOO_MANY_REQUESTS {
-            // 429 history steers later virtual picks elsewhere.
+            // 429 history steers later virtual picks elsewhere, for as
+            // long as the upstream headers say (Iter 21).
             if let Some(router) = &state.router {
-                router.note_throttled(&decision.model_id, &decision.provider);
+                let headers = response.headers();
+                let retry_after = headers
+                    .get(reqwest::header::RETRY_AFTER)
+                    .and_then(|v| v.to_str().ok());
+                let reset_ms = headers
+                    .get("x-ratelimit-reset")
+                    .and_then(|v| v.to_str().ok());
+                router.note_throttled(
+                    &decision.model_id,
+                    &decision.provider,
+                    routing::throttle_until(retry_after, reset_ms),
+                );
             }
             state.metrics.throttled();
         }
@@ -755,6 +767,20 @@ async fn routed_completion(
     // requests keep exactly-once semantics.
     // `retry_body` exists only for virtual requests (see above), so
     // reaching here already implies virtual + retryable.
+    //
+    // Free-fallback chains (Iter 21) resolve here too, before the
+    // retry block moves `retry_body`: (original model id, fallback
+    // tier) for the post-retry leg below.
+    let fallback_request: Option<(String, String)> = retry_body.as_ref().and_then(|rb| {
+        let model_field = serde_json::from_slice::<serde_json::Value>(rb)
+            .ok()
+            .and_then(|json| json.get("model")?.as_str().map(str::to_string))?;
+        let target = routing::parse_virtual(&model_field)?.fallback?;
+        Some((model_field, target))
+    });
+    // Owned copy for the post-retry leg: the retry block moves
+    // `retry_body`. `None` for non-virtual requests (free).
+    let fallback_body: Option<Vec<u8>> = retry_body.clone();
     if is_retryable(response.status()) {
         if let (Some(router), Some(retry_body), Some(decision)) =
             (&state.router, retry_body, &decision)
@@ -783,6 +809,65 @@ async fn routed_completion(
                 )
                 .await;
                 if let Ok(provider) = retry_decision.provider.parse() {
+                    response
+                        .headers_mut()
+                        .insert(routing::PROVIDER_HEADER, provider);
+                }
+                return response;
+            }
+        }
+    }
+    // Free-fallback chains (Iter 21): the free attempt (and its single
+    // retry, if any) failed with a retryable status, so resolve the
+    // named tier and forward once. Anything else — including
+    // auth/config errors — returns as-is. No further retry: this
+    // response stands, headers included.
+    if is_retryable(response.status()) {
+        if let (Some(router), Some((model_field, target)), Some(fallback_body)) =
+            (&state.router, &fallback_request, &fallback_body)
+        {
+            let auth = headers
+                .get(axum::http::header::AUTHORIZATION)
+                .and_then(|v| v.to_str().ok());
+            let ignore = decision.as_ref().map(|d| d.provider.as_str());
+            if let Some((rewritten, fb_decision)) =
+                router.route_fallback(fallback_body, model_field, target, auth, ignore)
+            {
+                let permit = match acquire_upstream_slot(&state).await {
+                    Some(permit) => permit,
+                    None => {
+                        state.metrics.load_shed();
+                        return service_unavailable();
+                    }
+                };
+                let fallback_base = state.upstream_base_url.clone();
+                response = forward_upstream(
+                    &state,
+                    &fallback_base,
+                    permit,
+                    &Method::POST,
+                    &path,
+                    &headers,
+                    rewritten,
+                )
+                .await;
+                if response.status() == StatusCode::TOO_MANY_REQUESTS {
+                    let fb_headers = response.headers();
+                    router.note_throttled(
+                        &fb_decision.model_id,
+                        &fb_decision.provider,
+                        routing::throttle_until(
+                            fb_headers
+                                .get(reqwest::header::RETRY_AFTER)
+                                .and_then(|v| v.to_str().ok()),
+                            fb_headers
+                                .get("x-ratelimit-reset")
+                                .and_then(|v| v.to_str().ok()),
+                        ),
+                    );
+                    state.metrics.throttled();
+                }
+                if let Ok(provider) = fb_decision.provider.parse() {
                     response
                         .headers_mut()
                         .insert(routing::PROVIDER_HEADER, provider);
@@ -970,7 +1055,7 @@ async fn acquire_upstream_slot(state: &AppState) -> Option<UpstreamPermit> {
 /// hop-by-hop) is rebuilt by our own stack. Error bodies are the
 /// exception: the gateway reads them, so gzipped errors decode
 /// first and drop the encoding claim (Iter 20).
-const FORWARDED_RESPONSE_HEADERS: [&str; 7] = [
+const FORWARDED_RESPONSE_HEADERS: [&str; 10] = [
     "content-type",
     "content-encoding",
     "content-range",
@@ -978,6 +1063,12 @@ const FORWARDED_RESPONSE_HEADERS: [&str; 7] = [
     "www-authenticate",
     "etag",
     "last-modified",
+    // Upstream quota signals ride 429s (Iter 21): upstreams only send
+    // these on rejections, so preserving them never invents quota
+    // state on success.
+    "x-ratelimit-limit",
+    "x-ratelimit-remaining",
+    "x-ratelimit-reset",
 ];
 
 /// Copy the preserved response headers from an upstream response.

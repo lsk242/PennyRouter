@@ -56,7 +56,10 @@ The `model` field carries the OpenRouter model plus optional suffix filters
 (see [routing.md](routing.md)). Unknown or absent filters fall back to the
 default route — never an error. The `lowest` filter instead rewrites to
 the cheapest paid offering catalog-wide (no quality floor) and fails
-closed when none is eligible. A `modal/` or `baseten/` prefix instead
+closed when none is eligible. `openrouter/pair/free/fallback/<tier>`
+serves free first, then exactly one pick from the named tier when
+free is exhausted. 429 responses carry `Retry-After` plus the
+upstream's `X-RateLimit-*` headers when present. A `modal/` or `baseten/` prefix instead
 pins the request to that provider's upstream (see [routing.md](routing.md)):
 the prefix is stripped, the rest of the model id passes through verbatim,
 and the caller's `Authorization` header is forwarded unchanged — one
