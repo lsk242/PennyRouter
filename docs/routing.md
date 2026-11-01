@@ -135,7 +135,7 @@ session.
   tier only sees what the catalog synced: the models list omits
   non-text-output models, so `EXTRA_MODEL_IDS` (comma-separated,
   catalog-sync env) nominates such ids for individual fetching.
-- Decisions route (Iter 25): `POST /v1/decisions` dispatches through
+- Decisions route (Iter 27): `POST /v1/decisions` dispatches through
   the same virtual ids (`decision`, `decision/free`,
   `decision/free/fallback/decision`) but rewrites the model only —
   no `provider`/`quantizations`/privacy injection — and forwards to

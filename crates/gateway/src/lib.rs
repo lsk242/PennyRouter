@@ -399,7 +399,7 @@ pub fn app_with_state(state: AppState) -> Router {
         .route("/v1/responses", post(routed_completion))
         // Decisions bodies (`model` + `questions`/`state`) route over
         // decisions-capable offerings and forward to the upstream
-        // alpha decisions endpoint (Iter 25).
+        // alpha decisions endpoint (Iter 27).
         .route("/v1/decisions", post(routed_decisions))
         // Curated menu (Iter 13): clients discover exactly the virtual
         // models; this path used to proxy upstream.

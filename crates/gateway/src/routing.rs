@@ -191,7 +191,7 @@ pub struct VirtualModel {
     pub fallback: Option<String>,
 }
 
-/// Body rewrite applied after a pick (Iter 25): chat injects
+/// Body rewrite applied after a pick (Iter 27): chat injects
 /// provider order and pins; the decisions route rewrites the model
 /// only.
 type BodyFinish = fn(&str, serde_json::Value, Decision) -> Option<(Vec<u8>, Decision)>;
@@ -971,7 +971,7 @@ impl Router {
         Self::finish_route(model_field, json, decision)
     }
 
-    /// Decisions fallback leg (Iter 25): same one-shot shape as chat,
+    /// Decisions fallback leg (Iter 27): same one-shot shape as chat,
     /// model-only rewrite. Only the `decision` target is shape-safe —
     /// chat tiers answer chat bodies, so anything else is a caller
     /// error, surfaced up front instead of 400ing upstream.
@@ -1597,7 +1597,7 @@ impl Router {
             .flatten()
     }
 
-    /// Decisions-route entry (Iter 25): same dispatch as chat, but the
+    /// Decisions-route entry (Iter 27): same dispatch as chat, but the
     /// rewrite is model-only — the decisions API owns its schema and
     /// chat-injected fields (`provider`, `quantizations`) risk a 400.
     pub fn route_decision_request(
@@ -1608,7 +1608,7 @@ impl Router {
         self.route_inner(headers, body, None, Self::finish_decision_route)
     }
 
-    /// Decisions retry (Iter 25): same provider-exclusion as chat,
+    /// Decisions retry (Iter 27): same provider-exclusion as chat,
     /// model-only rewrite.
     pub fn route_decision_retry(
         &self,
@@ -1722,7 +1722,7 @@ impl Router {
         Some((rewritten, decision))
     }
 
-    /// Model-only rewrite for the decisions route (Iter 25): the
+    /// Model-only rewrite for the decisions route (Iter 27): the
     /// decisions API owns its schema, so chat-injected fields
     /// (`provider`, `quantizations`, privacy flags) stay out —
     /// unknown fields risk an upstream 400. Privacy-variant
