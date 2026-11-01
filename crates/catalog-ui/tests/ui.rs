@@ -45,6 +45,7 @@ fn artifact_dir(test: &str) -> std::path::PathBuf {
             precision_class: Some("fp16".to_string()),
             promo_discount: None,
             processed_at: Some("t".to_string()),
+            supports_tools: None,
             quality_tier: Some("high".to_string()),
             quality_score: Some(0.9),
             judged_at: Some("t".to_string()),

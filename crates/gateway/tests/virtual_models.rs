@@ -49,6 +49,7 @@ fn build_db(path: &std::path::Path) {
                 precision_class: None,
                 promo_discount: None,
                 processed_at: None,
+                supports_tools: None,
                 quality_tier: None,
                 quality_score: None,
                 judged_at: None,
@@ -68,6 +69,7 @@ fn build_db(path: &std::path::Path) {
                     precision_class: Some("fp16".to_string()),
                     promo_discount: None,
                     processed_at: "t".to_string(),
+                    supports_tools: None,
                 },
             )
             .unwrap();
@@ -348,6 +350,7 @@ async fn throttled_providers_are_avoided_and_counted() {
                 precision_class: None,
                 promo_discount: None,
                 processed_at: None,
+                supports_tools: None,
                 quality_tier: None,
                 quality_score: None,
                 judged_at: None,
@@ -367,6 +370,7 @@ async fn throttled_providers_are_avoided_and_counted() {
                     precision_class: Some("fp16".to_string()),
                     promo_discount: None,
                     processed_at: "t".to_string(),
+                    supports_tools: None,
                 },
             )
             .unwrap();
@@ -603,6 +607,7 @@ async fn free_tier_fails_over_on_throttle() {
                 precision_class: None,
                 promo_discount: None,
                 processed_at: None,
+                supports_tools: None,
                 quality_tier: None,
                 quality_score: None,
                 judged_at: None,
@@ -622,6 +627,7 @@ async fn free_tier_fails_over_on_throttle() {
                     precision_class: Some("fp16".to_string()),
                     promo_discount: None,
                     processed_at: "t".to_string(),
+                    supports_tools: None,
                 },
             )
             .unwrap();
@@ -685,4 +691,131 @@ async fn upstream_ratelimit_headers_reach_client_on_429() {
         res.headers().get("x-ratelimit-reset").unwrap(),
         "1793491200000"
     );
+}
+
+/// Iter 22: a tool-bearing request skips the cheaper tool-incapable
+/// offering and pins the capable one, instead of failing upstream
+/// with "No endpoints found that support tool use".
+#[tokio::test]
+async fn tool_request_routes_to_capable_offering() {
+    let db = scratch_db("tools-route");
+    build_tools_db(&db, true);
+    let seen = Arc::new(Mutex::new(Upstream::default()));
+    let mock = spawn_mock(mock_app(seen.clone(), vec![], vec![])).await;
+    let gw = spawn_gateway(mock, &db).await;
+
+    let res = post_body(
+        gw,
+        "/v1/chat/completions",
+        r#"{"model":"openrouter/pair/low","messages":[],"tools":[{"type":"function","function":{"name":"patch"}}]}"#,
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let guard = seen.lock().unwrap();
+    assert_eq!(guard.hits.get("ToolCo"), Some(&1));
+    assert_eq!(guard.hits.get("NoToolCo"), None);
+}
+
+/// Iter 22: a tool-bearing request with no capable offering fails
+/// closed with a message naming the fix, instead of pinning a
+/// provider the upstream then 404s.
+#[tokio::test]
+async fn tool_request_without_capable_offering_fails_closed() {
+    let db = scratch_db("tools-closed");
+    build_tools_db(&db, false);
+    let seen = Arc::new(Mutex::new(Upstream::default()));
+    let mock = spawn_mock(mock_app(seen.clone(), vec![], vec![])).await;
+    let gw = spawn_gateway(mock, &db).await;
+
+    let res = post_body(
+        gw,
+        "/v1/chat/completions",
+        r#"{"model":"openrouter/pair/low","messages":[],"tools":[{"type":"function","function":{"name":"patch"}}]}"#,
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    let body: serde_json::Value = res.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "tools_unsupported");
+    assert!(
+        body["error"]["message"].as_str().unwrap().contains("tool"),
+        "rejection names the tool problem: {}",
+        body["error"]["message"]
+    );
+    assert!(seen.lock().unwrap().hits.is_empty());
+}
+
+/// Two paid `low`-tier offerings on one model: NoToolCo is cheaper
+/// but tool-incapable; ToolCo costs more and supports tools.
+/// `with_capable` toggles whether ToolCo is actually capable.
+fn build_tools_db(path: &std::path::Path, with_capable: bool) {
+    let _ = std::fs::remove_file(path);
+    let catalog = Catalog::open(path).unwrap();
+    catalog.init().unwrap();
+    catalog
+        .insert_model(&ModelRow {
+            model_id: "m/tool".to_string(),
+            name: "m/tool".to_string(),
+            source: "test".to_string(),
+            payload: "{}".to_string(),
+            fetched_at: "t".to_string(),
+        })
+        .unwrap();
+    for (provider, price, supports) in [("NoToolCo", 1.0, false), ("ToolCo", 2.0, with_capable)] {
+        catalog
+            .insert_endpoint(&EndpointRow {
+                id: 0,
+                model_id: "m/tool".to_string(),
+                provider_name: provider.to_string(),
+                payload: "{}".to_string(),
+                fetched_at: "t".to_string(),
+                price_prompt: None,
+                price_completion: None,
+                price_cache_read: None,
+                price_cache_write: None,
+                precision_class: None,
+                promo_discount: None,
+                processed_at: None,
+                supports_tools: None,
+                quality_tier: None,
+                quality_score: None,
+                judged_at: None,
+                judge_model: None,
+                judge_prompt: None,
+            })
+            .unwrap();
+        let id = catalog
+            .endpoints_for("m/tool")
+            .unwrap()
+            .iter()
+            .find(|e| e.provider_name == provider)
+            .unwrap()
+            .id;
+        catalog
+            .update_endpoint_index(
+                id,
+                &EndpointIndex {
+                    price_prompt: Some(price),
+                    price_completion: Some(price),
+                    price_cache_read: None,
+                    price_cache_write: None,
+                    precision_class: Some("fp16".to_string()),
+                    promo_discount: None,
+                    processed_at: "t".to_string(),
+                    supports_tools: Some(i64::from(supports)),
+                },
+            )
+            .unwrap();
+        catalog
+            .update_endpoint_judgment(
+                id,
+                &EndpointJudgment {
+                    quality_tier: Some("low".to_string()),
+                    quality_score: None,
+                    judged_at: "t".to_string(),
+                    judge_model: None,
+                    judge_prompt: None,
+                },
+            )
+            .unwrap();
+    }
 }

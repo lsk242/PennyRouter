@@ -74,6 +74,7 @@ fn build_db(path: &std::path::Path, alpha_price: f64, beta_price: f64) {
         precision_class: None,
         promo_discount: None,
         processed_at: None,
+        supports_tools: None,
         quality_tier: None,
         quality_score: None,
         judged_at: None,
@@ -95,6 +96,7 @@ fn build_db(path: &std::path::Path, alpha_price: f64, beta_price: f64) {
         precision_class: precision.map(str::to_string),
         promo_discount: None,
         processed_at: "t".to_string(),
+        supports_tools: None,
     };
     let judgment = |tier: &str| EndpointJudgment {
         quality_tier: Some(tier.to_string()),
@@ -269,6 +271,7 @@ fn build_free_db(path: &std::path::Path) {
                 precision_class: None,
                 promo_discount: None,
                 processed_at: None,
+                supports_tools: None,
                 quality_tier: None,
                 quality_score: None,
                 judged_at: None,
@@ -288,6 +291,7 @@ fn build_free_db(path: &std::path::Path) {
                     precision_class: None,
                     promo_discount: None,
                     processed_at: "t".to_string(),
+                    supports_tools: None,
                 },
             )
             .unwrap();

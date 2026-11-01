@@ -28,6 +28,7 @@ pub fn run_processing(catalog: &Catalog, processed_at: &str) -> Result<ProcessSu
                 precision_class: Some(classify_precision(&payload)),
                 promo_discount: extract_discount(&payload),
                 processed_at: processed_at.to_string(),
+                supports_tools: extract_tool_support(&payload),
             },
         )?;
         processed += 1;
@@ -47,6 +48,19 @@ fn extract_price(payload: &Value, key: &str) -> Option<f64> {
         _ => None,
     }?;
     (price.is_finite() && price >= 0.0).then_some(price)
+}
+
+/// Tool support per endpoint (Iter 22): OpenRouter lists the request
+/// parameters each endpoint accepts in `supported_parameters`. A
+/// `"tools"` entry means function calling works there; the flag
+/// varies per provider on the same model, so it is indexed per
+/// endpoint. Missing or non-array field is `None` (unknown), never
+/// assumed capable or incapable.
+fn extract_tool_support(payload: &Value) -> Option<i64> {
+    let params = payload.get("supported_parameters")?.as_array()?;
+    Some(i64::from(
+        params.iter().any(|p| p.as_str() == Some("tools")),
+    ))
 }
 
 fn extract_discount(payload: &Value) -> Option<f64> {

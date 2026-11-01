@@ -136,8 +136,15 @@ cheap judge model, classifier-based routing.
       on the error path only; success bytes stay untouched. Test: 2
       passthrough tests (readable wrap, decoded JSON forward without
       encoding claim).
-- [ ] **Iter 21 — Free fallback + header-driven 429s.** `…/free/fallback/
+- [x] **Iter 21 — Free fallback + header-driven 429s.** `…/free/fallback/
       <tier>` serves free, then one tier pick on exhaustion; 429s cool
       offerings for the header-stated duration and surface reset info.
       Test: unit (headers, parse, triggers) + 2 integration (fallback
-      200, 429 headers).
+      200, 429 headers). Live: fallback chain serves DeepInfra paid
+      pick on constrained trigger.
+- [x] **Iter 22 — Tool-aware routing.** Index per-endpoint tool
+      support (`supported_parameters` → `supports_tools`, schema v4);
+      tool-bearing requests match only capable endpoints on every
+      leg; starvation fails closed with `tools_unsupported` (400).
+      Test: extraction asserts (1/0/NULL) + unit (detect/allow) + 2
+      integration (routes capable, fails closed).

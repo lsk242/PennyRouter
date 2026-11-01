@@ -54,6 +54,12 @@ pub struct Offering {
     pub precision_class: Option<String>,
     pub quality_tier: Option<String>,
     pub quality_score: Option<f64>,
+    /// Per-endpoint tool support from the catalog (Iter 22): `Some(true)`
+    /// when the endpoint's `supported_parameters` lists `"tools"`,
+    /// `Some(false)` when it lists parameters but not tools, `None`
+    /// when unknown (old catalogs). Tool-bearing requests match only
+    /// `Some(true)`; anything else is unaffected.
+    pub supports_tools: Option<bool>,
 }
 
 /// In-memory routing snapshot: model id to its offerings in load order.
@@ -363,6 +369,19 @@ pub struct RouteRejection {
     pub message: String,
 }
 
+/// Tool-starvation rejection (Iter 22): plain requests would serve,
+/// but this one carries `tools` and no eligible endpoint supports
+/// tool use. Caller-fixable (disable tools or pick a tool-capable
+/// route), so the handler answers 400 like `budget_exceeded`.
+fn tools_unsupported() -> RouteRejection {
+    RouteRejection {
+        code: "tools_unsupported",
+        message: "no eligible endpoint supports tool use for this request: \
+                  disable tools or choose a tool-capable route"
+            .to_string(),
+    }
+}
+
 /// Caller provider restrictions (Iter 11, F01; budget Iter 14):
 /// `only`/`ignore` lists plus an optional price ceiling from the
 /// incoming `provider` object. Candidates and sticky pins must satisfy
@@ -374,6 +393,9 @@ pub struct ProviderConstraints {
     pub only: Vec<String>,
     pub ignore: Vec<String>,
     pub max_price: Option<BudgetCap>,
+    /// True when the request body carries a non-empty `tools` array
+    /// (Iter 22): only tool-capable endpoints may serve it.
+    pub needs_tools: bool,
 }
 
 impl ProviderConstraints {
@@ -424,10 +446,15 @@ impl ProviderConstraints {
                     completion: number(cap, "completion")?,
                 })
             });
+        let needs_tools = body
+            .get("tools")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|tools| !tools.is_empty());
         Self {
             only: strings("only"),
             ignore: strings("ignore"),
             max_price,
+            needs_tools,
         }
     }
 
@@ -444,6 +471,14 @@ impl ProviderConstraints {
                         .is_some_and(|p| p <= cap.completion)
             }
         }
+    }
+
+    /// Tool-bearing requests match only endpoints known to support
+    /// tools (Iter 22): `None` (unprocessed catalogs) fails closed
+    /// for tool calls so the gateway never pins a provider the
+    /// upstream then 404s. Requests without tools skip this entirely.
+    pub fn tool_allows(&self, offering: &Offering) -> bool {
+        !self.needs_tools || offering.supports_tools == Some(true)
     }
 }
 
@@ -694,7 +729,13 @@ impl Router {
                 .filter(|s| !s.is_empty())
                 .map(str::to_string)
                 .collect::<Vec<_>>();
-            return self.decide_free(&snapshot, &tags, authorization, constraints, FREE_MODEL);
+            // Legacy free path stays passthrough-tolerant (Iter 22):
+            // tool-starvation surfaces on the virtual ids; here it
+            // decays to untouched passthrough as before.
+            return self
+                .decide_free(&snapshot, &tags, authorization, constraints, FREE_MODEL)
+                .ok()
+                .flatten();
         }
         let (model_id, tags) = split_model(&snapshot, model_field)?;
         let orientation = orientation_from(&tags);
@@ -736,7 +777,9 @@ impl Router {
                         if let Some(pick) = order.into_iter().next() {
                             // Price caps override affinity: a pin above the
                             // ceiling re-routes instead of sticking (Iter 14).
-                            if constraints.budget_allows(pick) {
+                            // A pin that cannot serve tools re-routes too
+                            // (Iter 22): the upstream would 404 it.
+                            if constraints.budget_allows(pick) && constraints.tool_allows(pick) {
                                 return Some(Decision {
                                     model_id,
                                     provider: pick.provider_name.clone(),
@@ -763,6 +806,7 @@ impl Router {
                 o.precision_class == class
                     && constraints.allows(&o.provider_name)
                     && constraints.budget_allows(o)
+                    && constraints.tool_allows(o)
             })
             .collect();
         let pick = ordered(
@@ -879,11 +923,16 @@ impl Router {
     ) -> Result<Decision, RouteRejection> {
         match virtual_model.tier {
             VirtualTier::Free => {
+                // Tool-starvation (`Err`) and an empty pool (`Ok(None)`)
+                // both fall through to the fallback tier when one is
+                // configured — a tool-capable paid tier can still serve.
                 let free = self
                     .decide_free(snapshot, &[], authorization, constraints, model_field)
-                    .ok_or_else(|| RouteRejection {
-                        code: "no_eligible_offering",
-                        message: "no free offering is currently eligible".to_string(),
+                    .and_then(|decision| {
+                        decision.ok_or_else(|| RouteRejection {
+                            code: "no_eligible_offering",
+                            message: "no free offering is currently eligible".to_string(),
+                        })
                     });
                 match (free, &virtual_model.fallback) {
                     // Free served: fallback never fires.
@@ -952,6 +1001,17 @@ impl Router {
                 code: "no_eligible_offering",
                 message: format!("no offering is eligible for the {tier_name} tier"),
             });
+        }
+        // Tool filter is its own stage (Iter 22): an empty result here
+        // means tool-bearing requests starved while plain ones would
+        // serve, so the rejection names the caller-side fix. Without
+        // tools this filter passes everything and never fires.
+        let base: Vec<&Offering> = base
+            .into_iter()
+            .filter(|o| constraints.tool_allows(o))
+            .collect();
+        if base.is_empty() {
+            return Err(tools_unsupported());
         }
         let floored: Vec<&Offering> = base
             .into_iter()
@@ -1063,6 +1123,13 @@ impl Router {
                 message: "no paid offering is currently eligible".to_string(),
             });
         }
+        let base: Vec<&Offering> = base
+            .into_iter()
+            .filter(|o| constraints.tool_allows(o))
+            .collect();
+        if base.is_empty() {
+            return Err(tools_unsupported());
+        }
         let budgeted: Vec<&Offering> = base
             .into_iter()
             .filter(|o| constraints.budget_allows(o))
@@ -1148,6 +1215,9 @@ impl Router {
         }
     }
 
+    /// `Ok(None)` means nothing free is eligible (generic); `Err` is
+    /// tool-starvation only (Iter 22): plain requests would serve, so
+    /// the caller gets the fix instead of a bare empty-pool.
     fn decide_free(
         &self,
         snapshot: &Snapshot,
@@ -1155,7 +1225,7 @@ impl Router {
         authorization: Option<&str>,
         constraints: &ProviderConstraints,
         session_ns: &str,
-    ) -> Option<Decision> {
+    ) -> Result<Option<Decision>, RouteRejection> {
         let now = now_unix();
         let ranking = self.ranking.read().unwrap_or_else(|e| e.into_inner());
         let free: Vec<&Offering> = snapshot
@@ -1169,7 +1239,14 @@ impl Router {
             })
             .collect();
         if free.is_empty() {
-            return None;
+            return Ok(None);
+        }
+        let free: Vec<&Offering> = free
+            .into_iter()
+            .filter(|o| constraints.tool_allows(o))
+            .collect();
+        if free.is_empty() {
+            return Err(tools_unsupported());
         }
         let orientation = orientation_from(tags);
         let key = authorization.map(|auth| self.session_key(auth, session_ns));
@@ -1184,6 +1261,7 @@ impl Router {
                         .filter(|o| {
                             o.provider_name == pin.provider
                                 && o.precision_class == pin.precision_class
+                                && constraints.tool_allows(o)
                         })
                         .copied()
                         .collect();
@@ -1196,7 +1274,7 @@ impl Router {
                     );
                     if let Some(pick) = order.into_iter().next() {
                         if free_eligible(ranking.as_ref(), &pick.model_id, pick, now) {
-                            return Some(free_decision(pick, orientation, true));
+                            return Ok(Some(free_decision(pick, orientation, true)));
                         }
                         // Pin stopped being free: fall through and re-route.
                     }
@@ -1205,7 +1283,9 @@ impl Router {
         }
 
         let owned: Vec<Offering> = free.into_iter().cloned().collect();
-        let class = majority_class(&owned)?;
+        let Some(class) = majority_class(&owned) else {
+            return Ok(None);
+        };
         let candidates: Vec<&Offering> = owned
             .iter()
             .filter(|o| o.precision_class == class)
@@ -1220,7 +1300,9 @@ impl Router {
             orientation,
             &candidates,
         );
-        let pick = order.into_iter().next()?;
+        let Some(pick) = order.into_iter().next() else {
+            return Ok(None);
+        };
         // Candidates were pre-filtered to free offerings, so the pick is
         // free by construction.
         if let Some(key) = key {
@@ -1232,7 +1314,7 @@ impl Router {
                 },
             );
         }
-        Some(free_decision(pick, orientation, false))
+        Ok(Some(free_decision(pick, orientation, false)))
     }
 
     /// Route a buffered chat-completions body: returns the rewritten body
@@ -1639,6 +1721,7 @@ fn offering_from(ep: &EndpointRow) -> Offering {
         precision_class: ep.precision_class.clone(),
         quality_tier: ep.quality_tier.clone(),
         quality_score: ep.quality_score,
+        supports_tools: ep.supports_tools.map(|v| v != 0),
     }
 }
 
@@ -1796,6 +1879,42 @@ fn inline_signals(offering: &Offering) -> pennyrouter_catalog::Signals<'_> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn constraints_detect_tool_requests() {
+        let with_tools = serde_json::json!({
+            "model": "m",
+            "messages": [],
+            "tools": [{"type": "function", "function": {"name": "patch"}}],
+        });
+        assert!(ProviderConstraints::from_body(&with_tools).needs_tools);
+        let bare = serde_json::json!({"model": "m", "messages": []});
+        assert!(!ProviderConstraints::from_body(&bare).needs_tools);
+        let empty = serde_json::json!({"model": "m", "messages": [], "tools": []});
+        assert!(!ProviderConstraints::from_body(&empty).needs_tools);
+        // Tool-bearing requests match only known-capable offerings;
+        // anything else is unaffected either way.
+        let demanding = ProviderConstraints {
+            needs_tools: true,
+            ..ProviderConstraints::default()
+        };
+        let capable = offering("A", Some(1.0), None);
+        let capable = Offering {
+            supports_tools: Some(true),
+            ..capable
+        };
+        let incapable = Offering {
+            supports_tools: Some(false),
+            ..offering("B", Some(1.0), None)
+        };
+        let unknown = offering("C", Some(1.0), None);
+        assert!(demanding.tool_allows(&capable));
+        assert!(!demanding.tool_allows(&incapable));
+        assert!(!demanding.tool_allows(&unknown));
+        let relaxed = ProviderConstraints::default();
+        assert!(relaxed.tool_allows(&incapable));
+        assert!(relaxed.tool_allows(&unknown));
+    }
+
     fn offering(provider: &str, price: Option<f64>, tier: Option<&str>) -> Offering {
         // Completion mirrors prompt so effective cost equals price.
         Offering {
@@ -1810,6 +1929,7 @@ mod tests {
             precision_class: Some("fp16".to_string()),
             quality_tier: tier.map(str::to_string),
             quality_score: None,
+            supports_tools: None,
         }
     }
 
