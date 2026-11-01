@@ -206,3 +206,53 @@ async fn background_task_publishes_new_snapshot() {
         "at least one reload counted, got:\n{rendered}",
     );
 }
+
+/// Iter 23: a gateway booted against a missing catalog recovers
+/// without a restart once the artifact lands — the standby router
+/// passes through until the background reload heals it.
+#[tokio::test]
+async fn standby_router_heals_on_reload_without_restart() {
+    use pennyrouter_catalog::publish;
+
+    let dir = scratch("standby-heals");
+    let router = Arc::new(Router::standby(&dir));
+    assert!(!router.is_ready(), "empty snapshot is not ready");
+    assert_eq!(
+        routes(&router, "test/reload-a"),
+        None,
+        "standby passes through like a disabled router",
+    );
+
+    let metrics = Arc::new(Metrics::new());
+    let task = pennyrouter_gateway::spawn_reload_task(
+        router.clone(),
+        Duration::from_millis(50),
+        metrics.clone(),
+    );
+
+    // The catalog lands later (slow sync at boot): publish a manifest
+    // the way catalog-sync does.
+    let db = dir.join("catalog.db");
+    let catalog = Catalog::open(&db).unwrap();
+    catalog.init().unwrap();
+    drop(catalog);
+    add_model(&db, "test/reload-a", "provider-a", 0.001);
+    publish(&db, &dir, "test", 1, 1).unwrap();
+
+    let mut seen = None;
+    for _ in 0..60 {
+        seen = routes(&router, "test/reload-a");
+        if seen.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    task.abort();
+
+    assert_eq!(
+        seen.as_deref(),
+        Some("provider-a"),
+        "background reload healed the standby router",
+    );
+    assert!(router.is_ready(), "healed router reports ready");
+}

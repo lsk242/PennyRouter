@@ -148,3 +148,7 @@ cheap judge model, classifier-based routing.
       leg; starvation fails closed with `tools_unsupported` (400).
       Test: extraction asserts (1/0/NULL) + unit (detect/allow) + 2
       integration (routes capable, fails closed).
+- [x] **Iter 23 — Standby router recovery.** Boot against an
+      unloadable catalog attaches an empty standby router; the
+      periodic reload heals it when a good artifact lands.
+      Test: standby-heals integration (passthrough → routed, ready).

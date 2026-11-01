@@ -479,7 +479,21 @@ Development delivers Docker images, platform delivers deployments.
   Proven by extraction + unit + 2 integration tests.
   `cargo test`, clippy, fmt clean.
 
-## After Iter 22
+## Iter 23 — Standby router recovery (in progress)
+
+- Goal: a gateway booted against a missing, mid-write, or
+  schema-older catalog recovers without a restart (live-found: the
+  reload task never spawned when the initial load failed, so routing
+  stayed dark until a manual restart).
+- Value: deploys that land before catalog-sync finishes heal
+  automatically on the next reload tick.
+- Shipped: `Router::standby` (empty snapshot, source set) attached
+  by `from_env` on load failure; `is_ready()` drives the landing
+  page; reload task always spawns when `CATALOG_DB` is set.
+  Proven by a standby-heals integration test.
+  `cargo test`, clippy, fmt clean.
+
+## After Iter 23
 
 Deferred ideas in [future.md](future.md): classifier routing,
 parallel fan-out, more judge models. Each becomes roadmap items only
