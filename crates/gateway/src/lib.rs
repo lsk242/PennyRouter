@@ -232,7 +232,7 @@ impl AppState {
         self.extra_upstreams.get(provider).map(String::as_str)
     }
 
-    /// Allow proxying management writes (Iter 24): key creation,
+    /// Allow proxying management writes (Iter 25): key creation,
     /// credit purchases, workspace budget changes. Denied by default;
     /// tests and explicit opt-ins use this instead of the env flag.
     pub fn with_management_proxy(mut self, allow: bool) -> Self {
@@ -311,7 +311,7 @@ impl AppState {
         } else {
             state = state.with_upstream("baseten", "https://inference.baseten.co");
         }
-        // Management writes (Iter 24): proxied only on explicit opt-in,
+        // Management writes (Iter 25): proxied only on explicit opt-in,
         // otherwise denied with 403 before touching upstream.
         state.allow_management_proxy = env_flag("ALLOW_MANAGEMENT_PROXY");
         match std::env::var("CATALOG_DB") {
@@ -416,7 +416,7 @@ pub fn app_with_state(state: AppState) -> Router {
         // Responses bodies carry the same `model` field, so they get
         // the same routing, budget, and floor policy (Iter 14).
         .route("/v1/responses", post(routed_completion))
-        // OpenRouter-native aliases (Iter 24): native SDKs address the
+        // OpenRouter-native aliases (Iter 25): native SDKs address the
         // same routed handler under `/api/v1/…`. The upstream path is
         // rewritten to `/v1/…` before forwarding, so the configured
         // `/api` base never doubles it.
@@ -754,7 +754,7 @@ async fn routed_completion(
         },
         None => (buffered, None),
     };
-    // OpenRouter-native aliases (Iter 24) arrive as `/api/v1/…`; the
+    // OpenRouter-native aliases (Iter 25) arrive as `/api/v1/…`; the
     // upstream keeps the `/v1/…` shape so the `/api` base never doubles.
     let path = uri
         .path_and_query()
@@ -943,7 +943,7 @@ fn is_retryable(status: StatusCode) -> bool {
 /// handler is proxied upstream untouched and logged with its full path,
 /// so no client call ever goes silent. No routing or rewriting applies.
 ///
-/// OpenRouter-native paths (Iter 24, `/api/…`) compose against the
+/// OpenRouter-native paths (Iter 25, `/api/…`) compose against the
 /// upstream root — the configured base without its `/api` route
 /// prefix — so account/catalog paths stop doubling `/api`. Management
 /// writes stay denied unless `ALLOW_MANAGEMENT_PROXY=1`.
@@ -1023,7 +1023,7 @@ fn is_openrouter_native_path(path_and_query: &str) -> bool {
 
 /// Rewrite an OpenRouter-native gateway path for upstream: strip the
 /// `/api` prefix, keep the query string. Anything else passes through
-/// unchanged (Iter 24).
+/// unchanged (Iter 25).
 fn strip_api_prefix(path_and_query: &str) -> String {
     if !is_openrouter_native_path(path_and_query) {
         return path_and_query.to_string();
@@ -1038,7 +1038,7 @@ fn strip_api_prefix(path_and_query: &str) -> String {
     }
 }
 
-/// Upstream root for native paths (Iter 24): the configured base
+/// Upstream root for native paths (Iter 25): the configured base
 /// without its trailing `/api` route prefix. The default
 /// `https://openrouter.ai/api` becomes `https://openrouter.ai`, so
 /// `root + stripped path` lands on the real endpoint; bases without
@@ -1054,7 +1054,7 @@ fn segment_prefixed(path: &str, prefix: &str) -> bool {
     path == prefix || path.starts_with(&format!("{prefix}/"))
 }
 
-/// True for management writes (Iter 24): key creation/rotation,
+/// True for management writes (Iter 25): key creation/rotation,
 /// credit purchases, and workspace budget changes move money or trust,
 /// so they proxy only with `ALLOW_MANAGEMENT_PROXY=1`. Reads always
 /// pass through.
@@ -1276,7 +1276,7 @@ async fn forward_pinned(
     };
     let base = base.to_string();
     // Pinned bases carry no route prefix either, so native aliases get
-    // the same `/api` strip as the default path (Iter 24).
+    // the same `/api` strip as the default path (Iter 25).
     let path = uri
         .path_and_query()
         .map(|path_and_query| strip_api_prefix(path_and_query.as_str()))

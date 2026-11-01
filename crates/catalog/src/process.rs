@@ -12,12 +12,23 @@ pub struct ProcessSummary {
 }
 
 /// Extract indexed values for every endpoint. Idempotent: re-running
-/// overwrites the same columns.
+/// overwrites the same columns. Model-level signals (decision
+/// modality, Iter 24) resolve through a per-model payload cache so
+/// one lookup serves all of a model's endpoints.
 pub fn run_processing(catalog: &Catalog, processed_at: &str) -> Result<ProcessSummary, Error> {
     let endpoints = catalog.all_endpoints()?;
+    let mut models: std::collections::HashMap<String, Option<Value>> =
+        std::collections::HashMap::new();
     let mut processed = 0;
     for ep in &endpoints {
         let payload: Value = serde_json::from_str(&ep.payload)?;
+        let model_payload = models.entry(ep.model_id.clone()).or_insert_with(|| {
+            catalog
+                .get_model(&ep.model_id)
+                .ok()
+                .flatten()
+                .and_then(|m| serde_json::from_str(&m.payload).ok())
+        });
         catalog.update_endpoint_index(
             ep.id,
             &EndpointIndex {
@@ -29,6 +40,7 @@ pub fn run_processing(catalog: &Catalog, processed_at: &str) -> Result<ProcessSu
                 promo_discount: extract_discount(&payload),
                 processed_at: processed_at.to_string(),
                 supports_tools: extract_tool_support(&payload),
+                supports_decisions: extract_decision_support(model_payload.as_ref()),
             },
         )?;
         processed += 1;
@@ -60,6 +72,22 @@ fn extract_tool_support(payload: &Value) -> Option<i64> {
     let params = payload.get("supported_parameters")?.as_array()?;
     Some(i64::from(
         params.iter().any(|p| p.as_str() == Some("tools")),
+    ))
+}
+
+/// Decision-modality support per endpoint (Iter 24): modality lives
+/// on the parent *model* object (`architecture.output_modalities`),
+/// so the caller passes the model's payload. A `"decisions"` entry
+/// marks behavior-scoring models (e.g. Respan Span); routing matches
+/// the `decision` tier on it. Missing model, architecture, or array
+/// is `None` (unknown), never assumed.
+fn extract_decision_support(model: Option<&Value>) -> Option<i64> {
+    let modalities = model?
+        .get("architecture")?
+        .get("output_modalities")?
+        .as_array()?;
+    Some(i64::from(
+        modalities.iter().any(|m| m.as_str() == Some("decisions")),
     ))
 }
 

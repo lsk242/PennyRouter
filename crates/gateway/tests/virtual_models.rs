@@ -50,6 +50,7 @@ fn build_db(path: &std::path::Path) {
                 promo_discount: None,
                 processed_at: None,
                 supports_tools: None,
+                supports_decisions: None,
                 quality_tier: None,
                 quality_score: None,
                 judged_at: None,
@@ -70,6 +71,7 @@ fn build_db(path: &std::path::Path) {
                     promo_discount: None,
                     processed_at: "t".to_string(),
                     supports_tools: None,
+                    supports_decisions: None,
                 },
             )
             .unwrap();
@@ -197,7 +199,7 @@ fn mock_app(
 }
 
 #[tokio::test]
-async fn models_menu_lists_exactly_the_six_virtual_ids() {
+async fn models_menu_lists_exactly_the_ten_virtual_ids() {
     let db = scratch_db("menu");
     build_db(&db);
     let mock = spawn_mock(mock_app(
@@ -226,8 +228,12 @@ async fn models_menu_lists_exactly_the_six_virtual_ids() {
     assert_eq!(
         ids,
         [
+            "openrouter/pair/decision",
+            "openrouter/pair/decision/free",
             "openrouter/pair/free",
             "openrouter/pair/low",
+            "openrouter/pair/privacy/decision",
+            "openrouter/pair/privacy/decision/free",
             "openrouter/pair/privacy/free",
             "openrouter/pair/privacy/low",
             "openrouter/pair/privacy/think",
@@ -351,6 +357,7 @@ async fn throttled_providers_are_avoided_and_counted() {
                 promo_discount: None,
                 processed_at: None,
                 supports_tools: None,
+                supports_decisions: None,
                 quality_tier: None,
                 quality_score: None,
                 judged_at: None,
@@ -371,6 +378,7 @@ async fn throttled_providers_are_avoided_and_counted() {
                     promo_discount: None,
                     processed_at: "t".to_string(),
                     supports_tools: None,
+                    supports_decisions: None,
                 },
             )
             .unwrap();
@@ -608,6 +616,7 @@ async fn free_tier_fails_over_on_throttle() {
                 promo_discount: None,
                 processed_at: None,
                 supports_tools: None,
+                supports_decisions: None,
                 quality_tier: None,
                 quality_score: None,
                 judged_at: None,
@@ -628,6 +637,7 @@ async fn free_tier_fails_over_on_throttle() {
                     promo_discount: None,
                     processed_at: "t".to_string(),
                     supports_tools: None,
+                    supports_decisions: None,
                 },
             )
             .unwrap();
@@ -776,6 +786,7 @@ fn build_tools_db(path: &std::path::Path, with_capable: bool) {
                 promo_discount: None,
                 processed_at: None,
                 supports_tools: None,
+                supports_decisions: None,
                 quality_tier: None,
                 quality_score: None,
                 judged_at: None,
@@ -802,6 +813,7 @@ fn build_tools_db(path: &std::path::Path, with_capable: bool) {
                     promo_discount: None,
                     processed_at: "t".to_string(),
                     supports_tools: Some(i64::from(supports)),
+                    supports_decisions: None,
                 },
             )
             .unwrap();
@@ -817,5 +829,160 @@ fn build_tools_db(path: &std::path::Path, with_capable: bool) {
                 },
             )
             .unwrap();
+    }
+}
+
+/// Iter 24: `decision/free` serves the decisions-capable free
+/// offering, skipping the cheaper-or-equal incapable one.
+#[tokio::test]
+async fn decision_free_routes_to_capable_offering() {
+    let db = scratch_db("decision-route");
+    build_decision_db(&db, true, false);
+    let seen = Arc::new(Mutex::new(Upstream::default()));
+    let mock = spawn_mock(mock_app(seen.clone(), vec![], vec![])).await;
+    let gw = spawn_gateway(mock, &db).await;
+
+    let res = post_body(
+        gw,
+        "/v1/chat/completions",
+        r#"{"model":"openrouter/pair/decision/free","messages":[]}"#,
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let guard = seen.lock().unwrap();
+    assert_eq!(guard.hits.get("DecCo"), Some(&1));
+    assert_eq!(guard.hits.get("NoDec"), None);
+}
+
+/// Iter 24: `decision/free/fallback/low` serves the paid low tier
+/// when no free offering is decisions-capable.
+#[tokio::test]
+async fn decision_free_falls_back_to_low() {
+    let db = scratch_db("decision-fallback");
+    build_decision_db(&db, false, true);
+    let seen = Arc::new(Mutex::new(Upstream::default()));
+    let mock = spawn_mock(mock_app(seen.clone(), vec![], vec![])).await;
+    let gw = spawn_gateway(mock, &db).await;
+
+    let res = post_body(
+        gw,
+        "/v1/chat/completions",
+        r#"{"model":"openrouter/pair/decision/free/fallback/low","messages":[]}"#,
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let guard = seen.lock().unwrap();
+    assert_eq!(guard.hits.get("Cheap"), Some(&1));
+    assert_eq!(guard.hits.get("NoDec"), None);
+}
+
+/// Iter 24: `decision/free` with no capable offering and no fallback
+/// fails closed (503 availability, like the other tiers) without
+/// touching the upstream.
+#[tokio::test]
+async fn decision_free_starved_fails_closed() {
+    let db = scratch_db("decision-closed");
+    build_decision_db(&db, false, false);
+    let seen = Arc::new(Mutex::new(Upstream::default()));
+    let mock = spawn_mock(mock_app(seen.clone(), vec![], vec![])).await;
+    let gw = spawn_gateway(mock, &db).await;
+
+    let res = post_body(
+        gw,
+        "/v1/chat/completions",
+        r#"{"model":"openrouter/pair/decision/free","messages":[]}"#,
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body: serde_json::Value = res.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "no_eligible_offering");
+    assert!(seen.lock().unwrap().hits.is_empty());
+}
+
+/// Decision fixtures: `m/dfree` holds two zero-cost offerings —
+/// NoDec (never capable) and DecCo (capable when `with_capable`) —
+/// and `m/dpaid` optionally holds a judged paid offering for the
+/// fallback leg.
+fn build_decision_db(path: &std::path::Path, with_capable: bool, with_paid: bool) {
+    let _ = std::fs::remove_file(path);
+    let catalog = Catalog::open(path).unwrap();
+    catalog.init().unwrap();
+    let mut specs: Vec<(&str, &str, f64, bool, Option<&str>)> = vec![
+        ("m/dfree", "NoDec", 0.0, false, None),
+        ("m/dfree", "DecCo", 0.0, with_capable, None),
+    ];
+    if with_paid {
+        specs.push(("m/dpaid", "Cheap", 1.0, false, Some("low")));
+    }
+    for (model, provider, price, decisions, tier) in specs {
+        catalog
+            .insert_model(&ModelRow {
+                model_id: model.to_string(),
+                name: model.to_string(),
+                source: "test".to_string(),
+                payload: "{}".to_string(),
+                fetched_at: "t".to_string(),
+            })
+            .unwrap_or(());
+        catalog
+            .insert_endpoint(&EndpointRow {
+                id: 0,
+                model_id: model.to_string(),
+                provider_name: provider.to_string(),
+                payload: "{}".to_string(),
+                fetched_at: "t".to_string(),
+                price_prompt: None,
+                price_completion: None,
+                price_cache_read: None,
+                price_cache_write: None,
+                precision_class: None,
+                promo_discount: None,
+                processed_at: None,
+                supports_tools: None,
+                supports_decisions: None,
+                quality_tier: None,
+                quality_score: None,
+                judged_at: None,
+                judge_model: None,
+                judge_prompt: None,
+            })
+            .unwrap();
+        let id = catalog
+            .endpoints_for(model)
+            .unwrap()
+            .iter()
+            .find(|e| e.provider_name == provider)
+            .unwrap()
+            .id;
+        catalog
+            .update_endpoint_index(
+                id,
+                &EndpointIndex {
+                    price_prompt: Some(price),
+                    price_completion: Some(price),
+                    price_cache_read: None,
+                    price_cache_write: None,
+                    precision_class: Some("fp16".to_string()),
+                    promo_discount: None,
+                    processed_at: "t".to_string(),
+                    supports_tools: None,
+                    supports_decisions: Some(i64::from(decisions)),
+                },
+            )
+            .unwrap();
+        if let Some(tier) = tier {
+            catalog
+                .update_endpoint_judgment(
+                    id,
+                    &EndpointJudgment {
+                        quality_tier: Some(tier.to_string()),
+                        quality_score: None,
+                        judged_at: "t".to_string(),
+                        judge_model: None,
+                        judge_prompt: None,
+                    },
+                )
+                .unwrap();
+        }
     }
 }

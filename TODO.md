@@ -152,7 +152,13 @@ cheap judge model, classifier-based routing.
       unloadable catalog attaches an empty standby router; the
       periodic reload heals it when a good artifact lands.
       Test: standby-heals integration (passthrough → routed, ready).
-- [ ] **Iter 24 — OpenRouter-native interface.** `/api/v1/chat/completions`
+- [x] **Iter 24 — Decision tier.** `openrouter/pair/decision[/free]`
+      routes decisions-capable offerings (schema v5 index from model
+      modality); `decision/free/fallback/<tier>` falls back past
+      exhaustion; `EXTRA_MODEL_IDS` syncs unlisted models.
+      Test: extraction trio + fetch merge + parse + 3 integration
+      (route, fallback, fail-closed).
+- [ ] **Iter 25 — OpenRouter-native interface.** `/api/v1/chat/completions`
       + `/api/v1/responses` alias to the routed handler; native fallback
       paths compose against the upstream root (no double `/api`);
       management writes deny by default (`ALLOW_MANAGEMENT_PROXY=1` opts

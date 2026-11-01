@@ -10,8 +10,8 @@
 //! so the artifact ships with processing applied.
 
 use pennyrouter_catalog::{
-    fetch_openrouter, load_endpoints_dir, now_rfc3339, publish, run_fixture_sync, run_processing,
-    Catalog,
+    fetch_openrouter_extra, load_endpoints_dir, now_rfc3339, publish, run_fixture_sync,
+    run_processing, Catalog,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -102,10 +102,21 @@ fn run() -> Result<(), String> {
 
     // Whatever produces the bytes, the fixture boundary loads them:
     // live fetch returns the same shapes the fixture files hold.
+    // EXTRA_MODEL_IDS (comma-separated, Iter 24) nominates ids the
+    // models list omits (e.g. non-text-output scoring models) for an
+    // individual endpoints fetch each.
     let (models_json, endpoints) = if args.fetch_openrouter {
         let base = std::env::var("OPENROUTER_BASE_URL")
             .unwrap_or_else(|_| "https://openrouter.ai/api".to_string());
-        let fetched = fetch_openrouter(&base).map_err(|e| e.to_string())?;
+        let extra_ids: Vec<String> = std::env::var("EXTRA_MODEL_IDS")
+            .map(|raw| {
+                raw.split(',')
+                    .map(|id| id.trim().to_string())
+                    .filter(|id| !id.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let fetched = fetch_openrouter_extra(&base, &extra_ids).map_err(|e| e.to_string())?;
         if !fetched.skipped.is_empty() {
             println!("skipped {} models without endpoints", fetched.skipped.len());
         }

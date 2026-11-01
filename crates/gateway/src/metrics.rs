@@ -359,7 +359,7 @@ impl Drop for OwnedInFlightGuard {
 mod tests {
     use super::Route;
 
-    /// Native aliases share the routed slots (Iter 24): observability
+    /// Native aliases share the routed slots (Iter 25): observability
     /// stays intact, no new label cardinality.
     #[test]
     fn native_aliases_share_routed_slots() {

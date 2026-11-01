@@ -1,4 +1,4 @@
-//! Iter 24: OpenRouter-native interface.
+//! Iter 25: OpenRouter-native interface.
 //!
 //! Native SDK paths under `/api/v1/…` work through the gateway: the two
 //! routed calls alias to the same handler (rewritten to `/v1/…`

@@ -38,6 +38,7 @@ services:
     environment:
       SYNC_INTERVAL: ${SYNC_INTERVAL:-3600}
       FETCH_OPENROUTER: ${FETCH_OPENROUTER:-0}
+      EXTRA_MODEL_IDS: ${EXTRA_MODEL_IDS:-}
     restart: unless-stopped
   # Opt-in catalog browser (Iter 17): only starts with
   #   docker compose --profile ui up catalog-ui

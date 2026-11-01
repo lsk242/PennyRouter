@@ -46,6 +46,7 @@ fn scratch_db(test: &str) -> std::path::PathBuf {
             promo_discount: None,
             processed_at: Some("t".to_string()),
             supports_tools: None,
+            supports_decisions: None,
             quality_tier: Some("high".to_string()),
             quality_score: Some(0.9),
             judged_at: Some("t".to_string()),

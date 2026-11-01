@@ -493,7 +493,23 @@ Development delivers Docker images, platform delivers deployments.
   Proven by a standby-heals integration test.
   `cargo test`, clippy, fmt clean.
 
-## Iter 24 — OpenRouter-native interface
+## Iter 24 — Decision tier (in progress)
+
+- Goal: serve behavior-scoring ("decision") models through
+  `openrouter/pair/decision/free` with fallback — the models list
+  omits them entirely, so the tier needs its own signal and sync
+  path.
+- Value: judge/scoring workloads ride a routed pool instead of
+  hardcoding one provider; exhaustion falls through to a paid tier.
+- Shipped: per-endpoint `supports_decisions` index from the parent
+  model payload (schema v5, auto-migrate); `EXTRA_MODEL_IDS` fetch
+  seam for unlisted ids (FK-safe: model + endpoints kept as a pair);
+  `decision` tier (cheapest-capable, no floor, no class gate) with
+  `/free` scope + `/fallback/<tier>`; `decision` fallback target.
+  Proven by extraction + fetch + parse + 3 integration tests.
+  `cargo test`, clippy, fmt clean.
+
+## Iter 25 — OpenRouter-native interface
 
 - Goal: OpenRouter-native SDKs work through the gateway with an
   explicit `baseURL`, no DNS spoofing. See
@@ -515,7 +531,7 @@ Development delivers Docker images, platform delivers deployments.
   catalog, deny-by-default + opt-in, reads unaffected) plus a
   `Route::from_path` unit test. `cargo test`, clippy, fmt clean.
 
-## After Iter 24
+## After Iter 25
 
 Deferred ideas in [future.md](future.md): classifier routing,
 parallel fan-out, more judge models. Each becomes roadmap items only

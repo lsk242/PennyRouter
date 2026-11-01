@@ -1,6 +1,6 @@
 # Proposal: OpenRouter-native interface for PennyRouter
 
-> Date: 2026-11-01 · Author: freeclaw · Status: Implemented (Iter 24)
+> Date: 2026-11-01 · Author: freeclaw · Status: Implemented (Iter 25)
 
 ## TL;DR
 

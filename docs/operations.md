@@ -95,7 +95,7 @@ fallback proxy — key creation, credit purchases, workspace budget
 changes — answer 403 `management_proxy_disabled` without touching
 upstream; set to `1` to proxy them. Reads are unaffected).
 
-## OpenRouter-native clients (Iter 24)
+## OpenRouter-native clients (Iter 25)
 
 Point OpenAI-compatible harnesses at the gateway with an explicit
 `baseURL` — no DNS tricks needed (detail:
