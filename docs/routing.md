@@ -121,6 +121,17 @@ session.
   remain. `privacy/` variants enforce `zdr: true` +
   `data_collection: "deny"` unless the caller set them; true
   provider-side privacy filtering waits on index signals.
+- Decision tier (Iter 24): `openrouter/pair/[privacy/]decision`
+  routes to the cheapest decisions-capable offering (behavior-scoring
+  models, `architecture.output_modalities` containing `"decisions"`,
+  schema v5); `decision/free` scopes it to zero-cost with the same
+  free semantics, and `decision/free/fallback/<tier>` falls back past
+  exhaustion like the free tier. No quality floor and no precision
+  class requirement (scoring endpoints report `unknown`
+  quantization); paid-only bare scope keeps tier disjointness. The
+  tier only sees what the catalog synced: the models list omits
+  non-text-output models, so `EXTRA_MODEL_IDS` (comma-separated,
+  catalog-sync env) nominates such ids for individual fetching.
 - Cost (Iter 7): "cheapest" compares effective cost under the balanced
   workload profile (see [pricing.md](pricing.md)), promo column
   applied; unpriceable offerings sort last. The `openrouter/free`

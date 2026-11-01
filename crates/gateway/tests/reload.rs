@@ -40,6 +40,7 @@ fn add_model(db: &std::path::Path, model_id: &str, provider: &str, prompt_price:
             promo_discount: None,
             processed_at: None,
             supports_tools: None,
+            supports_decisions: None,
             quality_tier: None,
             quality_score: None,
             judged_at: None,
@@ -60,6 +61,7 @@ fn add_model(db: &std::path::Path, model_id: &str, provider: &str, prompt_price:
                 promo_discount: None,
                 processed_at: now_rfc3339().unwrap(),
                 supports_tools: None,
+                supports_decisions: None,
             },
         )
         .unwrap();

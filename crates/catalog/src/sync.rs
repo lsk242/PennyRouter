@@ -102,6 +102,7 @@ pub fn run_fixture_sync(
                 promo_discount: None,
                 processed_at: None,
                 supports_tools: None,
+                supports_decisions: None,
                 quality_tier: None,
                 quality_score: None,
                 judged_at: None,

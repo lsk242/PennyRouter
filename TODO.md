@@ -148,3 +148,9 @@ cheap judge model, classifier-based routing.
       leg; starvation fails closed with `tools_unsupported` (400).
       Test: extraction asserts (1/0/NULL) + unit (detect/allow) + 2
       integration (routes capable, fails closed).
+- [x] **Iter 24 — Decision tier.** `openrouter/pair/decision[/free]`
+      routes decisions-capable offerings (schema v5 index from model
+      modality); `decision/free/fallback/<tier>` falls back past
+      exhaustion; `EXTRA_MODEL_IDS` syncs unlisted models.
+      Test: extraction trio + fetch merge + parse + 3 integration
+      (route, fallback, fail-closed).

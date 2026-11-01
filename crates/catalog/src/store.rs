@@ -28,6 +28,7 @@ pub struct EndpointRow {
     pub promo_discount: Option<f64>,
     pub processed_at: Option<String>,
     pub supports_tools: Option<i64>,
+    pub supports_decisions: Option<i64>,
     pub quality_tier: Option<String>,
     pub quality_score: Option<f64>,
     pub judged_at: Option<String>,
@@ -45,6 +46,7 @@ pub struct EndpointIndex {
     pub promo_discount: Option<f64>,
     pub processed_at: String,
     pub supports_tools: Option<i64>,
+    pub supports_decisions: Option<i64>,
 }
 
 /// Model-judged signals distilled by judging (Phase 2b), plus the
@@ -62,7 +64,7 @@ pub struct EndpointJudgment {
 const ENDPOINT_COLS: &str = "id, model_id, provider_name, payload, fetched_at,
     price_prompt, price_completion, price_cache_read, price_cache_write,
     precision_class, promo_discount, processed_at, supports_tools,
-    quality_tier, quality_score, judged_at, judge_model, judge_prompt";
+    supports_decisions, quality_tier, quality_score, judged_at, judge_model, judge_prompt";
 
 fn endpoint_row(r: &Row) -> Result<EndpointRow, rusqlite::Error> {
     Ok(EndpointRow {
@@ -79,11 +81,12 @@ fn endpoint_row(r: &Row) -> Result<EndpointRow, rusqlite::Error> {
         promo_discount: r.get(10)?,
         processed_at: r.get(11)?,
         supports_tools: r.get(12)?,
-        quality_tier: r.get(13)?,
-        quality_score: r.get(14)?,
-        judged_at: r.get(15)?,
-        judge_model: r.get(16)?,
-        judge_prompt: r.get(17)?,
+        supports_decisions: r.get(13)?,
+        quality_tier: r.get(14)?,
+        quality_score: r.get(15)?,
+        judged_at: r.get(16)?,
+        judge_model: r.get(17)?,
+        judge_prompt: r.get(18)?,
     })
 }
 
@@ -194,7 +197,8 @@ impl Catalog {
         self.conn.execute(
             "UPDATE endpoints SET price_prompt = ?1, price_completion = ?2,
              price_cache_read = ?3, price_cache_write = ?4, precision_class = ?5,
-             promo_discount = ?6, processed_at = ?7, supports_tools = ?8 WHERE id = ?9",
+             promo_discount = ?6, processed_at = ?7, supports_tools = ?8,
+             supports_decisions = ?9 WHERE id = ?10",
             params![
                 index.price_prompt,
                 index.price_completion,
@@ -204,6 +208,7 @@ impl Catalog {
                 index.promo_discount,
                 index.processed_at,
                 index.supports_tools,
+                index.supports_decisions,
                 id
             ],
         )?;
@@ -321,7 +326,7 @@ mod tests {
         catalog.init().unwrap();
         assert_eq!(
             catalog.get_meta("schema_version").unwrap().as_deref(),
-            Some("4")
+            Some("5")
         );
         assert_eq!(catalog.counts().unwrap(), (0, 0));
     }

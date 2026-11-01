@@ -31,6 +31,7 @@ services:
     environment:
       SYNC_INTERVAL: ${SYNC_INTERVAL:-3600}
       FETCH_OPENROUTER: ${FETCH_OPENROUTER:-0}
+      EXTRA_MODEL_IDS: ${EXTRA_MODEL_IDS:-}
     restart: unless-stopped
 
 volumes:

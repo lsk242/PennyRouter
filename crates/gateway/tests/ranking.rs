@@ -52,6 +52,7 @@ fn insert_offering(catalog: &Catalog, model: &str, provider: &str, price: f64, t
             promo_discount: None,
             processed_at: None,
             supports_tools: None,
+            supports_decisions: None,
             quality_tier: None,
             quality_score: None,
             judged_at: None,
@@ -72,6 +73,7 @@ fn insert_offering(catalog: &Catalog, model: &str, provider: &str, price: f64, t
                 promo_discount: None,
                 processed_at: "t".to_string(),
                 supports_tools: None,
+                supports_decisions: None,
             },
         )
         .unwrap();

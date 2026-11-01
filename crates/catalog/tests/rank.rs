@@ -144,6 +144,7 @@ fn tie_db(path: &std::path::Path) {
                 promo_discount: None,
                 processed_at: None,
                 supports_tools: None,
+                supports_decisions: None,
                 quality_tier: None,
                 quality_score: None,
                 judged_at: None,
@@ -161,6 +162,7 @@ fn tie_db(path: &std::path::Path) {
         promo_discount: None,
         processed_at: "t".to_string(),
         supports_tools: None,
+        supports_decisions: None,
     };
     let judgment = EndpointJudgment {
         quality_tier: Some("standard".to_string()),
@@ -254,6 +256,7 @@ fn unknown_scores_sort_after_known_scores() {
                 promo_discount: None,
                 processed_at: None,
                 supports_tools: None,
+                supports_decisions: None,
                 quality_tier: None,
                 quality_score: None,
                 judged_at: None,
@@ -333,6 +336,7 @@ fn tag_breaks_same_provider_ties_regardless_of_insertion_order() {
                 promo_discount: None,
                 processed_at: None,
                 supports_tools: None,
+                supports_decisions: None,
                 quality_tier: None,
                 quality_score: None,
                 judged_at: None,
@@ -398,6 +402,7 @@ fn promo_free_eligibility_published_with_validity() {
                 promo_discount: None,
                 processed_at: None,
                 supports_tools: None,
+                supports_decisions: None,
                 quality_tier: None,
                 quality_score: None,
                 judged_at: None,
@@ -418,6 +423,7 @@ fn promo_free_eligibility_published_with_validity() {
                     promo_discount: None,
                     processed_at: "t".to_string(),
                     supports_tools: None,
+                    supports_decisions: None,
                 },
             )
             .unwrap();
@@ -497,6 +503,7 @@ fn promo_active_leads_and_expired_falls_back() {
                 promo_discount: None,
                 processed_at: None,
                 supports_tools: None,
+                supports_decisions: None,
                 quality_tier: None,
                 quality_score: None,
                 judged_at: None,
@@ -517,6 +524,7 @@ fn promo_active_leads_and_expired_falls_back() {
                     promo_discount: None,
                     processed_at: "t".to_string(),
                     supports_tools: None,
+                    supports_decisions: None,
                 },
             )
             .unwrap();
@@ -573,6 +581,7 @@ fn assist_prefer_and_avoid_override_signals() {
         promo_discount: None,
         processed_at: "t".to_string(),
         supports_tools: None,
+        supports_decisions: None,
     };
     catalog.update_endpoint_index(eps[1].id, &cheap).unwrap();
 

@@ -111,9 +111,10 @@ fn migration_v1_to_current_preserves_data() {
     assert_eq!(eps[0].judge_model, None);
     assert_eq!(eps[0].judge_prompt, None);
     assert_eq!(eps[0].supports_tools, None);
+    assert_eq!(eps[0].supports_decisions, None);
     assert_eq!(
         catalog.get_meta("schema_version").unwrap().as_deref(),
-        Some("4")
+        Some("5")
     );
 
     // Processing works on the migrated DB.
@@ -123,6 +124,7 @@ fn migration_v1_to_current_preserves_data() {
     assert_eq!(eps[0].precision_class.as_deref(), Some("unknown"));
     assert_eq!(eps[0].processed_at.as_deref(), Some(PROCESSED_AT));
     assert_eq!(eps[0].supports_tools, None); // '{}' has no supported_parameters
+    assert_eq!(eps[0].supports_decisions, None); // '{}' model payload has no architecture
 }
 
 #[test]
@@ -141,4 +143,96 @@ fn sync_process_publish_pipeline() {
     let eps = catalog.endpoints_for("openai/gpt-6.1-terra-pro").unwrap();
     assert_eq!(eps[0].price_prompt, Some(0.0000005));
     assert_eq!(eps[0].processed_at.as_deref(), Some(PROCESSED_AT));
+}
+
+/// Iter 24: decision-modality extraction reads the parent *model*
+/// payload — `decisions` in `architecture.output_modalities` marks
+/// the endpoint, other modalities clear it, missing data is unknown.
+#[test]
+fn processing_extracts_decision_support_from_model_payload() {
+    use pennyrouter_catalog::{EndpointIndex, EndpointRow, ModelRow};
+
+    let dir = common::scratch("decisions");
+    let db = dir.join("work.db");
+    let catalog = Catalog::open(&db).unwrap();
+    catalog.init().unwrap();
+    let model = |id: &str, payload: &str| ModelRow {
+        model_id: id.into(),
+        name: id.into(),
+        source: "openrouter".into(),
+        payload: payload.into(),
+        fetched_at: "t".into(),
+    };
+    let endpoint = |id: &str| EndpointRow {
+        id: 0,
+        model_id: id.into(),
+        provider_name: "p".into(),
+        payload: "{}".into(),
+        fetched_at: "t".into(),
+        price_prompt: None,
+        price_completion: None,
+        price_cache_read: None,
+        price_cache_write: None,
+        precision_class: None,
+        promo_discount: None,
+        processed_at: None,
+        supports_tools: None,
+        supports_decisions: None,
+        quality_tier: None,
+        quality_score: None,
+        judged_at: None,
+        judge_model: None,
+        judge_prompt: None,
+    };
+    catalog
+        .insert_model(&model(
+            "m/decider",
+            r#"{"architecture":{"output_modalities":["text","decisions"]}}"#,
+        ))
+        .unwrap();
+    catalog
+        .insert_model(&model(
+            "m/chatter",
+            r#"{"architecture":{"output_modalities":["text"]}}"#,
+        ))
+        .unwrap();
+    catalog.insert_model(&model("m/bare", "{}")).unwrap();
+    for id in ["m/decider", "m/chatter", "m/bare"] {
+        catalog.insert_endpoint(&endpoint(id)).unwrap();
+    }
+    // Fill NOT NULL price columns so nothing else interferes.
+    for id in ["m/decider", "m/chatter", "m/bare"] {
+        let row = catalog.endpoints_for(id).unwrap().remove(0);
+        catalog
+            .update_endpoint_index(
+                row.id,
+                &EndpointIndex {
+                    price_prompt: Some(0.0),
+                    price_completion: Some(0.0),
+                    price_cache_read: None,
+                    price_cache_write: None,
+                    precision_class: Some("fp16".to_string()),
+                    promo_discount: None,
+                    processed_at: "t".to_string(),
+                    supports_tools: None,
+                    supports_decisions: None,
+                },
+            )
+            .unwrap();
+    }
+
+    run_processing(&catalog, PROCESSED_AT).unwrap();
+
+    assert_eq!(
+        catalog.endpoints_for("m/decider").unwrap()[0].supports_decisions,
+        Some(1)
+    );
+    assert_eq!(
+        catalog.endpoints_for("m/chatter").unwrap()[0].supports_decisions,
+        Some(0)
+    );
+    assert_eq!(
+        catalog.endpoints_for("m/bare").unwrap()[0].supports_decisions,
+        None
+    );
 }
