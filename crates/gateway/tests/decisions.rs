@@ -1,4 +1,4 @@
-//! Iter 25: `POST /v1/decisions` routes decisions bodies over
+//! Iter 27: `POST /v1/decisions` routes decisions bodies over
 //! decisions-capable offerings and forwards to the upstream alpha
 //! decisions endpoint — model rewritten, nothing else injected.
 

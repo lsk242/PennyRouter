@@ -63,7 +63,7 @@ impl Route {
             Self::Ui => 3,
             Self::Metrics => 4,
             Self::Other => 5,
-            // Appended last (Iter 25) so existing slot indices —
+            // Appended last (Iter 27) so existing slot indices —
             // and any dashboard pinned to them — never shift.
             Self::Decisions => 6,
         }

@@ -509,7 +509,7 @@ Development delivers Docker images, platform delivers deployments.
   Proven by extraction + fetch + parse + 3 integration tests.
   `cargo test`, clippy, fmt clean.
 
-## Iter 25 — Decisions route (in progress)
+## Iter 27 — Decisions route (in progress)
 
 - Goal: serve decision models for real — the tier routes, but span
   400s on chat completions; it needs the alpha decisions endpoint.
@@ -520,7 +520,7 @@ Development delivers Docker images, platform delivers deployments.
   `decisions` observability slot; 5 integration tests.
   `cargo test`, clippy, fmt clean.
 
-## After Iter 25
+## After Iter 27
 
 Deferred ideas in [future.md](future.md): classifier routing,
 parallel fan-out, more judge models. Each becomes roadmap items only
