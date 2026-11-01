@@ -509,7 +509,29 @@ Development delivers Docker images, platform delivers deployments.
   Proven by extraction + fetch + parse + 3 integration tests.
   `cargo test`, clippy, fmt clean.
 
-## After Iter 24
+## Iter 25 — OpenRouter-native interface
+
+- Goal: OpenRouter-native SDKs work through the gateway with an
+  explicit `baseURL`, no DNS spoofing. See
+  [proposals/2026-11-01-openrouter-interface.md](proposals/2026-11-01-openrouter-interface.md).
+- Value: native clients keep their paths (`/api/v1/…`); account and
+  catalog reads stop 404ing on a doubled `/api`; money/key writes
+  stay denied by default.
+- Shipped: `POST /api/v1/chat/completions` and
+  `POST /api/v1/responses` alias to the routed handler (upstream path
+  rewritten to `/v1/…`, same metrics slots); native fallback paths
+  compose against the upstream root (configured base minus `/api`,
+  so mocks and Ollama bases keep working); non-GET key, coinbase,
+  and workspace-budget paths answer 403 `management_proxy_disabled`
+  unless `ALLOW_MANAGEMENT_PROXY=1`. `GET /api/v1/models` proxies the
+  full upstream catalog (the curated six-id menu stays on
+  `GET /v1/models`).
+- Test: `crates/gateway/tests/openrouter_native.rs` (alias rewrite,
+  root composition with and without the `/api` suffix, upstream
+  catalog, deny-by-default + opt-in, reads unaffected) plus a
+  `Route::from_path` unit test. `cargo test`, clippy, fmt clean.
+
+## After Iter 25
 
 Deferred ideas in [future.md](future.md): classifier routing,
 parallel fan-out, more judge models. Each becomes roadmap items only

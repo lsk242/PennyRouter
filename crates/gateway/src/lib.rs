@@ -165,6 +165,7 @@ impl Default for ConcurrencyLimits {
 #[derive(Clone)]
 pub struct AppState {
     upstream_base_url: String,
+    allow_management_proxy: bool,
     extra_upstreams: HashMap<String, String>,
     client: reqwest::Client,
     timeouts: Timeouts,
@@ -202,6 +203,7 @@ impl AppState {
         let max_upstream = limits.max_upstream.max(1);
         Self {
             upstream_base_url: base.trim_end_matches('/').to_string(),
+            allow_management_proxy: false,
             extra_upstreams: HashMap::new(),
             client,
             timeouts,
@@ -228,6 +230,14 @@ impl AppState {
     /// Base URL for a pinned provider, if configured.
     pub fn pinned_upstream(&self, provider: &str) -> Option<&str> {
         self.extra_upstreams.get(provider).map(String::as_str)
+    }
+
+    /// Allow proxying management writes (Iter 25): key creation,
+    /// credit purchases, workspace budget changes. Denied by default;
+    /// tests and explicit opt-ins use this instead of the env flag.
+    pub fn with_management_proxy(mut self, allow: bool) -> Self {
+        self.allow_management_proxy = allow;
+        self
     }
 
     /// Default (OpenRouter) upstream base URL (Iter 17: landing page).
@@ -301,6 +311,9 @@ impl AppState {
         } else {
             state = state.with_upstream("baseten", "https://inference.baseten.co");
         }
+        // Management writes (Iter 25): proxied only on explicit opt-in,
+        // otherwise denied with 403 before touching upstream.
+        state.allow_management_proxy = env_flag("ALLOW_MANAGEMENT_PROXY");
         match std::env::var("CATALOG_DB") {
             Err(_) => state,
             Ok(path) => match routing::Router::load(&path) {
@@ -381,10 +394,16 @@ pub fn build_hash() -> &'static str {
 /// registers `GET /ui`. Anything else — including unset — leaves the
 /// path unregistered: no handler, no middleware branch, zero
 /// request-path cost.
-fn ui_enabled() -> bool {
-    std::env::var("GATEWAY_UI")
+/// Truthy env flags: `1`/`true`/`yes` (any case) opt in; anything
+/// else — including unset — leaves the feature off.
+fn env_flag(name: &str) -> bool {
+    std::env::var(name)
         .map(|value| matches!(value.to_lowercase().as_str(), "1" | "true" | "yes"))
         .unwrap_or(false)
+}
+
+fn ui_enabled() -> bool {
+    env_flag("GATEWAY_UI")
 }
 
 pub fn app_with_state(state: AppState) -> Router {
@@ -397,6 +416,12 @@ pub fn app_with_state(state: AppState) -> Router {
         // Responses bodies carry the same `model` field, so they get
         // the same routing, budget, and floor policy (Iter 14).
         .route("/v1/responses", post(routed_completion))
+        // OpenRouter-native aliases (Iter 25): native SDKs address the
+        // same routed handler under `/api/v1/…`. The upstream path is
+        // rewritten to `/v1/…` before forwarding, so the configured
+        // `/api` base never doubles it.
+        .route("/api/v1/chat/completions", post(routed_completion))
+        .route("/api/v1/responses", post(routed_completion))
         // Curated menu (Iter 13): clients discover exactly the virtual
         // models; this path used to proxy upstream.
         .route("/v1/models", get(models_list));
@@ -729,9 +754,11 @@ async fn routed_completion(
         },
         None => (buffered, None),
     };
+    // OpenRouter-native aliases (Iter 25) arrive as `/api/v1/…`; the
+    // upstream keeps the `/v1/…` shape so the `/api` base never doubles.
     let path = uri
         .path_and_query()
-        .map(|path_and_query| path_and_query.as_str().to_string())
+        .map(|path_and_query| strip_api_prefix(path_and_query.as_str()))
         .unwrap_or_else(|| "/v1/chat/completions".to_string());
     let default_base = state.upstream_base_url.clone();
     let mut response = forward_upstream(
@@ -915,6 +942,11 @@ fn is_retryable(status: StatusCode) -> bool {
 /// Drop-in fallback (Iter 8): any standard endpoint without a custom
 /// handler is proxied upstream untouched and logged with its full path,
 /// so no client call ever goes silent. No routing or rewriting applies.
+///
+/// OpenRouter-native paths (Iter 25, `/api/…`) compose against the
+/// upstream root — the configured base without its `/api` route
+/// prefix — so account/catalog paths stop doubling `/api`. Management
+/// writes stay denied unless `ALLOW_MANAGEMENT_PROXY=1`.
 async fn fallback_proxy(State(state): State<AppState>, request: Request) -> Response {
     let (parts, body) = request.into_parts();
     let path = parts
@@ -930,6 +962,9 @@ async fn fallback_proxy(State(state): State<AppState>, request: Request) -> Resp
             "path": redact_query(&path),
         })
     ));
+    if !state.allow_management_proxy && is_blocked_management_write(&parts.method, &path) {
+        return management_forbidden();
+    }
     let permit = match acquire_upstream_slot(&state).await {
         Some(permit) => permit,
         None => {
@@ -941,13 +976,20 @@ async fn fallback_proxy(State(state): State<AppState>, request: Request) -> Resp
         Ok(buffered) => buffered,
         Err(response) => return *response,
     };
-    let fallback_base = state.upstream_base_url.clone();
+    // Native paths keep their full path and compose against the
+    // upstream root (`base` minus `/api`); everything else keeps the
+    // historical `base + path` composition.
+    let (fallback_base, upstream_path) = if is_openrouter_native_path(&path) {
+        (upstream_root(&state.upstream_base_url), path)
+    } else {
+        (state.upstream_base_url.clone(), path)
+    };
     forward_upstream(
         &state,
         &fallback_base,
         permit,
         &parts.method,
-        &path,
+        &upstream_path,
         &parts.headers,
         buffered,
     )
@@ -961,6 +1003,82 @@ fn redact_query(path: &str) -> String {
         Some(i) => format!("{}?[redacted]", &path[..i]),
         None => path.to_string(),
     }
+}
+
+/// Path portion of a `path_and_query` string (drops `?...`).
+fn request_path(path_and_query: &str) -> &str {
+    match path_and_query.find('?') {
+        Some(i) => &path_and_query[..i],
+        None => path_and_query,
+    }
+}
+
+/// True for OpenRouter-native gateway paths: `/api` with a `/`
+/// boundary (`/api/v1/credits`, never `/apix`). The query string is
+/// not part of the decision.
+fn is_openrouter_native_path(path_and_query: &str) -> bool {
+    let path = request_path(path_and_query).trim_end_matches('/');
+    path == "/api" || path.starts_with("/api/")
+}
+
+/// Rewrite an OpenRouter-native gateway path for upstream: strip the
+/// `/api` prefix, keep the query string. Anything else passes through
+/// unchanged (Iter 25).
+fn strip_api_prefix(path_and_query: &str) -> String {
+    if !is_openrouter_native_path(path_and_query) {
+        return path_and_query.to_string();
+    }
+    let (path, query) = match path_and_query.find('?') {
+        Some(i) => (&path_and_query[..i], &path_and_query[i..]),
+        None => (path_and_query, ""),
+    };
+    match path.strip_prefix("/api") {
+        Some("") | None => format!("/{query}"),
+        Some(rest) => format!("{rest}{query}"),
+    }
+}
+
+/// Upstream root for native paths (Iter 25): the configured base
+/// without its trailing `/api` route prefix. The default
+/// `https://openrouter.ai/api` becomes `https://openrouter.ai`, so
+/// `root + stripped path` lands on the real endpoint; bases without
+/// the suffix (mocks, Ollama) pass through untouched.
+fn upstream_root(base: &str) -> String {
+    let base = base.trim_end_matches('/');
+    base.strip_suffix("/api").unwrap_or(base).to_string()
+}
+
+/// Segment-boundary prefix: `/api/v1/keys` matches itself and
+/// `/api/v1/keys/…`, never `/api/v1/keysaw`.
+fn segment_prefixed(path: &str, prefix: &str) -> bool {
+    path == prefix || path.starts_with(&format!("{prefix}/"))
+}
+
+/// True for management writes (Iter 25): key creation/rotation,
+/// credit purchases, and workspace budget changes move money or trust,
+/// so they proxy only with `ALLOW_MANAGEMENT_PROXY=1`. Reads always
+/// pass through.
+fn is_blocked_management_write(method: &Method, path_and_query: &str) -> bool {
+    if *method == Method::GET || *method == Method::HEAD || *method == Method::OPTIONS {
+        return false;
+    }
+    let path = request_path(path_and_query).trim_end_matches('/');
+    segment_prefixed(path, "/api/v1/keys")
+        || segment_prefixed(path, "/api/v1/auth/key")
+        || segment_prefixed(path, "/api/v1/auth/keys")
+        || segment_prefixed(path, "/api/v1/credits/coinbase")
+        || (path.starts_with("/api/v1/workspaces/")
+            && path.split('/').any(|segment| segment == "budgets"))
+}
+
+fn management_forbidden() -> Response {
+    error_response(
+        StatusCode::FORBIDDEN,
+        "invalid_request_error",
+        "management_proxy_disabled",
+        "management writes are disabled by default (set ALLOW_MANAGEMENT_PROXY=1 to proxy them)"
+            .to_string(),
+    )
 }
 
 /// Read a request body up to the token-guard cap, rejecting oversize
@@ -1157,9 +1275,11 @@ async fn forward_pinned(
         return provider_not_configured(provider);
     };
     let base = base.to_string();
+    // Pinned bases carry no route prefix either, so native aliases get
+    // the same `/api` strip as the default path (Iter 25).
     let path = uri
         .path_and_query()
-        .map(|path_and_query| path_and_query.as_str().to_string())
+        .map(|path_and_query| strip_api_prefix(path_and_query.as_str()))
         .unwrap_or_else(|| "/v1/chat/completions".to_string());
     let json: serde_json::Value = serde_json::from_slice(&buffered).unwrap_or_default();
     let (forwarded_body, decision) = routing::route_pinned(model, json)

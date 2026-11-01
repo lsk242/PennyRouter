@@ -18,7 +18,7 @@ const BUCKETS: [f64; 14] = [
 ];
 
 /// Fixed route slots keep labels bounded and the hot path free of maps.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Route {
     Health,
     Chat,
@@ -33,8 +33,8 @@ impl Route {
         match path {
             "/" => Self::Ui,
             "/health" => Self::Health,
-            "/v1/chat/completions" => Self::Chat,
-            "/v1/responses" => Self::Responses,
+            "/v1/chat/completions" | "/api/v1/chat/completions" => Self::Chat,
+            "/v1/responses" | "/api/v1/responses" => Self::Responses,
             "/ui" => Self::Ui,
             "/metrics" => Self::Metrics,
             _ => Self::Other,
@@ -213,7 +213,14 @@ impl Metrics {
         let mut out = String::new();
         out.push_str("# HELP pennyrouter_requests_total Requests handled.\n");
         out.push_str("# TYPE pennyrouter_requests_total counter\n");
-        for route in [Route::Health, Route::Chat, Route::Metrics, Route::Other] {
+        for route in [
+            Route::Health,
+            Route::Chat,
+            Route::Responses,
+            Route::Ui,
+            Route::Metrics,
+            Route::Other,
+        ] {
             let metrics = &self.routes[route.index()];
             let counts = metrics
                 .requests_by_status
@@ -234,7 +241,14 @@ impl Metrics {
         }
         out.push_str("# HELP pennyrouter_request_latency_seconds Request latency.\n");
         out.push_str("# TYPE pennyrouter_request_latency_seconds histogram\n");
-        for route in [Route::Health, Route::Chat, Route::Metrics, Route::Other] {
+        for route in [
+            Route::Health,
+            Route::Chat,
+            Route::Responses,
+            Route::Ui,
+            Route::Metrics,
+            Route::Other,
+        ] {
             let metrics = &self.routes[route.index()];
             for (bound, bucket) in BUCKETS.iter().zip(metrics.buckets.iter()) {
                 out.push_str(&format!(
@@ -338,5 +352,20 @@ pub struct OwnedInFlightGuard {
 impl Drop for OwnedInFlightGuard {
     fn drop(&mut self) {
         self.metrics.in_flight.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Route;
+
+    /// Native aliases share the routed slots (Iter 25): observability
+    /// stays intact, no new label cardinality.
+    #[test]
+    fn native_aliases_share_routed_slots() {
+        assert_eq!(Route::from_path("/api/v1/chat/completions"), Route::Chat);
+        assert_eq!(Route::from_path("/api/v1/responses"), Route::Responses);
+        assert_eq!(Route::from_path("/v1/chat/completions"), Route::Chat);
+        assert_eq!(Route::from_path("/api/v1/credits"), Route::Other);
     }
 }

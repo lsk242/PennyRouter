@@ -158,3 +158,9 @@ cheap judge model, classifier-based routing.
       exhaustion; `EXTRA_MODEL_IDS` syncs unlisted models.
       Test: extraction trio + fetch merge + parse + 3 integration
       (route, fallback, fail-closed).
+- [ ] **Iter 25 — OpenRouter-native interface.** `/api/v1/chat/completions`
+      + `/api/v1/responses` alias to the routed handler; native fallback
+      paths compose against the upstream root (no double `/api`);
+      management writes deny by default (`ALLOW_MANAGEMENT_PROXY=1` opts
+      in). Test: `tests/openrouter_native.rs` + metrics unit test;
+      `cargo test`, clippy, fmt clean.
