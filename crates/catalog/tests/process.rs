@@ -32,6 +32,8 @@ fn processing_fills_expected_indexed_values() {
     assert_eq!(eps[0].precision_class.as_deref(), Some("unknown"));
     assert_eq!(eps[0].promo_discount, Some(0.0));
     assert_eq!(eps[0].processed_at.as_deref(), Some(PROCESSED_AT));
+    // Fixture endpoints list "tools" in supported_parameters.
+    assert_eq!(eps[0].supports_tools, Some(1));
     // Second offering carries different prices.
     assert_eq!(eps[1].price_prompt, Some(0.000001));
 
@@ -42,6 +44,8 @@ fn processing_fills_expected_indexed_values() {
     assert_eq!(tencent.price_cache_read, None);
     assert_eq!(tencent.price_cache_write, None);
     assert_eq!(tencent.precision_class.as_deref(), Some("fp8"));
+    // Its supported_parameters omit "tools".
+    assert_eq!(tencent.supports_tools, Some(0));
 
     // Raw payloads preserved: stored JSON still matches the fixture.
     let fixture: serde_json::Value = serde_json::from_slice(
@@ -106,9 +110,10 @@ fn migration_v1_to_current_preserves_data() {
     assert_eq!(eps[0].judged_at, None);
     assert_eq!(eps[0].judge_model, None);
     assert_eq!(eps[0].judge_prompt, None);
+    assert_eq!(eps[0].supports_tools, None);
     assert_eq!(
         catalog.get_meta("schema_version").unwrap().as_deref(),
-        Some("3")
+        Some("4")
     );
 
     // Processing works on the migrated DB.
@@ -117,6 +122,7 @@ fn migration_v1_to_current_preserves_data() {
     assert_eq!(eps[0].price_prompt, None); // '{}' has no pricing
     assert_eq!(eps[0].precision_class.as_deref(), Some("unknown"));
     assert_eq!(eps[0].processed_at.as_deref(), Some(PROCESSED_AT));
+    assert_eq!(eps[0].supports_tools, None); // '{}' has no supported_parameters
 }
 
 #[test]

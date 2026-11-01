@@ -101,6 +101,7 @@ pub fn run_fixture_sync(
                 precision_class: None,
                 promo_discount: None,
                 processed_at: None,
+                supports_tools: None,
                 quality_tier: None,
                 quality_score: None,
                 judged_at: None,

@@ -77,7 +77,9 @@ retry once on another provider when the first attempt is retryable
 From Iter 14, virtual requests that cannot be served fail closed
 with an OpenAI-shaped error instead of leaking the virtual id
 upstream: `budget_exceeded` (400) when no candidate fits
-`provider.max_price`, `quality_floor_unmet` / `no_eligible_offering`
+`provider.max_price`, `tools_unsupported` (400) when a tool-bearing
+request has no tool-capable endpoint (disable `tools` or pick a
+tool-capable route), `quality_floor_unmet` / `no_eligible_offering`
 (503 + `Retry-After: 1`) when the tier floor or eligibility leaves
 nothing to serve. `POST /v1/responses` shares this whole contract.
 

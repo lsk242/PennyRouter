@@ -131,6 +131,16 @@ session.
   (`free` needs none). A tier whose candidates all sit below its
   floor rejects with `quality_floor_unmet` (503) instead of serving
   below the promise.
+- Tool-aware routing (Iter 22): the catalog indexes per-endpoint tool
+  support (`supported_parameters` containing `"tools"`, schema v4;
+  unknown on older catalogs). A request with a non-empty `tools`
+  array matches only `Some(true)` endpoints — across `free`, `low`,
+  `think`, `lowest`, direct-model, and fallback legs — so the gateway
+  never pins a provider the upstream would 404 with "No endpoints
+  found that support tool use". Tool-bearing requests starved while
+  plain ones would serve fail closed with `tools_unsupported` (400):
+  disable `tools` or choose a tool-capable route. Requests without
+  tools ignore the flag entirely.
 - Strict budgets (Iter 14): `provider.max_price: {prompt,
   completion}` sets a hard per-token ceiling on raw price columns
   (see [pricing.md](pricing.md)). A malformed cap is no cap; under a

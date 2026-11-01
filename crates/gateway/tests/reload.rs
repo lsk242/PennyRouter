@@ -39,6 +39,7 @@ fn add_model(db: &std::path::Path, model_id: &str, provider: &str, prompt_price:
             precision_class: None,
             promo_discount: None,
             processed_at: None,
+            supports_tools: None,
             quality_tier: None,
             quality_score: None,
             judged_at: None,
@@ -58,6 +59,7 @@ fn add_model(db: &std::path::Path, model_id: &str, provider: &str, prompt_price:
                 precision_class: Some("fp16".to_string()),
                 promo_discount: None,
                 processed_at: now_rfc3339().unwrap(),
+                supports_tools: None,
             },
         )
         .unwrap();

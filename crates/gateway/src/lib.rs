@@ -1487,12 +1487,21 @@ fn gateway_timeout() -> Response {
 
 /// Virtual-model rejection (Iter 14): fail closed with an
 /// OpenAI-shaped error instead of forwarding a gateway-owned id.
-/// Budget violations are caller-fixable (400); unmet floors and empty
-/// tiers are gateway-side availability (503 with `Retry-After`, since a
-/// catalog reload or cool-down expiry may restore service).
+/// Budget and tool-support violations are caller-fixable (400); unmet
+/// floors and empty tiers are gateway-side availability (503 with
+/// `Retry-After`, since a catalog reload or cool-down expiry may
+/// restore service).
 fn rejection_response(rejection: &routing::RouteRejection) -> Response {
     match rejection.code {
         "budget_exceeded" => error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            rejection.code,
+            rejection.message.clone(),
+        ),
+        // Tool-starvation is caller-fixable (disable tools or pick a
+        // tool-capable route), like a budget violation (Iter 22).
+        "tools_unsupported" => error_response(
             StatusCode::BAD_REQUEST,
             "invalid_request_error",
             rejection.code,

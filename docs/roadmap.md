@@ -464,7 +464,22 @@ Development delivers Docker images, platform delivers deployments.
   Multi-account quota pooling stays a documented non-goal (ToS).
   Proven by unit + integration tests. `cargo test`, clippy, fmt clean.
 
-## After Iter 21
+## Iter 22 — Tool-aware routing (in progress)
+
+- Goal: end live-found "No endpoints found that support tool use"
+  404s — tool-bearing agent requests pinned providers whose endpoint
+  lacks tool support.
+- Value: agents keep `tools`/`patch` on; the gateway steers to
+  capable endpoints or fails closed with the fix, never an upstream
+  404.
+- Shipped: per-endpoint `supports_tools` index (schema v4, auto-
+  migrate); `needs_tools` detection in `ProviderConstraints`; staged
+  tool filter on `free`/`low`/`think`/`lowest`/direct paths;
+  `tools_unsupported` 400; fallback still fires past starvation.
+  Proven by extraction + unit + 2 integration tests.
+  `cargo test`, clippy, fmt clean.
+
+## After Iter 22
 
 Deferred ideas in [future.md](future.md): classifier routing,
 parallel fan-out, more judge models. Each becomes roadmap items only
