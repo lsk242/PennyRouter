@@ -156,5 +156,15 @@ cheap judge model, classifier-based routing.
       routes decisions-capable offerings (schema v5 index from model
       modality); `decision/free/fallback/<tier>` falls back past
       exhaustion; `EXTRA_MODEL_IDS` syncs unlisted models.
-      Test: extraction trio + fetch merge + parse + 3 integration
+      Test:       extraction trio + fetch merge + parse + 3 integration
       (route, fallback, fail-closed).
+- [ ] **Iter 25 — Standalone binary + OpenRouter-native interface.**
+      Binary startup + `from_env()` + reload wiring + native interface
+      details (see PR #27). One entry for the shipped binary/platform
+      surface.
+- [ ] **Iter 26 — Pinned-model routes.** `openrouter/pair/model/<id>`
+      (+ `privacy/model/<id>`) pins to one specific catalog model and
+      picks the best provider for it — ranking/cost, throttle skip,
+      budget caps, tool filter, `.../fallback/<tier>` all scope to that
+      model's offerings. Test: parse + integration (route/fallback/
+      budget/tool/throttle/privacy/unknown).

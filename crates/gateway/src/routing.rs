@@ -173,7 +173,9 @@ pub enum VirtualTier {
 /// decision>` with an optional `/free` cost scope on `decision`, plus
 /// the fallback form `<provider>/pair/[privacy/]<free|decision/free>/\
 /// fallback/<tier>` (Iter 21). The provider segment is first so
-/// future providers slot in; only OpenRouter exists today.
+/// future providers slot in; only OpenRouter exists today. Iter 28
+/// adds the pinned-model form `openrouter/pair/[privacy/]model/<id>`
+/// plus `.../fallback/<tier>` — one model, not cross-model.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VirtualModel {
     pub tier: VirtualTier,
@@ -185,22 +187,53 @@ pub struct VirtualModel {
     /// paid-only by definition.
     pub free_only: bool,
     /// Fallback target tier name (`low`, `think`, `lowest`, …),
-    /// present only on `<free|decision/free>/fallback/<tier>` ids.
+    /// present only on `<free|decision/free>/fallback/<tier>` ids
+    /// plus the pinned-model fallback variant.
     /// Resolved through [`Router::decide_tier`], so future tiers plug
     /// in with no fallback-code change.
     pub fallback: Option<String>,
+    /// Pinned model id (Iter 28): when `Some`, the request pins to
+    /// this specific catalog model. Provider selection, throttle
+    /// skip, budget, tool filter, and fallback all scope to that
+    /// model's offerings — cross-model tiers are not consulted.
+    pub pinned_model: Option<String>,
 }
 
 /// Parse a virtual model id. Anything else (including unknown
 /// providers or tiers) returns `None` and passes through untouched.
 /// The fallback suffix is only valid on `free` and `decision/free`
-/// ids.
+/// ids plus the pinned-model form.
 pub fn parse_virtual(model_field: &str) -> Option<VirtualModel> {
     let rest = model_field.strip_prefix("openrouter/pair/")?;
     let (privacy, rest) = match rest.strip_prefix("privacy/") {
         Some(rest) => (true, rest),
         None => (false, rest),
     };
+    // Pinned-model form (Iter 28): openrouter/pair/[privacy/]
+    // model/<model-id>[/fallback/<tier>]. The model id itself
+    // may contain slashes (e.g. deepseek/deepseek-v4.1-flash),
+    // so the optional fallback suffix is split first.
+    if let Some(rest) = rest.strip_prefix("model/") {
+        let (model_id, fallback) = match rest.split_once("/fallback/") {
+            Some((model_id, target)) if !model_id.is_empty() && !target.is_empty() => {
+                (model_id.to_string(), Some(target.to_string()))
+            }
+            Some(_) => return None,
+            None => {
+                if rest.is_empty() {
+                    return None;
+                }
+                (rest.to_string(), None)
+            }
+        };
+        return Some(VirtualModel {
+            tier: VirtualTier::Free,
+            privacy,
+            free_only: false,
+            fallback,
+            pinned_model: Some(model_id),
+        });
+    }
     let (tier, free_only, fallback) = match rest.split_once("/fallback/") {
         Some(("free", target)) => (VirtualTier::Free, false, Some(target.to_string())),
         Some(("decision/free", target)) => (VirtualTier::Decision, true, Some(target.to_string())),
@@ -219,6 +252,7 @@ pub fn parse_virtual(model_field: &str) -> Option<VirtualModel> {
         privacy,
         free_only,
         fallback,
+        pinned_model: None,
     })
 }
 
@@ -974,6 +1008,21 @@ impl Router {
         authorization: Option<&str>,
         constraints: &ProviderConstraints,
     ) -> Result<Decision, RouteRejection> {
+        // Pinned-model form (Iter 28): one model's providers, not
+        // cross-model. Fallback still works the same way — the free
+        // leg is the pinned pick, the fallback leg goes cross-model.
+        if let Some(pinned) = &virtual_model.pinned_model {
+            let pinned = pinned.clone();
+            let first =
+                self.decide_pinned(snapshot, &pinned, model_field, authorization, constraints);
+            return match (first, &virtual_model.fallback) {
+                (Ok(decision), _) => Ok(decision),
+                (Err(rejection), None) => Err(rejection),
+                (Err(_), Some(target)) => {
+                    self.decide_tier(snapshot, target, model_field, authorization, constraints)
+                }
+            };
+        }
         match virtual_model.tier {
             VirtualTier::Free => {
                 // Tool-starvation (`Err`) and an empty pool (`Ok(None)`)
@@ -1024,6 +1073,132 @@ impl Router {
                 self.decide_ordered_virtual(snapshot, authorization, constraints, model_field, tier)
             }
         }
+    }
+
+    /// Pinned-model pick (Iter 28): provider selection scoped to one
+    /// catalog model. The cheapest eligible provider serves — ranking
+    /// order (or inline effective cost) decides, throttle and budget
+    /// still apply, affinity pins the model namespace. Fails closed
+    /// with the same rejections as virtual tiers.
+    fn decide_pinned(
+        &self,
+        snapshot: &Snapshot,
+        model_id: &str,
+        model_field: &str,
+        authorization: Option<&str>,
+        constraints: &ProviderConstraints,
+    ) -> Result<Decision, RouteRejection> {
+        let offerings = snapshot
+            .models
+            .get(model_id)
+            .ok_or_else(|| RouteRejection {
+                code: "no_eligible_offering",
+                message: format!("unknown model {model_id:?}: not in catalog"),
+            })?;
+        if offerings.is_empty() {
+            return Err(RouteRejection {
+                code: "no_eligible_offering",
+                message: format!("no offering is currently eligible for {model_id:?}"),
+            });
+        }
+        let base: Vec<&Offering> = offerings
+            .iter()
+            .filter(|o| constraints.allows(&o.provider_name))
+            .collect();
+        if base.is_empty() {
+            return Err(RouteRejection {
+                code: "no_eligible_offering",
+                message: format!("no offering for {model_id:?} satisfies provider constraints"),
+            });
+        }
+        let base: Vec<&Offering> = base
+            .into_iter()
+            .filter(|o| constraints.tool_allows(o))
+            .collect();
+        if base.is_empty() {
+            return Err(tools_unsupported());
+        }
+        let budgeted: Vec<&Offering> = base
+            .into_iter()
+            .filter(|o| constraints.budget_allows(o))
+            .collect();
+        if budgeted.is_empty() {
+            return Err(RouteRejection {
+                code: "budget_exceeded",
+                message: format!("no offering for {model_id:?} fits the price ceiling"),
+            });
+        }
+        let candidates = self.skip_throttled(budgeted);
+        let key = authorization.map(|auth| self.session_key(auth, model_field));
+        if let Some(key) = &key {
+            if let Some(pin) = self.lookup_pin(key) {
+                if let Some(pick) = candidates.iter().find(|o| {
+                    o.provider_name == pin.provider && o.precision_class == pin.precision_class
+                }) {
+                    return Ok(Decision {
+                        model_id: pick.model_id.clone(),
+                        provider: pick.provider_name.clone(),
+                        tag: pick.tag.clone(),
+                        precision_class: pick.precision_class.clone(),
+                        orientation: Orientation::Default,
+                        sticky: true,
+                    });
+                }
+            }
+        }
+        let ranking = self.ranking.read().unwrap_or_else(|e| e.into_inner());
+        // Prefer the published ranking for this model/class when it
+        // covers the candidates; otherwise fall back to inline cost
+        // (the same oriented sort the direct path uses for Default).
+        let class = majority_class_owned(&candidates);
+        let ranked = ranking
+            .as_ref()
+            .and_then(|r| r.models.get(model_id))
+            .and_then(|classes| classes.iter().find(|c| c.class == class))
+            .map(|c| &c.default);
+        let pick = if let Some(entries) = ranked {
+            let mut order: Vec<&Offering> = Vec::with_capacity(candidates.len());
+            let mut rest: Vec<&Offering> = candidates.clone();
+            for entry in entries {
+                if let Some(pos) = rest
+                    .iter()
+                    .position(|o| o.provider_name == entry.provider && o.tag == entry.tag)
+                {
+                    order.push(rest.remove(pos));
+                }
+            }
+            order.extend(rest);
+            order.into_iter().next()
+        } else {
+            candidates.into_iter().min_by(|a, b| {
+                inline_cost(a)
+                    .partial_cmp(&inline_cost(b))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.provider_name.cmp(&b.provider_name))
+                    .then_with(|| a.tag.cmp(&b.tag))
+            })
+        }
+        .ok_or_else(|| RouteRejection {
+            code: "no_eligible_offering",
+            message: format!("no offering is currently eligible for {model_id:?}"),
+        })?;
+        if let Some(key) = key {
+            self.store_pin(
+                key,
+                Pin {
+                    provider: pick.provider_name.clone(),
+                    precision_class: pick.precision_class.clone(),
+                },
+            );
+        }
+        Ok(Decision {
+            model_id: pick.model_id.clone(),
+            provider: pick.provider_name.clone(),
+            tag: pick.tag.clone(),
+            precision_class: pick.precision_class.clone(),
+            orientation: Orientation::Default,
+            sticky: false,
+        })
     }
 
     /// Quality-tier floor per virtual tier (Iter 14): `low` needs a
@@ -1972,6 +2147,26 @@ fn orientation_from(tags: &[String]) -> Orientation {
     Orientation::Default
 }
 
+/// Most common precision class over `&Offering` refs (used by
+/// pinned-model ranking lookup where we only have `&Offering`s).
+fn majority_class_owned(offerings: &[&Offering]) -> Option<String> {
+    let mut counts: Vec<(Option<String>, usize)> = Vec::new();
+    for o in offerings {
+        match counts.iter_mut().find(|(c, _)| *c == o.precision_class) {
+            Some((_, n)) => *n += 1,
+            None => counts.push((o.precision_class.clone(), 1)),
+        }
+    }
+    let mut best: Option<(Option<String>, usize)> = None;
+    for (class, n) in counts {
+        let keep = best.as_ref().is_some_and(|(_, m)| *m >= n);
+        if !keep {
+            best = Some((class, n));
+        }
+    }
+    best.and_then(|(class, _)| class)
+}
+
 /// Most common precision class; ties keep first-seen (load) order.
 fn majority_class(offerings: &[Offering]) -> Option<Option<String>> {
     let mut counts: Vec<(Option<String>, usize)> = Vec::new();
@@ -2660,7 +2855,8 @@ mod tests {
                 tier: VirtualTier::Low,
                 privacy: false,
                 free_only: false,
-                fallback: None
+                fallback: None,
+                pinned_model: None
             })
         );
         assert_eq!(
@@ -2669,7 +2865,8 @@ mod tests {
                 tier: VirtualTier::Think,
                 privacy: true,
                 free_only: false,
-                fallback: None
+                fallback: None,
+                pinned_model: None
             })
         );
         assert_eq!(
@@ -2678,7 +2875,8 @@ mod tests {
                 tier: VirtualTier::Decision,
                 privacy: false,
                 free_only: false,
-                fallback: None
+                fallback: None,
+                pinned_model: None
             })
         );
         assert_eq!(
@@ -2687,7 +2885,8 @@ mod tests {
                 tier: VirtualTier::Decision,
                 privacy: false,
                 free_only: true,
-                fallback: None
+                fallback: None,
+                pinned_model: None
             })
         );
         assert_eq!(
@@ -2696,7 +2895,8 @@ mod tests {
                 tier: VirtualTier::Decision,
                 privacy: false,
                 free_only: true,
-                fallback: Some("low".to_string())
+                fallback: Some("low".to_string()),
+                pinned_model: None,
             })
         );
         assert_eq!(
@@ -2705,7 +2905,8 @@ mod tests {
                 tier: VirtualTier::Decision,
                 privacy: true,
                 free_only: true,
-                fallback: Some("think".to_string())
+                fallback: Some("think".to_string()),
+                pinned_model: None,
             })
         );
         // Fallback stays exclusive to the free scopes.

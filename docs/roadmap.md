@@ -509,7 +509,36 @@ Development delivers Docker images, platform delivers deployments.
   Proven by extraction + fetch + parse + 3 integration tests.
   `cargo test`, clippy, fmt clean.
 
-## After Iter 24
+## Iter 25 — Standalone binary + OpenRouter-native interface (in progress)
+
+- Goal: ship the gateway as a real binary with config/env plumbing.
+- Value: deploys no longer inline a library into an undefined host.
+- Shipped: crate owns `main.rs` startup + `from_env()` +
+  `CATALOG_DB`/`RANKING_DIR` reload wiring (see PR #27).
+  `cargo test --workspace`, clippy, fmt clean.
+
+## Iter 26 — Pinned-model routes (in progress)
+
+- Goal: let a caller pin to one specific model (e.g.
+  `deepseek/deepseek-v4.1-flash`) and have the gateway pick the best
+  provider for it — not cross-model, just best provider within that
+  model — with fallback when needed.
+- Value: agents that need a particular capability don't hardcode
+  one provider; the router keeps one virtual id, many providers.
+- Shipped: `openrouter/pair/model/<model-id>` (and
+  `privacy/model/<id>`) with `.../fallback/<tier>`; `model/<id>`+
+  `/fallback/<tier>` shares the free-tier fallback contract
+  (pinned leg first, tier leg on exhaustion; header
+  cool-down + budget/tool checks scoped to the pinned model). Proven
+  by parsing + 1 integration test file (route, fallback, tool/budget,
+  unknown-model, privacy wiring).
+  `cargo test --workspace`, clippy, fmt clean.
+
+## Iter 27 — (planned)
+
+Placeholder: next iteration slot (numbering corrected in Iter 25).
+
+## After Iter 27
 
 Deferred ideas in [future.md](future.md): classifier routing,
 parallel fan-out, more judge models. Each becomes roadmap items only
