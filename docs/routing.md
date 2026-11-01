@@ -103,8 +103,11 @@ session.
   provider pin stays documented-limitation (Iter 11, F04). The choice
   is echoed in the `x-pennyrouter-provider` response header.
 - Source: `CATALOG_DB` (directory takes the newest verified manifest,
-  or a manifest/DB file directly). Unset or unloadable means plain
-  passthrough. The snapshot loads at startup and refreshes every
+  or a manifest/DB file directly). Unset means plain passthrough with
+  no reload task. Unloadable at boot attaches a standby router
+  (Iter 23): requests pass through until the periodic reload heals it
+  — a missing, mid-write, or schema-older catalog no longer needs a
+  restart to recover. The snapshot loads at startup and refreshes every
   `RELOAD_INTERVAL_SECS` (default 60s, 0 disables) via `reload()`,
   which swaps atomically and keeps the last good snapshot on failure;
   `swap` hooks remain for tests and the ranking job (Iter 6/10).

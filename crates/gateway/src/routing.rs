@@ -501,6 +501,35 @@ impl Router {
         })
     }
 
+    /// Standby router (Iter 23): same source, empty snapshot. Requests
+    /// pass through until the first successful `reload()` fills it, so
+    /// a gateway booted against a missing, mid-write, or
+    /// schema-older catalog recovers without a restart. `from_env`
+    /// attaches this on load failure; the periodic reload task then
+    /// heals it when a good artifact lands.
+    pub fn standby(path: impl AsRef<Path>) -> Self {
+        Self {
+            source: path.as_ref().to_path_buf(),
+            snapshot: RwLock::new(Snapshot::default()),
+            ranking: RwLock::new(None),
+            sessions: RwLock::new(HashMap::new()),
+            seed: fresh_seed(),
+            throttled: RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// True once a catalog snapshot has loaded (Iter 23): operators
+    /// see routing off until then, even though the router handle
+    /// exists for the reload task.
+    pub fn is_ready(&self) -> bool {
+        !self
+            .snapshot
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .models
+            .is_empty()
+    }
+
     /// Record a 429 from `(model_id, provider)` (Iter 13, header
     /// expiry since Iter 21): virtual picks steer around it until
     /// `until` elapses; the caller derives it from the response

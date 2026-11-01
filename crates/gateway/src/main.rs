@@ -11,8 +11,11 @@ async fn main() {
         .await
         .expect("bind listener");
     let state = pennyrouter_gateway::AppState::from_env();
-    // Catalog freshness (Iter 10): reload the snapshot periodically when
-    // routing is configured. The task dies with the process at shutdown.
+    // Catalog freshness (Iter 10; standby recovery Iter 23): reload
+    // the snapshot periodically when routing is configured. The task
+    // also heals a standby router once a good artifact lands, so a
+    // bad catalog at boot no longer needs a restart. The task dies
+    // with the process at shutdown.
     if let Some(router) = state.router_handle() {
         let interval = pennyrouter_gateway::reload_interval_from_env();
         if !interval.is_zero() {
