@@ -85,6 +85,21 @@ tool-capable route), `quality_floor_unmet` / `no_eligible_offering`
 (503 + `Retry-After: 1`) when the tier floor or eligibility leaves
 nothing to serve. `POST /v1/responses` shares this whole contract.
 
+## Decisions
+
+- `POST /v1/decisions` serves behavior-scoring models: the body
+  carries `model` plus the upstream questions schema (`questions`,
+  `state`), routes over decisions-capable offerings (see
+  [routing.md](routing.md)), and forwards model-rewritten — nothing
+  else injected — to the upstream alpha decisions endpoint. Answers
+  return verbatim with `x-pennyrouter-provider` on success.
+- Same resilience as chat (one retry, fallback leg, 429 header
+  pass-through), except tier fallback stays within the decisions
+  shape: only the `decision` target is served; any other fallback
+  target fails closed with 400 once the free leg actually needs it.
+  Privacy-field enforcement is chat-only (unknown fields risk an
+  upstream 400).
+
 ## Limits
 
 - Requests up to 1M tokens must be supported (guarded from Iter 2: reject

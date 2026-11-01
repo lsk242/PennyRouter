@@ -158,3 +158,7 @@ cheap judge model, classifier-based routing.
       exhaustion; `EXTRA_MODEL_IDS` syncs unlisted models.
       Test: extraction trio + fetch merge + parse + 3 integration
       (route, fallback, fail-closed).
+- [x] **Iter 25 — Decisions route.** `POST /v1/decisions` forwards
+      model-rewritten bodies to the upstream alpha endpoint with
+      retry + decision-only fallback. Test: 5 integration (route,
+      fail-closed, passthrough, fallback, wrong-target).
