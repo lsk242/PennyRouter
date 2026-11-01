@@ -152,3 +152,9 @@ cheap judge model, classifier-based routing.
       unloadable catalog attaches an empty standby router; the
       periodic reload heals it when a good artifact lands.
       Test: standby-heals integration (passthrough → routed, ready).
+- [ ] **Iter 24 — OpenRouter-native interface.** `/api/v1/chat/completions`
+      + `/api/v1/responses` alias to the routed handler; native fallback
+      paths compose against the upstream root (no double `/api`);
+      management writes deny by default (`ALLOW_MANAGEMENT_PROXY=1` opts
+      in). Test: `tests/openrouter_native.rs` + metrics unit test;
+      `cargo test`, clippy, fmt clean.

@@ -90,6 +90,28 @@ newest verified ranking artifact when one exists (see
 and `UPSTREAM_MAX_QUEUED` (default 128: max requests waiting for a
 slot); beyond both, the gateway sheds with OpenAI-shaped 503 +
 `Retry-After`, counted in `pennyrouter_load_shed_total`.
+`ALLOW_MANAGEMENT_PROXY` (unset default: management writes through the
+fallback proxy — key creation, credit purchases, workspace budget
+changes — answer 403 `management_proxy_disabled` without touching
+upstream; set to `1` to proxy them. Reads are unaffected).
+
+## OpenRouter-native clients (Iter 24)
+
+Point OpenAI-compatible harnesses at the gateway with an explicit
+`baseURL` — no DNS tricks needed (detail:
+[proposals/2026-11-01-openrouter-interface.md](proposals/2026-11-01-openrouter-interface.md)):
+
+- OpenAI-shaped clients: `baseURL http://gateway:3000/v1` (curated
+  `openrouter/pair/…` menu, routing, budget, retry).
+- OpenRouter-native SDKs: `baseURL http://gateway:3000/api/v1` (same
+  routed chat/responses handler; account/catalog paths proxy to
+  OpenRouter; `GET /api/v1/models` returns the full upstream catalog).
+
+DNS-intercepting `openrouter.ai` toward the gateway stays a local-dev
+trick only: the client expects a real `openrouter.ai` certificate, so
+it needs either plain `http://` (LAN-only, many SDKs refuse non-TLS)
+or a privately distributed CA (e.g. Caddy `tls internal`). Prefer the
+explicit `baseURL` above.
 No local key store:
 backend keys travel with requests, never in config or fixtures. The
 one exception is catalog judging (Phase 4): the offline
