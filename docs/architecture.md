@@ -58,7 +58,12 @@ usage trends (per app/key) ──► ranker input
 ## Key design decisions
 
 - **Realtime path is dumb and fast.** All intelligence (ranking, trends,
-  price modeling) is precomputed; a request does one index read.
+  price modeling) is precomputed; a request does one index read. The
+  one scoped exception is the `openrouter/pair/smart[/max]` family
+  (Iter 26): those callers explicitly opt into one extra classifier
+  leg before the same single-lookup dispatch — see
+  [routing.md](routing.md). Every other id keeps the no-network
+  routing contract.
 - **Immutable routing snapshots.** Background jobs build complete snapshots
   and publish them atomically; requests keep using the last good snapshot
   if a rebuild fails.
