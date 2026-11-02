@@ -275,13 +275,15 @@ impl Catalog {
 
     /// (model_count, endpoint_count).
     pub fn counts(&self) -> Result<(u64, u64), Error> {
-        let models: u64 = self
+        // rusqlite 0.41 dropped `FromSql for u64`; counts are
+        // non-negative, so read i64 and widen.
+        let models: i64 = self
             .conn
             .query_row("SELECT COUNT(*) FROM models", [], |r| r.get(0))?;
-        let endpoints: u64 = self
+        let endpoints: i64 = self
             .conn
             .query_row("SELECT COUNT(*) FROM endpoints", [], |r| r.get(0))?;
-        Ok((models, endpoints))
+        Ok((models as u64, endpoints as u64))
     }
 
     pub fn set_meta(&self, key: &str, value: &str) -> Result<(), Error> {
