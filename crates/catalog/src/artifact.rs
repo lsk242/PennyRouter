@@ -22,7 +22,11 @@ pub struct Manifest {
 }
 
 pub fn sha256_hex(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    // digest 0.11 output no longer formats as hex directly.
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 pub fn now_rfc3339() -> Result<String, Error> {
@@ -104,4 +108,24 @@ pub fn verify(manifest_path: &Path) -> Result<bool, Error> {
     };
     let db_bytes = fs::read(dir.join(&manifest.db_file))?;
     Ok(sha256_hex(&db_bytes) == manifest.sha256)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sha256_hex;
+
+    /// Known-answer pin for the manual hex encoding (sha2 0.11).
+    #[test]
+    fn sha256_hex_matches_known_vector() {
+        assert_eq!(
+            sha256_hex(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                .to_string()
+        );
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+                .to_string()
+        );
+    }
 }
