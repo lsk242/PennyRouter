@@ -397,6 +397,10 @@ pub fn app_with_state(state: AppState) -> Router {
         // Responses bodies carry the same `model` field, so they get
         // the same routing, budget, and floor policy (Iter 14).
         .route("/v1/responses", post(routed_completion))
+        // Decisions bodies (`model` + `questions`/`state`) route over
+        // decisions-capable offerings and forward to the upstream
+        // alpha decisions endpoint (Iter 27).
+        .route("/v1/decisions", post(routed_decisions))
         // Curated menu (Iter 13): clients discover exactly the virtual
         // models; this path used to proxy upstream.
         .route("/v1/models", get(models_list));
@@ -670,6 +674,188 @@ async fn metrics_handler(State(state): State<AppState>) -> Response {
         state.metrics.render(),
     )
         .into_response()
+}
+
+/// Routed decisions (`POST /v1/decisions`, Iter 25): admit, guard,
+/// optionally route (model rewritten to the picked backend id —
+/// nothing else; the decisions API owns its schema), then forward
+/// to the upstream alpha decisions endpoint. Same resilience shape
+/// as chat — one retry on another capable provider, then the
+/// configured fallback leg — except tier fallback stays within the
+/// decisions shape: only the `decision` target is served, any other
+/// fallback target fails closed once the free leg actually needs it.
+async fn routed_decisions(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Body,
+) -> Response {
+    let permit = match acquire_upstream_slot(&state).await {
+        Some(permit) => permit,
+        None => {
+            state.metrics.load_shed();
+            return service_unavailable();
+        }
+    };
+    let buffered = match read_capped_body(&state, body).await {
+        Ok(buffered) => buffered,
+        Err(response) => return *response,
+    };
+
+    // Virtual requests keep a copy for one retry: the permit is
+    // per-attempt, the body is reusable.
+    let retry_body = is_virtual_request(&buffered).then(|| buffered.clone());
+    let (forwarded_body, decision) = match &state.router {
+        Some(router) => match router.route_decision_request(&headers, &buffered) {
+            Ok(Some((rewritten, decision))) => (rewritten, Some(decision)),
+            Ok(None) => (buffered, None),
+            Err(rejection) => {
+                if is_virtual_request(&buffered) {
+                    return rejection_response(&rejection);
+                }
+                (buffered, None)
+            }
+        },
+        None => (buffered, None),
+    };
+    // The decisions API lives outside `/v1`: the alpha path appends
+    // to the API root (a custom base with a trailing `/v1` is
+    // normalized first, so it never doubles).
+    let decisions_root = normalize_pinned_base(&state.upstream_base_url);
+    let decisions_base = decisions_root.trim_end_matches('/');
+    let decisions_path = "/alpha/decisions";
+    let mut response = forward_upstream(
+        &state,
+        decisions_base,
+        permit,
+        &Method::POST,
+        decisions_path,
+        &headers,
+        forwarded_body,
+    )
+    .await;
+    if let Some(decision) = &decision {
+        if response.status() == StatusCode::TOO_MANY_REQUESTS {
+            if let Some(router) = &state.router {
+                let headers = response.headers();
+                let retry_after = headers
+                    .get(reqwest::header::RETRY_AFTER)
+                    .and_then(|v| v.to_str().ok());
+                let reset_ms = headers
+                    .get("x-ratelimit-reset")
+                    .and_then(|v| v.to_str().ok());
+                router.note_throttled(
+                    &decision.model_id,
+                    &decision.provider,
+                    routing::throttle_until(retry_after, reset_ms),
+                );
+            }
+            state.metrics.throttled();
+        }
+    }
+    let fallback_request: Option<(String, String)> = retry_body.as_ref().and_then(|rb| {
+        let model_field = serde_json::from_slice::<serde_json::Value>(rb)
+            .ok()
+            .and_then(|json| json.get("model")?.as_str().map(str::to_string))?;
+        let target = routing::parse_virtual(&model_field)?.fallback?;
+        Some((model_field, target))
+    });
+    let fallback_body: Option<Vec<u8>> = retry_body.clone();
+    if is_retryable(response.status()) {
+        if let (Some(router), Some(retry_body), Some(decision)) =
+            (&state.router, retry_body, &decision)
+        {
+            if let Some((rewritten, retry_decision)) =
+                router.route_decision_retry(&headers, &retry_body, &decision.provider)
+            {
+                let permit = match acquire_upstream_slot(&state).await {
+                    Some(permit) => permit,
+                    None => {
+                        state.metrics.load_shed();
+                        return service_unavailable();
+                    }
+                };
+                response = forward_upstream(
+                    &state,
+                    decisions_base,
+                    permit,
+                    &Method::POST,
+                    decisions_path,
+                    &headers,
+                    rewritten,
+                )
+                .await;
+                if let Ok(provider) = retry_decision.provider.parse() {
+                    response
+                        .headers_mut()
+                        .insert(routing::PROVIDER_HEADER, provider);
+                }
+                return response;
+            }
+        }
+    }
+    if is_retryable(response.status()) {
+        if let (Some(router), Some((model_field, target)), Some(fallback_body)) =
+            (&state.router, &fallback_request, &fallback_body)
+        {
+            let auth = headers
+                .get(axum::http::header::AUTHORIZATION)
+                .and_then(|v| v.to_str().ok());
+            let ignore = decision.as_ref().map(|d| d.provider.as_str());
+            match router.route_decision_fallback(fallback_body, model_field, target, auth, ignore) {
+                Err(rejection) => return rejection_response(&rejection),
+                Ok(Some((rewritten, fb_decision))) => {
+                    let permit = match acquire_upstream_slot(&state).await {
+                        Some(permit) => permit,
+                        None => {
+                            state.metrics.load_shed();
+                            return service_unavailable();
+                        }
+                    };
+                    response = forward_upstream(
+                        &state,
+                        decisions_base,
+                        permit,
+                        &Method::POST,
+                        decisions_path,
+                        &headers,
+                        rewritten,
+                    )
+                    .await;
+                    if response.status() == StatusCode::TOO_MANY_REQUESTS {
+                        let fb_headers = response.headers();
+                        router.note_throttled(
+                            &fb_decision.model_id,
+                            &fb_decision.provider,
+                            routing::throttle_until(
+                                fb_headers
+                                    .get(reqwest::header::RETRY_AFTER)
+                                    .and_then(|v| v.to_str().ok()),
+                                fb_headers
+                                    .get("x-ratelimit-reset")
+                                    .and_then(|v| v.to_str().ok()),
+                            ),
+                        );
+                        state.metrics.throttled();
+                    }
+                    if let Ok(provider) = fb_decision.provider.parse() {
+                        response
+                            .headers_mut()
+                            .insert(routing::PROVIDER_HEADER, provider);
+                    }
+                    return response;
+                }
+                Ok(None) => {}
+            }
+        }
+    }
+    if let Some(decision) = decision {
+        if let Ok(value) = decision.provider.parse() {
+            response
+                .headers_mut()
+                .insert(routing::PROVIDER_HEADER, value);
+        }
+    }
+    response
 }
 
 /// Routed completions (`/v1/chat/completions` and `/v1/responses`):

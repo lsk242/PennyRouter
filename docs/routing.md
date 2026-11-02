@@ -135,6 +135,13 @@ session.
   tier only sees what the catalog synced: the models list omits
   non-text-output models, so `EXTRA_MODEL_IDS` (comma-separated,
   catalog-sync env) nominates such ids for individual fetching.
+- Decisions route (Iter 27): `POST /v1/decisions` dispatches through
+  the same virtual ids (`decision`, `decision/free`,
+  `decision/free/fallback/decision`) but rewrites the model only —
+  no `provider`/`quantizations`/privacy injection — and forwards to
+  `{OPENROUTER_BASE_URL}/alpha/decisions`. Unknown model ids pass
+  through untouched. Retry, throttle memory, and 429 propagation
+  match chat; tier fallback serves the `decision` target only.
 - Cost (Iter 7): "cheapest" compares effective cost under the balanced
   workload profile (see [pricing.md](pricing.md)), promo column
   applied; unpriceable offerings sort last. The `openrouter/free`

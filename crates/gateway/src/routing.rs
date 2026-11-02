@@ -191,6 +191,11 @@ pub struct VirtualModel {
     pub fallback: Option<String>,
 }
 
+/// Body rewrite applied after a pick (Iter 27): chat injects
+/// provider order and pins; the decisions route rewrites the model
+/// only.
+type BodyFinish = fn(&str, serde_json::Value, Decision) -> Option<(Vec<u8>, Decision)>;
+
 /// Parse a virtual model id. Anything else (including unknown
 /// providers or tiers) returns `None` and passes through untouched.
 /// The fallback suffix is only valid on `free` and `decision/free`
@@ -966,6 +971,48 @@ impl Router {
         Self::finish_route(model_field, json, decision)
     }
 
+    /// Decisions fallback leg (Iter 27): same one-shot shape as chat,
+    /// model-only rewrite. Only the `decision` target is shape-safe —
+    /// chat tiers answer chat bodies, so anything else is a caller
+    /// error, surfaced up front instead of 400ing upstream.
+    pub fn route_decision_fallback(
+        &self,
+        body: &[u8],
+        model_field: &str,
+        fallback: &str,
+        authorization: Option<&str>,
+        ignore_provider: Option<&str>,
+    ) -> Result<Option<(Vec<u8>, Decision)>, RouteRejection> {
+        if fallback != "decision" {
+            return Err(RouteRejection {
+                code: "invalid_body",
+                message: format!(
+                    "fallback tier {fallback:?} serves chat completions, not decisions bodies; \
+                     decisions requests fall back only to \"decision\""
+                ),
+            });
+        }
+        let snapshot = self.snapshot.read().unwrap_or_else(|e| e.into_inner());
+        let json: serde_json::Value = serde_json::from_slice(body).map_err(|_| RouteRejection {
+            code: "invalid_body",
+            message: "request body is not valid JSON".to_string(),
+        })?;
+        let mut constraints = ProviderConstraints::from_body(&json);
+        if let Some(provider) = ignore_provider {
+            constraints.ignore.push(provider.to_string());
+        }
+        let decision = self
+            .decide_tier(
+                &snapshot,
+                fallback,
+                model_field,
+                authorization,
+                &constraints,
+            )
+            .ok();
+        Ok(decision.and_then(|decision| Self::finish_decision_route(model_field, json, decision)))
+    }
+
     fn decide_virtual(
         &self,
         snapshot: &Snapshot,
@@ -1517,7 +1564,9 @@ impl Router {
         headers: &axum::http::HeaderMap,
         body: &[u8],
     ) -> Option<(Vec<u8>, Decision)> {
-        self.route_inner(headers, body, None).ok().flatten()
+        self.route_inner(headers, body, None, Self::finish_route)
+            .ok()
+            .flatten()
     }
 
     /// Strict variant (Iter 14): virtual rejections surface as `Err`
@@ -1528,7 +1577,7 @@ impl Router {
         headers: &axum::http::HeaderMap,
         body: &[u8],
     ) -> Result<Option<(Vec<u8>, Decision)>, RouteRejection> {
-        self.route_inner(headers, body, None)
+        self.route_inner(headers, body, None, Self::finish_route)
     }
 
     /// Re-route after a failed attempt (Iter 13): same body, but the
@@ -1543,7 +1592,35 @@ impl Router {
     ) -> Option<(Vec<u8>, Decision)> {
         let mut extra = ProviderConstraints::default();
         extra.ignore.push(failed_provider.to_string());
-        self.route_inner(headers, body, Some(&extra)).ok().flatten()
+        self.route_inner(headers, body, Some(&extra), Self::finish_route)
+            .ok()
+            .flatten()
+    }
+
+    /// Decisions-route entry (Iter 27): same dispatch as chat, but the
+    /// rewrite is model-only — the decisions API owns its schema and
+    /// chat-injected fields (`provider`, `quantizations`) risk a 400.
+    pub fn route_decision_request(
+        &self,
+        headers: &axum::http::HeaderMap,
+        body: &[u8],
+    ) -> Result<Option<(Vec<u8>, Decision)>, RouteRejection> {
+        self.route_inner(headers, body, None, Self::finish_decision_route)
+    }
+
+    /// Decisions retry (Iter 27): same provider-exclusion as chat,
+    /// model-only rewrite.
+    pub fn route_decision_retry(
+        &self,
+        headers: &axum::http::HeaderMap,
+        body: &[u8],
+        failed_provider: &str,
+    ) -> Option<(Vec<u8>, Decision)> {
+        let mut extra = ProviderConstraints::default();
+        extra.ignore.push(failed_provider.to_string());
+        self.route_inner(headers, body, Some(&extra), Self::finish_decision_route)
+            .ok()
+            .flatten()
     }
 
     fn route_inner(
@@ -1551,6 +1628,7 @@ impl Router {
         headers: &axum::http::HeaderMap,
         body: &[u8],
         extra: Option<&ProviderConstraints>,
+        finish: BodyFinish,
     ) -> Result<Option<(Vec<u8>, Decision)>, RouteRejection> {
         let json: serde_json::Value = serde_json::from_slice(body).map_err(|_| RouteRejection {
             code: "invalid_body",
@@ -1579,7 +1657,7 @@ impl Router {
             let snapshot = self.snapshot.read().unwrap_or_else(|e| e.into_inner());
             let decision =
                 self.decide_virtual(&snapshot, &virtual_model, &model_field, auth, &constraints)?;
-            return Ok(Self::finish_route(&model_field, json, decision));
+            return Ok(finish(&model_field, json, decision));
         }
         // The `lowest` tag (Iter 19) also rewrites the model id, so it
         // fails closed here for the same reason. First recognized
@@ -1590,7 +1668,7 @@ impl Router {
                 if orientation_from(&tags) == Orientation::Lowest {
                     let decision =
                         self.decide_lowest(&snapshot, auth, &constraints, &model_field)?;
-                    return Ok(Self::finish_route(&model_field, json, decision));
+                    return Ok(finish(&model_field, json, decision));
                 }
             }
         }
@@ -1598,7 +1676,7 @@ impl Router {
             Some(decision) => decision,
             None => return Ok(None),
         };
-        Ok(Self::finish_route(&model_field, json, decision))
+        Ok(finish(&model_field, json, decision))
     }
 
     /// Rewrite the body for `decision`: real backend model id, forced
@@ -1640,6 +1718,21 @@ impl Router {
             }
         }
         json["provider"] = serde_json::Value::Object(provider);
+        let rewritten = serde_json::to_vec(&json).ok()?;
+        Some((rewritten, decision))
+    }
+
+    /// Model-only rewrite for the decisions route (Iter 27): the
+    /// decisions API owns its schema, so chat-injected fields
+    /// (`provider`, `quantizations`, privacy flags) stay out —
+    /// unknown fields risk an upstream 400. Privacy-variant
+    /// enforcement is therefore chat-only for now.
+    fn finish_decision_route(
+        _model_field: &str,
+        mut json: serde_json::Value,
+        decision: Decision,
+    ) -> Option<(Vec<u8>, Decision)> {
+        json["model"] = serde_json::Value::String(decision.model_id.clone());
         let rewritten = serde_json::to_vec(&json).ok()?;
         Some((rewritten, decision))
     }
