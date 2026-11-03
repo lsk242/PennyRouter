@@ -25,3 +25,5 @@ All product documentation lives here, Markdown only.
 - [review-2026-10-31.md](review-2026-10-31.md) — full code review notes (2026-10-31).
 - [proposals/2026-11-01-openrouter-interface.md](proposals/2026-11-01-openrouter-interface.md) — proposal: OpenRouter-native interface, DNS vs `baseURL`, Opencode integration.
 - [proposals/2026-11-02-smart-classifier.md](proposals/2026-11-02-smart-classifier.md) — proposal: live per-request classifier `openrouter/pair/smart` (smart/max, privacy variants, failure contract).
+- [proposals/2026-11-03-artificial-analysis-index.md](proposals/2026-11-03-artificial-analysis-index.md) — proposal: catalog ingestion of `benchmarks.artificial_analysis.*` (AA coding/intelligence/agentic index, schema v5→v6).
+- [proposals/2026-11-03-minindex-filter.md](proposals/2026-11-03-minindex-filter.md) — proposal: `openrouter/pair/.../minindex/[number]` suffix filter on AA coding index.
