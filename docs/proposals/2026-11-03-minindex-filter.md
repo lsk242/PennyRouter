@@ -44,7 +44,7 @@ Notes:
 - `model/<id>` itself may contain slashes (e.g. `deepseek/deepseek-v4.1-flash`). The parser splits from the right: look for `/fallback/` first, then `/minindex/<n>` before it, then the `model/` prefix — same technique Iter 28 uses for `model/<id>/fallback/<tier>`.
 - `smart`/`smart/max` accept `minindex` too (classifier picks tier, then filter applies to that tier's candidates — see §4).
 - Unknown suffixes after `minindex` that are not `/fallback/` are invalid (no silent ignore — the gateway owns this id space, unlike raw model ids where unknown tags are ignored).
-- Direct model suffix `model/prefix` form (Iter 5, `lowest`) does not use `minindex`; its future is to become a `minindex`-like filter on the raw model path if needed — explicitly out of scope here to avoid tag-grammar collision.
+- Raw tagged-model suffixes (`<model-id>/<tag>`, Iter 5 tag grammar; the `lowest` tag itself is Iter 19) do not use `minindex`; their future is a `minindex`-like filter on the raw model path if needed — explicitly out of scope here to avoid tag-grammar collision.
 
 Examples valid:
 
@@ -66,7 +66,7 @@ Examples invalid → `400 invalid_model` (OpenAI-shaped `{"error":{"message","ty
 ### 4.1 Where it runs
 
 - `crates/gateway/src/routing.rs::parse_virtual` gains `minindex: Option<u8>` on `VirtualModel` (alongside `tier`, `privacy`, `free_only`, `fallback`, `pinned_model`).
-- Tier dispatch (`decide_tier`, `decide_virtual`, `decide_low`, `decide_think`, `decide_lowest`, `decide_decision`, pinned-model path) filters candidates by `aa_coding_index >= minindex` when present. The filter is the first eligibility gate, before tool support, budget, throttle, and promo/price ranking — so "too low quality" is not rescued by being cheaper.
+- Tier dispatch (`decide_tier`, `decide_virtual`, `decide_ordered_virtual` (the shared `low`/`think` pick), `decide_lowest`, `decide_decision`, pinned-model path) filters candidates by `aa_coding_index >= minindex` when present. The filter is the first eligibility gate, before tool support, budget, throttle, and promo/price ranking — so "too low quality" is not rescued by being cheaper.
 - The filter consults the snapshot's `aa_coding_index: HashMap<String, i64>` map (populated from `models.aa_coding_index` at load + reload). No DB hit on the request path.
 
 ### 4.2 Interaction with existing features
@@ -136,7 +136,7 @@ Integration (mock catalog DB + mock upstream):
 ## 10. What this deliberately does not add
 
 - No query-param or header filter — suffix only (§1).
-- No `minindex` on the raw tagged model path (`meta/muse-spark-open/minindex/50`) — that grammar is Iter 5 `lowest` territory and would need a separate proposal to avoid tag collisions.
+- No `minindex` on the raw tagged model path (`meta/muse-spark-open/minindex/50`) — that grammar is Iter 5 tag territory (the `lowest` tag is Iter 19) and would need a separate proposal to avoid tag collisions.
 - No `maxindex` or range filter — one floor covers the stated need ("minimum value for index to show").
 - No ELO / `design_arena` filter — different shape (per-category ELO), needs its own aggregation policy (future proposal if wanted).
 - No `intelligence_index` / `agentic_index` suffix in this iteration — catalog ingests all three, but exposing more than `coding_index` widens the grammar without a stated need. Add `minindex-intelligence/N` later if asked.

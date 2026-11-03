@@ -135,7 +135,7 @@ pub fn run_processing(catalog: &Catalog, processed_at: &str) -> Result<ProcessSu
 }
 ```
 
-`EXTRA_MODEL_IDS` models (Iter 24) already have their model payload persisted via `fetch.rs`'s `root.data.push(model)` path, so they are covered without extra fetch logic.
+`EXTRA_MODEL_IDS` models (Iter 24) already have their model payload persisted via `fetch.rs`'s `fetch_openrouter_extra` (`list.push(model)`) path, so they are covered without extra fetch logic.
 
 ### 4.2 Store — `crates/catalog/src/store.rs`
 
@@ -193,7 +193,7 @@ Single iteration — schema bump + processing + store + snapshot plumbing. No ga
 - `crates/catalog/src/schema.rs` — `SCHEMA_VERSION=5`, `DDL`, `ENDPOINT_INDEXED_COLUMNS`, `V1_DDL`.
 - `crates/catalog/src/store.rs` — `Catalog::migrate`, `has_column`, `ENDPOINT_COLS`, `update_endpoint_index`, `ModelRow`, `all_endpoints`, `get_model`.
 - `crates/catalog/src/process.rs` — `run_processing`, `extract_tool_support`, `extract_decision_support`, `extract_price`, `classify_precision`.
-- `crates/catalog/src/fetch.rs` — `fetch_openrouter` / `fetch_openrouter_extra`, `EXTRA_MODEL_IDS`, model persistence via `root.data.push`.
+- `crates/catalog/src/fetch.rs` — `fetch_openrouter` / `fetch_openrouter_extra`, `EXTRA_MODEL_IDS`, model persistence via `list.push(model)`.
 - `crates/gateway/src/routing.rs` — `Snapshot`, `Offering`, `parse_virtual`, `VIRTUAL_MODELS`.
 - `docs/routing.md`, `docs/api.md`, `docs/catalog-sync-architecture.md`, `docs/catalog-sync-roadmap.md`, `docs/ranking-index.md`.
 - `docs/proposals/2026-11-03-minindex-filter.md` — gateway filter depending on this signal.
