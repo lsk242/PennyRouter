@@ -10,6 +10,7 @@ mod popular;
 mod price;
 mod process;
 mod rank;
+mod rank_score;
 mod schema;
 mod score;
 mod score_baseten;
@@ -24,8 +25,9 @@ mod sync;
 pub use artifact::{now_rfc3339, publish, sha256_hex, verify, Manifest};
 pub use fetch::{fetch_openrouter, fetch_openrouter_extra, Fetched};
 pub use popular::{
-    aggregate_apps, aggregate_models, fetch_popularity, read_popularity, store_popularity,
-    Popularity, POPULAR_APPS_TOP_N, POPULAR_MODELS_TOP_N, RANKINGS_WINDOW_DAYS,
+    aggregate_apps, aggregate_models, aggregate_models_all, fetch_popularity, read_popular_tokens,
+    read_popularity, store_popularity, Popularity, POPULAR_APPS_TOP_N, POPULAR_MODELS_TOP_N,
+    RANKINGS_WINDOW_DAYS,
 };
 pub use price::{
     balanced_profile, builtin_profiles, effective_cost, fmt_price_per_m, resolve_discount, Promos,
@@ -36,6 +38,11 @@ pub use rank::{
     compare as compare_signals, load_ranking_doc, publish_ranking, rank_catalog, verify_ranking,
     Assist, ClassRanking, FreeOffer, RankEntry, RankOrientation, RankingDocument, RankingManifest,
     Signals, TrendStats, Trends,
+};
+pub use rank_score::{
+    compare as compare_rank, cost_per_task, efficiency, popularity_factor, precision_factor,
+    RankInputs, RankKey, RankScore, COST_HALF_CREDIT, POP_WEIGHT,
+    RULESET_VERSION as RANK_RULESET_VERSION, TASK_TOKENS,
 };
 pub use schema::{SCHEMA_VERSION, V1_DDL};
 pub use score::{
@@ -52,7 +59,8 @@ pub use score_offline::{OfflineScorer, RULESET_VERSION};
 pub use score_openai::PROMPT_VERSION;
 pub use score_openrouter::OpenRouterScorer;
 pub use store::{
-    Catalog, EndpointIndex, EndpointRow, EndpointScore, ModelIndex, ModelPayload, ModelRow,
+    Catalog, EndpointIndex, EndpointRank, EndpointRow, EndpointScore, EndpointSpeed, ModelIndex,
+    ModelPayload, ModelPopularity, ModelRow, ModelSignals,
 };
 pub use sync::{load_endpoints_dir, run_fixture_sync, Summary};
 

@@ -5,8 +5,8 @@
 //! content per route with it set.
 
 use pennyrouter_catalog::{
-    publish, publish_ranking, Catalog, ClassRanking, EndpointIndex, EndpointRow, EndpointScore,
-    ModelRow, RankEntry, RankingDocument,
+    publish, publish_ranking, Catalog, ClassRanking, EndpointIndex, EndpointRank, EndpointRow,
+    EndpointScore, EndpointSpeed, ModelIndex, ModelRow, RankEntry, RankingDocument,
 };
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -122,6 +122,95 @@ fn artifact_dir(test: &str) -> std::path::PathBuf {
         )
         .unwrap();
     catalog.set_meta("score_backend", "recorded").unwrap();
+
+    // Iter 34: a free, scored offering so the free tab and the score
+    // breakdown have something real to render.
+    catalog
+        .insert_model(&ModelRow {
+            model_id: "free/model".to_string(),
+            name: "free/model".to_string(),
+            source: "test".to_string(),
+            payload: "{}".to_string(),
+            fetched_at: "t".to_string(),
+        })
+        .unwrap();
+    catalog
+        .update_model_index(
+            "free/model",
+            &ModelIndex {
+                aa_intelligence_index: Some(70),
+                aa_coding_index: Some(80),
+                aa_agentic_index: None,
+                aa_cost_per_task: None,
+            },
+        )
+        .unwrap();
+    catalog
+        .insert_endpoint(&EndpointRow {
+            id: 0,
+            model_id: "free/model".to_string(),
+            provider_name: "FreeProvider".to_string(),
+            payload: r#"{"tag":"free/fp16"}"#.to_string(),
+            fetched_at: "t".to_string(),
+            price_prompt: Some(0.0),
+            price_completion: Some(0.0),
+            price_cache_read: None,
+            price_cache_write: None,
+            precision_class: Some("fp16".to_string()),
+            promo_discount: None,
+            processed_at: Some("t".to_string()),
+            supports_tools: None,
+            supports_decisions: None,
+            quality_tier: Some("high".to_string()),
+            quality_score: Some(0.9),
+            scored_at: Some("t".to_string()),
+            score_model: Some("recorded".to_string()),
+            score_prompt: Some("recorded".to_string()),
+            price_override_tokens: None,
+        })
+        .unwrap();
+    let free = &catalog.endpoints_for("free/model").unwrap()[0];
+    catalog
+        .update_endpoint_index(
+            free.id,
+            &EndpointIndex {
+                price_prompt: Some(0.0),
+                price_completion: Some(0.0),
+                price_cache_read: None,
+                price_cache_write: None,
+                precision_class: Some("fp16".to_string()),
+                promo_discount: None,
+                processed_at: "t".to_string(),
+                supports_tools: None,
+                supports_decisions: None,
+                price_override_tokens: None,
+            },
+        )
+        .unwrap();
+    catalog
+        .update_endpoint_speed(
+            free.id,
+            &EndpointSpeed {
+                latency_ms: Some(300.0),
+                throughput_tps: Some(120.0),
+                uptime_pct: Some(99.5),
+            },
+        )
+        .unwrap();
+    catalog
+        .update_endpoint_rank(
+            free.id,
+            &EndpointRank {
+                rank_score: Some(80.0),
+                rank_quality: Some(80.0),
+                rank_efficiency: Some(1.0),
+                rank_popularity: Some(1.0),
+                rank_basis: Some("coding".to_string()),
+                rank_ruleset: Some("rank-v1".to_string()),
+                ranked_at: Some("t".to_string()),
+            },
+        )
+        .unwrap();
     drop(catalog);
     let out = dir.join("out");
     let (_, _, manifest) = publish(&work, &out, "test", 1, 1).unwrap();
@@ -136,6 +225,7 @@ fn artifact_dir(test: &str) -> std::path::PathBuf {
             }],
             price: vec![],
             quality: vec![],
+            score: vec![],
         }],
     );
     let doc = RankingDocument {
@@ -374,5 +464,61 @@ fn model_link_round_trips_special_chars_and_prices_render() {
     assert!(
         !filtered.contains(">unknown<"),
         "stored class unknown renders as -, got: {filtered}"
+    );
+}
+
+/// Iter 34: the home page is an overview (coverage, gaps, the formula,
+/// a worked example) and the models page splits free from tiers.
+#[test]
+fn overview_explains_the_score_and_models_tabs_split_free_from_tiers() {
+    let out = artifact_dir("score-ui");
+    let log = out.join("pipe.log");
+    std::fs::write(&log, "").unwrap();
+    let server = spawn(&out, &log);
+
+    let index = get(&server, "/");
+    assert!(index.contains("200 OK"), "got: {index}");
+    assert!(
+        index.contains("How the rank score is calculated"),
+        "formula section present"
+    );
+    assert!(
+        index.contains("rank_score = quality × efficiency × popularity"),
+        "formula spelled out"
+    );
+    assert!(index.contains("Worked example"), "worked example present");
+    assert!(
+        index.contains("models with no AA index"),
+        "coverage counts present"
+    );
+    assert!(index.contains("Data quality"), "gap warnings present");
+    assert!(
+        index.contains("coding → intelligence → agentic"),
+        "basis chain documented"
+    );
+
+    let free = get(&server, "/models?tab=free");
+    assert!(free.contains("free/model"), "free offering listed");
+    assert!(
+        !free.contains("UiProvider"),
+        "paid offerings stay out of the free tab, got: {free}"
+    );
+    assert!(free.contains("80.0"), "score rendered");
+    assert!(free.contains("calc"), "per-row breakdown available");
+    assert!(
+        free.contains("efficiency = 0.01 / (0.000000 + 0.01) = 1.0000"),
+        "free efficiency shown as full credit, got: {free}"
+    );
+    assert!(free.contains("120 tok/s"), "speed shown as a tie-breaker");
+
+    let tiers = get(&server, "/models?tab=tiers");
+    assert!(tiers.contains("UiProvider"), "paid offering listed");
+    assert!(
+        !tiers.contains("free/model"),
+        "free offerings stay out of the tiers tab, got: {tiers}"
+    );
+    assert!(
+        tiers.contains("no score: no price"),
+        "unpriced offering explains why it has no score"
     );
 }

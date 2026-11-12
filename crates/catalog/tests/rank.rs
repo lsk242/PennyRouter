@@ -774,3 +774,60 @@ fn assist_prefer_and_avoid_override_signals() {
         .collect();
     assert_eq!(providers, ["Drop", "Keep"]);
 }
+
+/// Iter 34: the ranking document carries a value-score ordering once
+/// the catalog is processed, and omits it (empty, not serialized)
+/// when it is not.
+#[test]
+fn score_ordering_published_only_when_processed() {
+    let (_dir, db) = synced_db("score-order");
+    let catalog = Catalog::open(&db).unwrap();
+    let trends = Trends::load(&fixtures_dir().join("trends.json")).unwrap();
+    let assist = Assist::load(&fixtures_dir().join("rank-assist.json")).unwrap();
+    let promos = Promos::load(&fixtures_dir().join("promos.json")).unwrap();
+    let rebuild = || {
+        rank_catalog(
+            &catalog,
+            &trends,
+            &assist,
+            &promos,
+            STAMP,
+            STAMP,
+            Some("cat-v1".to_string()),
+        )
+        .unwrap()
+    };
+
+    // Unprocessed: no scores, so no score ordering.
+    let doc = rebuild();
+    assert!(doc.models["openai/gpt-6.1-terra-pro"][0].score.is_empty());
+
+    // Give the model an AA coding index, then process: every offering
+    // is scored, cheapest first.
+    let mut payload: serde_json::Value = serde_json::from_str(
+        &catalog
+            .get_model("openai/gpt-6.1-terra-pro")
+            .unwrap()
+            .unwrap()
+            .payload,
+    )
+    .unwrap();
+    payload["benchmarks"] = serde_json::json!({"artificial_analysis": {"coding_index": 70}});
+    catalog
+        .insert_model(&ModelRow {
+            model_id: "openai/gpt-6.1-terra-pro".to_string(),
+            name: "GPT 6.1 Terra Pro".to_string(),
+            source: "openrouter".to_string(),
+            payload: payload.to_string(),
+            fetched_at: "t".to_string(),
+        })
+        .unwrap();
+    run_processing(&catalog, STAMP).unwrap();
+
+    let doc = rebuild();
+    let score = &doc.models["openai/gpt-6.1-terra-pro"][0].score;
+    assert_eq!(tags(score), ["openai/flex", "openai", "openai/fast"]);
+    // The new field is additive: the other orderings still list every
+    // offering.
+    assert_eq!(doc.models["openai/gpt-6.1-terra-pro"][0].default.len(), 3);
+}

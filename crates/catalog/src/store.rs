@@ -69,6 +69,50 @@ pub struct ModelIndex {
     pub aa_intelligence_index: Option<i64>,
     pub aa_coding_index: Option<i64>,
     pub aa_agentic_index: Option<i64>,
+    /// AA's own cost per task when the payload carries it (Iter 34);
+    /// absent in today's payloads, reserved so it wins when it lands.
+    pub aa_cost_per_task: Option<f64>,
+}
+
+/// Speed and availability signals distilled from an endpoint payload
+/// (Iter 34). Every field is optional: a missing metric is unknown,
+/// never zero.
+#[derive(Clone, Default)]
+pub struct EndpointSpeed {
+    pub latency_ms: Option<f64>,
+    pub throughput_tps: Option<f64>,
+    pub uptime_pct: Option<f64>,
+}
+
+/// Value-score components for one endpoint (Iter 34). Stored rather
+/// than recomputed so the UI can show the arithmetic and a later
+/// gateway can read the score with one column.
+#[derive(Clone, Default)]
+pub struct EndpointRank {
+    pub rank_score: Option<f64>,
+    pub rank_quality: Option<f64>,
+    pub rank_efficiency: Option<f64>,
+    pub rank_popularity: Option<f64>,
+    pub rank_basis: Option<String>,
+    pub rank_ruleset: Option<String>,
+    pub ranked_at: Option<String>,
+}
+
+/// Per-model signals the value score reads (Iter 34).
+#[derive(Clone, Default)]
+pub struct ModelSignals {
+    pub aa_intelligence_index: Option<i64>,
+    pub aa_coding_index: Option<i64>,
+    pub aa_agentic_index: Option<i64>,
+    pub aa_cost_per_task: Option<f64>,
+    pub popularity_tokens: Option<i64>,
+    pub popularity_share: Option<f64>,
+}
+
+/// Popularity facts for one model, from the rankings window (Iter 34).
+pub struct ModelPopularity {
+    pub popularity_tokens: Option<i64>,
+    pub popularity_share: Option<f64>,
 }
 
 /// Model-scored signals distilled by scoring (Phase 2b), plus the
@@ -309,11 +353,12 @@ impl Catalog {
     pub fn update_model_index(&self, model_id: &str, index: &ModelIndex) -> Result<(), Error> {
         self.conn.execute(
             "UPDATE models SET aa_intelligence_index = ?1, aa_coding_index = ?2,
-             aa_agentic_index = ?3 WHERE model_id = ?4",
+             aa_agentic_index = ?3, aa_cost_per_task = ?4 WHERE model_id = ?5",
             params![
                 index.aa_intelligence_index,
                 index.aa_coding_index,
                 index.aa_agentic_index,
+                index.aa_cost_per_task,
                 model_id
             ],
         )?;
@@ -399,6 +444,122 @@ impl Catalog {
             ],
         )?;
         Ok(())
+    }
+
+    /// Fill the speed/availability columns of one endpoint (Iter 34).
+    pub fn update_endpoint_speed(&self, id: i64, speed: &EndpointSpeed) -> Result<(), Error> {
+        self.conn.execute(
+            "UPDATE endpoints SET latency_ms = ?1, throughput_tps = ?2,
+             uptime_pct = ?3 WHERE id = ?4",
+            params![speed.latency_ms, speed.throughput_tps, speed.uptime_pct, id],
+        )?;
+        Ok(())
+    }
+
+    /// Fill the value-score columns of one endpoint (Iter 34).
+    pub fn update_endpoint_rank(&self, id: i64, rank: &EndpointRank) -> Result<(), Error> {
+        self.conn.execute(
+            "UPDATE endpoints SET rank_score = ?1, rank_quality = ?2,
+             rank_efficiency = ?3, rank_popularity = ?4, rank_basis = ?5,
+             rank_ruleset = ?6, ranked_at = ?7 WHERE id = ?8",
+            params![
+                rank.rank_score,
+                rank.rank_quality,
+                rank.rank_efficiency,
+                rank.rank_popularity,
+                rank.rank_basis,
+                rank.rank_ruleset,
+                rank.ranked_at,
+                id
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Fill the popularity columns of one model (Iter 34).
+    pub fn update_model_popularity(
+        &self,
+        model_id: &str,
+        popularity: &ModelPopularity,
+    ) -> Result<(), Error> {
+        self.conn.execute(
+            "UPDATE models SET popularity_tokens = ?1, popularity_share = ?2
+             WHERE model_id = ?3",
+            params![
+                popularity.popularity_tokens,
+                popularity.popularity_share,
+                model_id
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Speed/availability per endpoint id, for the ranking rebuild and
+    /// the catalog UI (Iter 34).
+    pub fn endpoint_speeds(&self) -> Result<HashMap<i64, EndpointSpeed>, Error> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, latency_ms, throughput_tps, uptime_pct FROM endpoints")?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                EndpointSpeed {
+                    latency_ms: r.get(1)?,
+                    throughput_tps: r.get(2)?,
+                    uptime_pct: r.get(3)?,
+                },
+            ))
+        })?;
+        rows.collect::<Result<HashMap<_, _>, _>>()
+            .map_err(Error::from)
+    }
+
+    /// Value-score components per endpoint id (Iter 34).
+    pub fn endpoint_ranks(&self) -> Result<HashMap<i64, EndpointRank>, Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, rank_score, rank_quality, rank_efficiency, rank_popularity,
+             rank_basis, rank_ruleset, ranked_at FROM endpoints",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                EndpointRank {
+                    rank_score: r.get(1)?,
+                    rank_quality: r.get(2)?,
+                    rank_efficiency: r.get(3)?,
+                    rank_popularity: r.get(4)?,
+                    rank_basis: r.get(5)?,
+                    rank_ruleset: r.get(6)?,
+                    ranked_at: r.get(7)?,
+                },
+            ))
+        })?;
+        rows.collect::<Result<HashMap<_, _>, _>>()
+            .map_err(Error::from)
+    }
+
+    /// Per-model signals the value score and the catalog UI read
+    /// (Iter 34): AA indexes, AA cost per task, popularity.
+    pub fn model_signals(&self) -> Result<HashMap<String, ModelSignals>, Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT model_id, aa_intelligence_index, aa_coding_index, aa_agentic_index,
+             aa_cost_per_task, popularity_tokens, popularity_share FROM models",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                ModelSignals {
+                    aa_intelligence_index: r.get(1)?,
+                    aa_coding_index: r.get(2)?,
+                    aa_agentic_index: r.get(3)?,
+                    aa_cost_per_task: r.get(4)?,
+                    popularity_tokens: r.get(5)?,
+                    popularity_share: r.get(6)?,
+                },
+            ))
+        })?;
+        rows.collect::<Result<HashMap<_, _>, _>>()
+            .map_err(Error::from)
     }
 
     pub fn get_model(&self, model_id: &str) -> Result<Option<ModelRow>, Error> {
@@ -492,7 +653,7 @@ mod tests {
         catalog.init().unwrap();
         assert_eq!(
             catalog.get_meta("schema_version").unwrap().as_deref(),
-            Some("7")
+            Some("8")
         );
         assert_eq!(catalog.counts().unwrap(), (0, 0));
     }

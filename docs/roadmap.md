@@ -692,7 +692,7 @@ Development delivers Docker images, platform delivers deployments.
   columns/keys), CLI offline line. `cargo test --workspace`
   clean locally (39 suites); clippy/fmt via CI (sandbox lacks
   the toolchain).
-
+  
 ## Iter 33 — `minindex` suffix filter (done)
 
 - Goal: let callers ask for a minimum Artificial Analysis coding
@@ -722,3 +722,33 @@ Development delivers Docker images, platform delivers deployments.
 Deferred ideas in [future.md](future.md): exact price prediction,
 parallel fan-out, further score backends. Each becomes roadmap items
 only when pulled forward deliberately.
+
+## Iter 34 — Catalog value score + catalog UI (done)
+
+- Goal: turn the catalog's stored facts into one deterministic
+  verdict — maximum intelligence for the lowest price — and make the
+  catalog UI answer "what is missing?" and "why is this ranked
+  here?".
+- Value: routing tiers stop being the only quality story; operators
+  see coverage gaps (264/473 models have no AA index) and the exact
+  arithmetic behind every ordering, with no AI or external ranking
+  service in the loop.
+- Shape: `rank_score = quality × efficiency × popularity` (0..100),
+  quality = AA index (coding first) × precision factor, efficiency =
+  `COST_HALF_CREDIT/(cost_per_task+COST_HALF_CREDIT)` anchored at
+  the live median ($0.01/task), popularity a ≤10% factor; speed
+  then availability break ties. Schema v7→v8 stores the components; the ranking
+  document gains an optional `score` ordering the gateway ignores
+  until a later iteration. UI: overview (counts, warnings, formula,
+  worked example) + models tabs (`free`/`tiers`/`decision`) with a
+  per-row breakdown.
+- Status: implemented. Decided 2026-11-12: coding-first basis
+  (170/473 models vs 92 for intelligence), `COST_HALF_CREDIT` =
+  $0.01/task, free tab ranked on quality × popularity. As built:
+  popularity is fetched before processing (the score reads the full
+  window, not just the top-10 menu pins); `aa_cost_per_task` is
+  stored but unused until AA ships it; the ranking document's
+  `score` ordering is omitted when the catalog was never processed.
+  Proposal: `docs/proposals/2026-11-12-catalog-ui-value-score.md`.
+
+## After Iter 34

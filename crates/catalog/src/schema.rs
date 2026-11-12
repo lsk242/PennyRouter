@@ -1,11 +1,11 @@
-//! Schema v7: fixed core columns + raw JSON payloads + indexed columns
+//! Schema v8: fixed core columns + raw JSON payloads + indexed columns
 //! (deterministic from Phase 2a, model-scored from Phase 2b, tool
 //! support from Iter 22, decision-modality support from Iter 24,
 //! Artificial Analysis indexes from Iter 31, scoring-audit rename
-//! from Iter 32).
+//! from Iter 32, speed/availability + value score from Iter 34).
 
 /// Current schema version, recorded in `sync_meta` on init.
-pub const SCHEMA_VERSION: u32 = 7;
+pub const SCHEMA_VERSION: u32 = 8;
 
 pub const DDL: &str = "
 CREATE TABLE IF NOT EXISTS models (
@@ -16,7 +16,10 @@ CREATE TABLE IF NOT EXISTS models (
     fetched_at  TEXT NOT NULL,
     aa_intelligence_index INTEGER,
     aa_coding_index       INTEGER,
-    aa_agentic_index      INTEGER
+    aa_agentic_index      INTEGER,
+    aa_cost_per_task      REAL,
+    popularity_tokens     INTEGER,
+    popularity_share      REAL
 );
 CREATE TABLE IF NOT EXISTS endpoints (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -39,6 +42,16 @@ CREATE TABLE IF NOT EXISTS endpoints (
     score_model       TEXT,
     score_prompt      TEXT,
     price_override_tokens INTEGER,
+    latency_ms        REAL,
+    throughput_tps    REAL,
+    uptime_pct        REAL,
+    rank_score        REAL,
+    rank_quality      REAL,
+    rank_efficiency   REAL,
+    rank_popularity   REAL,
+    rank_basis        TEXT,
+    rank_ruleset      TEXT,
+    ranked_at         TEXT,
     FOREIGN KEY (model_id) REFERENCES models(model_id)
 );
 CREATE INDEX IF NOT EXISTS idx_endpoints_model ON endpoints(model_id);
@@ -67,6 +80,16 @@ pub const ENDPOINT_INDEXED_COLUMNS: &[(&str, &str)] = &[
     ("score_model", "TEXT"),
     ("score_prompt", "TEXT"),
     ("price_override_tokens", "INTEGER"),
+    ("latency_ms", "REAL"),
+    ("throughput_tps", "REAL"),
+    ("uptime_pct", "REAL"),
+    ("rank_score", "REAL"),
+    ("rank_quality", "REAL"),
+    ("rank_efficiency", "REAL"),
+    ("rank_popularity", "REAL"),
+    ("rank_basis", "TEXT"),
+    ("rank_ruleset", "TEXT"),
+    ("ranked_at", "TEXT"),
 ];
 
 /// Indexed columns on `models` (Iter 31) — mirrors the endpoints
@@ -76,6 +99,9 @@ pub const MODEL_INDEXED_COLUMNS: &[(&str, &str)] = &[
     ("aa_intelligence_index", "INTEGER"),
     ("aa_coding_index", "INTEGER"),
     ("aa_agentic_index", "INTEGER"),
+    ("aa_cost_per_task", "REAL"),
+    ("popularity_tokens", "INTEGER"),
+    ("popularity_share", "REAL"),
 ];
 
 /// Endpoint columns renamed in v7 (Iter 32: judging → scoring), as

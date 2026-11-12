@@ -607,6 +607,7 @@ async fn ui_prices_render_per_million_tokens() {
                     aa_intelligence_index: None,
                     aa_coding_index: Some(71),
                     aa_agentic_index: None,
+                    aa_cost_per_task: None,
                 },
             )
             .unwrap();

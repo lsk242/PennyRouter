@@ -3,15 +3,33 @@
 //! Pure-code extraction only (Phase 2a). Model-scored signals plug in
 //! later (Phase 2b) behind the same per-endpoint update.
 
+use crate::rank_score::{self, RankInputs, RULESET_VERSION};
 use crate::score_offline::OfflineScorer;
-use crate::store::{Catalog, EndpointIndex, EndpointScore, ModelIndex};
+use crate::store::{
+    Catalog, EndpointIndex, EndpointRank, EndpointScore, EndpointSpeed, ModelIndex,
+    ModelPopularity, ModelSignals,
+};
 use crate::Error;
 use serde_json::Value;
 use std::collections::hash_map::Entry;
+use std::collections::HashMap;
 
 pub struct ProcessSummary {
     pub processed: usize,
     pub scored: usize,
+    pub ranked: usize,
+}
+
+/// One endpoint's inputs to the value score, collected while its
+/// indexed columns are written (Iter 34). The rows read before the
+/// update still hold NULLs, so the score is computed from these
+/// values, never re-read.
+struct PendingRank {
+    id: i64,
+    model_id: String,
+    precision_class: Option<String>,
+    cost_per_token: Option<f64>,
+    decision: bool,
 }
 
 /// Extract indexed values for every endpoint, plus per-model
@@ -25,19 +43,60 @@ pub fn run_processing(catalog: &Catalog, processed_at: &str) -> Result<ProcessSu
     // One transaction for the whole run (plus its meta): a mid-run
     // failure rolls every update back instead of half-processing.
     catalog.transaction(|| {
+        // Popularity window (Iter 34): the score's per-model factor.
+        // Absent (keyless sync, old artifact) means no factor, never a
+        // penalty.
+        let popular = crate::popular::read_popular_tokens(catalog);
+        let max_tokens = popular.values().copied().max().unwrap_or(0);
+        let mut signals: HashMap<String, ModelSignals> = HashMap::new();
         for model in catalog.all_models()? {
             let payload: Value = serde_json::from_str(&model.payload)?;
-            catalog.update_model_index(
+            let index = ModelIndex {
+                aa_intelligence_index: extract_aa_index(&payload, "intelligence_index"),
+                aa_coding_index: extract_aa_index(&payload, "coding_index"),
+                aa_agentic_index: extract_aa_index(&payload, "agentic_index"),
+                aa_cost_per_task: extract_aa_cost_per_task(&payload),
+            };
+            catalog.update_model_index(&model.model_id, &index)?;
+            // The rankings dataset keys on the permaslug, which the
+            // model payload carries as `canonical_slug`; the plain id
+            // is the fallback for payloads without one.
+            let slug = payload
+                .get("canonical_slug")
+                .and_then(Value::as_str)
+                .unwrap_or(&model.model_id);
+            let tokens = popular
+                .get(slug)
+                .or_else(|| popular.get(&model.model_id))
+                .copied();
+            let share = tokens.map(|tokens| {
+                if max_tokens == 0 {
+                    0.0
+                } else {
+                    tokens as f64 / max_tokens as f64
+                }
+            });
+            catalog.update_model_popularity(
                 &model.model_id,
-                &ModelIndex {
-                    aa_intelligence_index: extract_aa_index(&payload, "intelligence_index"),
-                    aa_coding_index: extract_aa_index(&payload, "coding_index"),
-                    aa_agentic_index: extract_aa_index(&payload, "agentic_index"),
+                &ModelPopularity {
+                    popularity_tokens: tokens.map(|tokens| tokens as i64),
+                    popularity_share: share,
                 },
             )?;
+            signals.insert(
+                model.model_id.clone(),
+                ModelSignals {
+                    aa_intelligence_index: index.aa_intelligence_index,
+                    aa_coding_index: index.aa_coding_index,
+                    aa_agentic_index: index.aa_agentic_index,
+                    aa_cost_per_task: index.aa_cost_per_task,
+                    popularity_tokens: tokens.map(|tokens| tokens as i64),
+                    popularity_share: share,
+                },
+            );
         }
-        let mut models: std::collections::HashMap<String, Option<Value>> =
-            std::collections::HashMap::new();
+        let mut models: HashMap<String, Option<Value>> = HashMap::new();
+        let mut pending: Vec<PendingRank> = Vec::new();
         let mut processed = 0;
         for ep in &endpoints {
             let payload: Value = serde_json::from_str(&ep.payload)?;
@@ -54,28 +113,99 @@ pub fn run_processing(catalog: &Catalog, processed_at: &str) -> Result<ProcessSu
                     entry.insert(parsed)
                 }
             };
-            catalog.update_endpoint_index(
+            let index = EndpointIndex {
+                price_prompt: extract_price(&payload, "prompt"),
+                price_completion: extract_price(&payload, "completion"),
+                price_cache_read: extract_price(&payload, "input_cache_read"),
+                price_cache_write: extract_price(&payload, "input_cache_write"),
+                precision_class: Some(classify_precision(&payload)),
+                promo_discount: extract_discount(&payload),
+                price_override_tokens: extract_override_tokens(&payload),
+                processed_at: processed_at.to_string(),
+                supports_tools: extract_tool_support(&payload),
+                supports_decisions: extract_decision_support(model_payload.as_ref()),
+            };
+            catalog.update_endpoint_index(ep.id, &index)?;
+            catalog.update_endpoint_speed(
                 ep.id,
-                &EndpointIndex {
-                    price_prompt: extract_price(&payload, "prompt"),
-                    price_completion: extract_price(&payload, "completion"),
-                    price_cache_read: extract_price(&payload, "input_cache_read"),
-                    price_cache_write: extract_price(&payload, "input_cache_write"),
-                    precision_class: Some(classify_precision(&payload)),
-                    promo_discount: extract_discount(&payload),
-                    price_override_tokens: extract_override_tokens(&payload),
-                    processed_at: processed_at.to_string(),
-                    supports_tools: extract_tool_support(&payload),
-                    supports_decisions: extract_decision_support(model_payload.as_ref()),
+                &EndpointSpeed {
+                    latency_ms: extract_metric(&payload, "latency_last_30m"),
+                    throughput_tps: extract_metric(&payload, "throughput_last_30m"),
+                    uptime_pct: extract_uptime(&payload),
                 },
             )?;
+            pending.push(PendingRank {
+                id: ep.id,
+                model_id: ep.model_id.clone(),
+                precision_class: index.precision_class.clone(),
+                // Static discount only: promo windows are evaluated at
+                // ranking rebuild time, not here.
+                cost_per_token: crate::price::effective_cost(
+                    index.price_prompt,
+                    index.price_completion,
+                    index.price_cache_read,
+                    index.price_cache_write,
+                    &crate::price::balanced_profile(),
+                    index.promo_discount.unwrap_or(0.0),
+                ),
+                decision: index.supports_decisions == Some(1),
+            });
             processed += 1;
         }
         catalog.set_meta("processed_at", processed_at)?;
         catalog.set_meta("processed_count", &processed.to_string())?;
         let scored = run_offline_scoring(catalog, &endpoints, processed_at)?;
-        Ok(ProcessSummary { processed, scored })
+        let ranked = run_rank_scoring(catalog, &pending, &signals, processed_at)?;
+        Ok(ProcessSummary {
+            processed,
+            scored,
+            ranked,
+        })
     })
+}
+
+/// Value-score pass (Iter 34): deterministic, no model calls. Runs
+/// after the indexes and offline tiers so it reads the same facts the
+/// UI shows. Rows without an index or a price get no score — never a
+/// zero, which would sort them below measured bad models.
+fn run_rank_scoring(
+    catalog: &Catalog,
+    pending: &[PendingRank],
+    signals: &HashMap<String, ModelSignals>,
+    processed_at: &str,
+) -> Result<usize, Error> {
+    let mut ranked = 0;
+    for item in pending {
+        let model = signals.get(&item.model_id);
+        let out = rank_score::score(&RankInputs {
+            coding: model.and_then(|m| m.aa_coding_index),
+            intelligence: model.and_then(|m| m.aa_intelligence_index),
+            agentic: model.and_then(|m| m.aa_agentic_index),
+            precision_class: item.precision_class.as_deref(),
+            cost_per_token: item.cost_per_token,
+            popularity_share: model.and_then(|m| m.popularity_share),
+            decision: item.decision,
+        });
+        if out.is_some() {
+            ranked += 1;
+        }
+        catalog.update_endpoint_rank(
+            item.id,
+            &EndpointRank {
+                rank_score: out.as_ref().map(|o| o.score),
+                rank_quality: out.as_ref().map(|o| o.quality),
+                rank_efficiency: out.as_ref().map(|o| o.efficiency),
+                rank_popularity: out.as_ref().map(|o| o.popularity),
+                rank_basis: out.as_ref().map(|o| o.basis.to_string()),
+                rank_ruleset: Some(RULESET_VERSION.to_string()),
+                ranked_at: Some(processed_at.to_string()),
+            },
+        )?;
+    }
+    catalog.set_meta("ranked_at", processed_at)?;
+    catalog.set_meta("ranked_count", &ranked.to_string())?;
+    catalog.set_meta("rank_ruleset", RULESET_VERSION)?;
+    Ok(ranked)
 }
 
 /// Offline scoring pass (Iter 32): deterministic tiers from the AA
@@ -139,6 +269,37 @@ fn extract_aa_index(model_payload: &Value, key: &str) -> Option<i64> {
         return None;
     }
     Some(n.round() as i64)
+}
+
+/// AA's own cost per task (Iter 34), when the payload carries it.
+/// Today's payloads do not; the column is reserved so AA's number
+/// wins the moment it appears. Non-finite or negative is unknown.
+fn extract_aa_cost_per_task(model_payload: &Value) -> Option<f64> {
+    let value = model_payload
+        .get("benchmarks")?
+        .get("artificial_analysis")?
+        .get("cost_per_task")?;
+    let cost = match value {
+        Value::Number(n) => n.as_f64()?,
+        _ => return None,
+    };
+    (cost.is_finite() && cost >= 0.0).then_some(cost)
+}
+
+/// One live metric from an endpoint payload (Iter 34): a finite,
+/// non-negative number, else None. Missing is unknown, never zero.
+fn extract_metric(payload: &Value, key: &str) -> Option<f64> {
+    let value = match payload.get(key)? {
+        Value::Number(n) => n.as_f64()?,
+        Value::String(s) => s.parse().ok()?,
+        _ => return None,
+    };
+    (value.is_finite() && value >= 0.0).then_some(value)
+}
+
+/// Uptime percentage (Iter 34): `0..=100`, else None.
+fn extract_uptime(payload: &Value) -> Option<f64> {
+    extract_metric(payload, "uptime_last_30m").filter(|value| *value <= 100.0)
 }
 
 /// Per-token price as f64; accepts a string or a number, else None.
