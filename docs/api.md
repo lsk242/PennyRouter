@@ -65,7 +65,13 @@ the cheapest paid offering catalog-wide (no quality floor) and fails
 closed when none is eligible. `openrouter/pair/free/fallback/<tier>`
 serves free first, then exactly one pick from the named tier
 (`low|think|lowest|decision`; unknown targets fail closed with
-`no_eligible_offering`) when free is exhausted. 429 responses carry
+`no_eligible_offering`) when free is exhausted. An optional
+`/minindex/<0..=100>` suffix (Iter 33) keeps only models whose AA
+coding index meets the floor — e.g.
+`openrouter/pair/low/minindex/50`; an unusable value is a 400
+`invalid_model`, an unsatisfiable floor a 503 `no_eligible_offering`,
+and routed responses echo the floor in `x-pennyrouter-minindex`. 429
+responses carry
 `Retry-After` plus the
 upstream's `X-RateLimit-*` headers when present. A `modal/` or `baseten/` prefix instead
 pins the request to that provider's upstream (see [routing.md](routing.md)):
