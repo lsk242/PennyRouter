@@ -170,6 +170,20 @@ session.
   `free/fallback/<tier>`. Privacy/budget/auth semantics mirror the
   other virtual routes. An unknown model id fails closed with
   `no_eligible_offering` (503) rather than leaking the virtual name.
+- AA coding-index floor (Iter 33): an optional `/minindex/<0..=100>`
+  suffix on any virtual id (`low`, `think`, `decision`, `free`,
+  `model/<id>`, `smart`) keeps only models whose catalog
+  `aa_coding_index` is at or above the floor. It sits after the core
+  id and before `/fallback/`:
+  `openrouter/pair/privacy/think/minindex/40/fallback/low`. The floor
+  is the first eligibility gate — a cheaper model below it (or with
+  no index at all) never wins, and `minindex/0` means "must have any
+  index". It scopes the primary leg only; the fallback tier runs
+  unfiltered. An unusable value (empty, non-numeric, out of range,
+  duplicated) fails closed with `invalid_model` (400); a satisfiable
+  floor with no surviving candidate fails closed with
+  `no_eligible_offering` (503). Routed responses echo the floor in
+  `x-pennyrouter-minindex`.
 - Cost (Iter 7): "cheapest" compares effective cost under the balanced
   workload profile (see [pricing.md](pricing.md)), promo column
   applied; unpriceable offerings sort last. The `openrouter/free`

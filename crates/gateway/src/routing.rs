@@ -113,6 +113,9 @@ pub struct Decision {
     pub orientation: Orientation,
     /// True when stickiness kept a previously pinned provider.
     pub sticky: bool,
+    /// AA coding-index floor this pick had to satisfy (Iter 33);
+    /// echoed as `x-pennyrouter-minindex` when present.
+    pub minindex: Option<u8>,
 }
 
 /// Session pin: provider (and class) chosen by the session's first route.
@@ -144,6 +147,10 @@ const SESSION_TTL: Duration = Duration::from_secs(30 * 60);
 
 /// Header carrying the chosen provider on routed responses.
 pub const PROVIDER_HEADER: &str = "x-pennyrouter-provider";
+
+/// Header echoing the AA coding-index floor a routed request carried
+/// (Iter 33); absent when the id had no `/minindex/` suffix.
+pub const MININDEX_HEADER: &str = "x-pennyrouter-minindex";
 
 /// Precision classes the gateway may forward as an OpenRouter
 /// `quantizations` requirement (Iter 11, F04). Anything else —
@@ -222,6 +229,11 @@ pub struct VirtualModel {
     /// skip, budget, tool filter, and fallback all scope to that
     /// model's offerings — cross-model tiers are not consulted.
     pub pinned_model: Option<String>,
+    /// Minimum AA coding index floor (Iter 33), from an optional
+    /// `/minindex/<n>` suffix (`n` in 0..=100). Scopes the primary
+    /// leg only: models without a known index are excluded when a
+    /// floor is present. Fallback legs run without the floor.
+    pub minindex: Option<u8>,
 }
 
 /// Body rewrite applied after a pick (Iter 27): chat injects
@@ -229,63 +241,114 @@ pub struct VirtualModel {
 /// only.
 type BodyFinish = fn(&str, serde_json::Value, Decision) -> Option<(Vec<u8>, Decision)>;
 
-/// Parse a virtual model id. Anything else (including unknown
-/// providers or tiers) returns `None` and passes through untouched.
-/// The fallback suffix is only valid on `free` and `decision/free`
-/// ids plus the pinned-model form.
-pub fn parse_virtual(model_field: &str) -> Option<VirtualModel> {
-    let rest = model_field.strip_prefix("openrouter/pair/")?;
+/// Suffix introducing the minimum AA coding index (Iter 33):
+/// `/minindex/<0..=100>`.
+const MININDEX_SEGMENT: &str = "/minindex/";
+
+/// Parse one `minindex` value: digits only, `0..=100` (leading zeros
+/// allowed, e.g. `050` == 50). Signs, decimals, and empty values fail.
+fn parse_minindex_value(value: &str) -> Option<u8> {
+    if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    match value.parse::<u16>() {
+        Ok(n) if n <= 100 => Some(n as u8),
+        _ => None,
+    }
+}
+
+/// Split an optional `/minindex/<n>` suffix off a virtual core. An
+/// unusable segment (empty, non-numeric, out of range, or duplicated)
+/// is an error, never a silent ignore: the gateway owns this id space,
+/// so the request must fail closed instead of passing the id upstream.
+fn split_minindex(rest: &str) -> Result<(&str, Option<u8>), String> {
+    let Some((core, value)) = rest.rsplit_once(MININDEX_SEGMENT) else {
+        return Ok((rest, None));
+    };
+    if core.contains(MININDEX_SEGMENT) {
+        return Err(format!("duplicate minindex suffix in {rest:?}"));
+    }
+    let Some(index) = parse_minindex_value(value) else {
+        return Err(format!("minindex must be an integer 0..100, got {value:?}"));
+    };
+    Ok((core, Some(index)))
+}
+
+/// Why an `openrouter/pair/...` id did not parse.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum VirtualParseError {
+    /// Not a virtual id: forward untouched, as before.
+    NotVirtual,
+    /// A virtual id whose `minindex` suffix is unusable: fail closed.
+    InvalidMinindex(String),
+}
+
+fn parse_virtual_checked(model_field: &str) -> Result<VirtualModel, VirtualParseError> {
+    let rest = model_field
+        .strip_prefix("openrouter/pair/")
+        .ok_or(VirtualParseError::NotVirtual)?;
     let (privacy, rest) = match rest.strip_prefix("privacy/") {
         Some(rest) => (true, rest),
         None => (false, rest),
     };
-    // Pinned-model form (Iter 28): openrouter/pair/[privacy/]
-    // model/<model-id>[/fallback/<tier>]. The model id itself
-    // may contain slashes (e.g. deepseek/deepseek-v4.1-flash),
-    // so the optional fallback suffix is split first.
-    if let Some(rest) = rest.strip_prefix("model/") {
-        let (model_id, fallback) = match rest.split_once("/fallback/") {
-            Some((model_id, target)) if !model_id.is_empty() && !target.is_empty() => {
-                (model_id.to_string(), Some(target.to_string()))
-            }
-            Some(_) => return None,
-            None => {
-                if rest.is_empty() {
-                    return None;
-                }
-                (rest.to_string(), None)
-            }
-        };
-        return Some(VirtualModel {
+    // Split the optional `/fallback/<tier>` first: pinned model ids
+    // contain slashes, so the rightmost suffixes come off first.
+    let (head, fallback) = match rest.split_once("/fallback/") {
+        Some((head, target)) => (head, Some(target.to_string())),
+        None => (rest, None),
+    };
+    let (core, minindex) = split_minindex(head).map_err(VirtualParseError::InvalidMinindex)?;
+    if let Some(model_id) = core.strip_prefix("model/") {
+        if model_id.is_empty() || fallback.as_deref() == Some("") {
+            return Err(VirtualParseError::NotVirtual);
+        }
+        return Ok(VirtualModel {
             tier: VirtualTier::Free,
             privacy,
             free_only: false,
             fallback,
-            pinned_model: Some(model_id),
+            pinned_model: Some(model_id.to_string()),
+            minindex,
         });
     }
-    let (tier, free_only, fallback) = match rest.split_once("/fallback/") {
-        Some(("free", target)) => (VirtualTier::Free, false, Some(target.to_string())),
-        Some(("decision/free", target)) => (VirtualTier::Decision, true, Some(target.to_string())),
-        Some(_) => return None,
-        None => match rest {
-            "free" => (VirtualTier::Free, false, None),
-            "low" => (VirtualTier::Low, false, None),
-            "think" => (VirtualTier::Think, false, None),
-            "decision" => (VirtualTier::Decision, false, None),
-            "decision/free" => (VirtualTier::Decision, true, None),
-            "smart" => (VirtualTier::Smart, false, None),
-            "smart/max" => (VirtualTier::SmartMax, false, None),
-            _ => return None,
-        },
+    // Fallback stays restricted to `free` and `decision/free` ids plus
+    // the pinned-model form above.
+    let (tier, free_only) = match core {
+        "free" => (VirtualTier::Free, false),
+        "decision/free" => (VirtualTier::Decision, true),
+        "low" if fallback.is_none() => (VirtualTier::Low, false),
+        "think" if fallback.is_none() => (VirtualTier::Think, false),
+        "decision" if fallback.is_none() => (VirtualTier::Decision, false),
+        "smart" if fallback.is_none() => (VirtualTier::Smart, false),
+        "smart/max" if fallback.is_none() => (VirtualTier::SmartMax, false),
+        _ => return Err(VirtualParseError::NotVirtual),
     };
-    Some(VirtualModel {
+    Ok(VirtualModel {
         tier,
         privacy,
         free_only,
         fallback,
         pinned_model: None,
+        minindex,
     })
+}
+
+/// Parse a virtual model id. Anything else (including unknown
+/// providers, tiers, or an unusable `minindex`) returns `None` and
+/// passes through untouched; HTTP callers use [`invalid_virtual`] to
+/// fail closed on the latter.
+pub fn parse_virtual(model_field: &str) -> Option<VirtualModel> {
+    parse_virtual_checked(model_field).ok()
+}
+
+/// Reason a gateway-owned virtual id is unusable (Iter 33). `None` for
+/// non-virtual ids and valid virtual ids; HTTP callers reject with
+/// `invalid_model` when this answers.
+pub fn invalid_virtual(model_field: &str) -> Option<String> {
+    match parse_virtual_checked(model_field) {
+        Err(VirtualParseError::InvalidMinindex(message)) => Some(message),
+        _ => None,
+    }
 }
 
 /// Canonical virtual ids served by `GET /v1/models` (Iter 13; decision
@@ -319,6 +382,9 @@ pub struct SmartId {
     /// True for `smart/max` (the classifier may also pick `think`).
     pub max: bool,
     pub privacy: bool,
+    /// Optional AA coding-index floor (Iter 33) applied to whichever
+    /// tier the classifier picks.
+    pub minindex: Option<u8>,
 }
 
 /// Parse a smart classifier id. Anything else — including the plain
@@ -329,12 +395,18 @@ pub fn parse_smart(model_field: &str) -> Option<SmartId> {
         Some(rest) => (true, rest),
         None => (false, rest),
     };
-    match rest {
+    let (core, minindex) = split_minindex(rest).ok()?;
+    match core {
         "smart" => Some(SmartId {
             max: false,
             privacy,
+            minindex,
         }),
-        "smart/max" => Some(SmartId { max: true, privacy }),
+        "smart/max" => Some(SmartId {
+            max: true,
+            privacy,
+            minindex,
+        }),
         _ => None,
     }
 }
@@ -349,10 +421,14 @@ pub fn is_smart_fallback(model_field: &str) -> bool {
         None => return false,
     };
     let rest = rest.strip_prefix("privacy/").unwrap_or(rest);
-    matches!(
-        rest.split_once("/fallback/"),
-        Some(("smart", _)) | Some(("smart/max", _))
-    )
+    let Some((head, target)) = rest.split_once("/fallback/") else {
+        return false;
+    };
+    if target.is_empty() {
+        return false;
+    }
+    let core = split_minindex(head).map_or(head, |(core, _)| core);
+    matches!(core, "smart" | "smart/max")
 }
 
 /// Fallback cool-down when a 429 carries no usable timing headers
@@ -472,6 +548,36 @@ fn free_eligible(
                     && offer.valid_until_unix.is_none_or(|end| now < end)
             })
         })
+}
+
+/// Minimum AA coding index gate (Iter 33): `None` admits every model;
+/// otherwise the model must carry a known index at or above the floor.
+/// Null or absent indexes are excluded — an unknown score cannot be
+/// said to meet a floor.
+fn meets_minindex(snapshot: &Snapshot, model_id: &str, minindex: Option<u8>) -> bool {
+    minindex.is_none_or(|floor| {
+        snapshot
+            .aa_coding_index
+            .get(model_id)
+            .is_some_and(|index| *index >= i64::from(floor))
+    })
+}
+
+/// The AA coding-index floor a model id carries, if any (Iter 33).
+pub fn minindex_of(model_field: &str) -> Option<u8> {
+    parse_virtual(model_field).and_then(|virtual_model| virtual_model.minindex)
+}
+
+/// Bounded tier label for metrics (Iter 33).
+pub fn tier_label(model_field: &str) -> &'static str {
+    match parse_virtual(model_field).map(|virtual_model| virtual_model.tier) {
+        Some(VirtualTier::Free) => "free",
+        Some(VirtualTier::Low) => "low",
+        Some(VirtualTier::Think) => "think",
+        Some(VirtualTier::Decision) => "decision",
+        Some(VirtualTier::Smart | VirtualTier::SmartMax) => "smart",
+        None => "none",
+    }
 }
 
 pub struct Router {
@@ -1059,7 +1165,14 @@ impl Router {
             // tool-starvation surfaces on the virtual ids; here it
             // decays to untouched passthrough as before.
             return self
-                .decide_free(&snapshot, &tags, authorization, constraints, FREE_MODEL)
+                .decide_free(
+                    &snapshot,
+                    &tags,
+                    authorization,
+                    constraints,
+                    FREE_MODEL,
+                    None,
+                )
                 .ok()
                 .flatten();
         }
@@ -1117,6 +1230,7 @@ impl Router {
                                 precision_class: pick.precision_class.clone(),
                                 orientation,
                                 sticky: true,
+                                minindex: None,
                             });
                         }
                     }
@@ -1164,6 +1278,7 @@ impl Router {
             precision_class: pick.precision_class.clone(),
             orientation,
             sticky: false,
+            minindex: None,
         })
     }
 
@@ -1178,7 +1293,9 @@ impl Router {
     /// alternatives exist.
     /// Shared tier dispatch for fallback targets (Iter 21): one
     /// match to extend when a new tier lands. Unknown names fail
-    /// closed rather than leaking upstream.
+    /// closed rather than leaking upstream. `minindex` is the optional
+    /// AA coding floor (Iter 33): fallback legs pass `None`, smart
+    /// classification passes the floor carried by its id.
     fn decide_tier(
         &self,
         snapshot: &Snapshot,
@@ -1186,6 +1303,7 @@ impl Router {
         model_field: &str,
         authorization: Option<&str>,
         constraints: &ProviderConstraints,
+        minindex: Option<u8>,
     ) -> Result<Decision, RouteRejection> {
         match tier {
             "low" => self.decide_ordered_virtual(
@@ -1194,6 +1312,7 @@ impl Router {
                 constraints,
                 model_field,
                 VirtualTier::Low,
+                minindex,
             ),
             "think" => self.decide_ordered_virtual(
                 snapshot,
@@ -1201,11 +1320,17 @@ impl Router {
                 constraints,
                 model_field,
                 VirtualTier::Think,
+                minindex,
             ),
             "lowest" => self.decide_lowest(snapshot, authorization, constraints, model_field),
-            "decision" => {
-                self.decide_decision(snapshot, authorization, constraints, model_field, false)
-            }
+            "decision" => self.decide_decision(
+                snapshot,
+                authorization,
+                constraints,
+                model_field,
+                false,
+                minindex,
+            ),
             _ => Err(RouteRejection {
                 code: "no_eligible_offering",
                 message: format!("unknown fallback tier {tier:?}"),
@@ -1241,6 +1366,7 @@ impl Router {
                 model_field,
                 authorization,
                 &constraints,
+                None,
             )
             .ok()?;
         Self::finish_route(model_field, json, decision)
@@ -1283,6 +1409,7 @@ impl Router {
                 model_field,
                 authorization,
                 &constraints,
+                None,
             )
             .ok();
         Ok(decision.and_then(|decision| Self::finish_decision_route(model_field, json, decision)))
@@ -1301,14 +1428,25 @@ impl Router {
         // leg is the pinned pick, the fallback leg goes cross-model.
         if let Some(pinned) = &virtual_model.pinned_model {
             let pinned = pinned.clone();
-            let first =
-                self.decide_pinned(snapshot, &pinned, model_field, authorization, constraints);
+            let first = self.decide_pinned(
+                snapshot,
+                &pinned,
+                model_field,
+                authorization,
+                constraints,
+                virtual_model.minindex,
+            );
             return match (first, &virtual_model.fallback) {
                 (Ok(decision), _) => Ok(decision),
                 (Err(rejection), None) => Err(rejection),
-                (Err(_), Some(target)) => {
-                    self.decide_tier(snapshot, target, model_field, authorization, constraints)
-                }
+                (Err(_), Some(target)) => self.decide_tier(
+                    snapshot,
+                    target,
+                    model_field,
+                    authorization,
+                    constraints,
+                    None,
+                ),
             };
         }
         match virtual_model.tier {
@@ -1317,7 +1455,14 @@ impl Router {
                 // both fall through to the fallback tier when one is
                 // configured — a tool-capable paid tier can still serve.
                 let free = self
-                    .decide_free(snapshot, &[], authorization, constraints, model_field)
+                    .decide_free(
+                        snapshot,
+                        &[],
+                        authorization,
+                        constraints,
+                        model_field,
+                        virtual_model.minindex,
+                    )
                     .and_then(|decision| {
                         decision.ok_or_else(|| RouteRejection {
                             code: "no_eligible_offering",
@@ -1332,9 +1477,14 @@ impl Router {
                     // Free exhausted with a fallback target: the
                     // target tier applies its own budget check, so any
                     // free-leg rejection falls through to it.
-                    (Err(_), Some(target)) => {
-                        self.decide_tier(snapshot, target, model_field, authorization, constraints)
-                    }
+                    (Err(_), Some(target)) => self.decide_tier(
+                        snapshot,
+                        target,
+                        model_field,
+                        authorization,
+                        constraints,
+                        None,
+                    ),
                 }
             }
             VirtualTier::Decision => {
@@ -1348,13 +1498,19 @@ impl Router {
                     constraints,
                     model_field,
                     virtual_model.free_only,
+                    virtual_model.minindex,
                 );
                 match (first, &virtual_model.fallback) {
                     (Ok(decision), _) => Ok(decision),
                     (Err(rejection), None) => Err(rejection),
-                    (Err(_), Some(target)) => {
-                        self.decide_tier(snapshot, target, model_field, authorization, constraints)
-                    }
+                    (Err(_), Some(target)) => self.decide_tier(
+                        snapshot,
+                        target,
+                        model_field,
+                        authorization,
+                        constraints,
+                        None,
+                    ),
                 }
             }
             // Smart ids never route synchronously: the classifier leg
@@ -1365,9 +1521,14 @@ impl Router {
                 code: "smart_requires_classifier",
                 message: "smart ids need a configured classifier leg".to_string(),
             }),
-            tier => {
-                self.decide_ordered_virtual(snapshot, authorization, constraints, model_field, tier)
-            }
+            tier => self.decide_ordered_virtual(
+                snapshot,
+                authorization,
+                constraints,
+                model_field,
+                tier,
+                virtual_model.minindex,
+            ),
         }
     }
 
@@ -1395,7 +1556,10 @@ impl Router {
         if let Some(provider) = failed_provider {
             constraints.ignore.push(provider.to_string());
         }
-        let decision = self.decide_smart_tier(&snapshot, tier, model_field, &constraints)?;
+        // The floor rides the smart id itself (Iter 33).
+        let minindex = parse_smart(model_field).and_then(|smart| smart.minindex);
+        let decision =
+            self.decide_smart_tier(&snapshot, tier, model_field, &constraints, minindex)?;
         Self::finish_route(model_field, json, decision).ok_or_else(|| RouteRejection {
             code: "no_eligible_offering",
             message: "failed to rewrite the smart request body".to_string(),
@@ -1405,17 +1569,19 @@ impl Router {
     /// Smart tier dispatch (Iter 26): the classified tier through the
     /// normal path. Unlike [`Router::decide_tier`] (fallback targets,
     /// never free), this covers `free` too — the classifier may pick
-    /// it. Sessions stay unpinned either way.
+    /// it. Sessions stay unpinned either way. The optional `minindex`
+    /// floor (Iter 33) applies to the classified tier's candidates.
     fn decide_smart_tier(
         &self,
         snapshot: &Snapshot,
         tier: &str,
         model_field: &str,
         constraints: &ProviderConstraints,
+        minindex: Option<u8>,
     ) -> Result<Decision, RouteRejection> {
         if tier == "free" {
             return self
-                .decide_free(snapshot, &[], None, constraints, model_field)
+                .decide_free(snapshot, &[], None, constraints, model_field, minindex)
                 .and_then(|decision| {
                     decision.ok_or_else(|| RouteRejection {
                         code: "no_eligible_offering",
@@ -1423,7 +1589,7 @@ impl Router {
                     })
                 });
         }
-        self.decide_tier(snapshot, tier, model_field, None, constraints)
+        self.decide_tier(snapshot, tier, model_field, None, constraints, minindex)
     }
 
     /// Pinned-model pick (Iter 28): provider selection scoped to one
@@ -1438,6 +1604,7 @@ impl Router {
         model_field: &str,
         authorization: Option<&str>,
         constraints: &ProviderConstraints,
+        minindex: Option<u8>,
     ) -> Result<Decision, RouteRejection> {
         let offerings = snapshot
             .models
@@ -1450,6 +1617,17 @@ impl Router {
             return Err(RouteRejection {
                 code: "no_eligible_offering",
                 message: format!("no offering is currently eligible for {model_id:?}"),
+            });
+        }
+        // One model, one index: the floor admits or rejects the whole
+        // pinned leg (Iter 33).
+        if !meets_minindex(snapshot, model_id, minindex) {
+            return Err(RouteRejection {
+                code: "no_eligible_offering",
+                message: format!(
+                    "model {model_id:?} does not meet minindex {}",
+                    minindex.unwrap_or_default()
+                ),
             });
         }
         let base: Vec<&Offering> = offerings
@@ -1544,6 +1722,7 @@ impl Router {
                             precision_class: pick.precision_class.clone(),
                             orientation: Orientation::Default,
                             sticky: true,
+                            minindex,
                         });
                     }
                 }
@@ -1591,6 +1770,7 @@ impl Router {
             precision_class: pick.precision_class.clone(),
             orientation: Orientation::Default,
             sticky: false,
+            minindex,
         })
     }
 
@@ -1626,6 +1806,7 @@ impl Router {
         constraints: &ProviderConstraints,
         session_ns: &str,
         tier: VirtualTier,
+        minindex: Option<u8>,
     ) -> Result<Decision, RouteRejection> {
         let tier_name = match tier {
             VirtualTier::Free => "free",
@@ -1646,12 +1827,23 @@ impl Router {
                     // only, never `low`/`think`.
                     && inline_cost(o).is_some_and(|cost| cost > 0.0)
                     && is_known_precision_class(o.precision_class.as_deref().unwrap_or("unknown"))
+                    // Quality floor first (Iter 33): too low an index is
+                    // never rescued by being cheaper.
+                    && meets_minindex(snapshot, &o.model_id, minindex)
             })
             .collect();
         if base.is_empty() {
             return Err(RouteRejection {
                 code: "no_eligible_offering",
-                message: format!("no offering is eligible for the {tier_name} tier"),
+                message: minindex.map_or_else(
+                    || format!("no offering is eligible for the {tier_name} tier"),
+                    |floor| {
+                        format!(
+                            "no {tier_name} tier offering meets minindex {floor} \
+                             (or none is otherwise eligible)"
+                        )
+                    },
+                ),
             });
         }
         // Tool filter is its own stage (Iter 22): an empty result here
@@ -1718,6 +1910,7 @@ impl Router {
                         precision_class: pick.precision_class.clone(),
                         orientation: Orientation::Default,
                         sticky: true,
+                        minindex,
                     });
                 }
             }
@@ -1759,6 +1952,7 @@ impl Router {
             precision_class: pick.precision_class.clone(),
             orientation: Orientation::Default,
             sticky: false,
+            minindex,
         })
     }
 
@@ -1835,6 +2029,7 @@ impl Router {
                         precision_class: pick.precision_class.clone(),
                         orientation: Orientation::Lowest,
                         sticky: true,
+                        minindex: None,
                     });
                 }
             }
@@ -1868,6 +2063,7 @@ impl Router {
             precision_class: pick.precision_class.clone(),
             orientation: Orientation::Lowest,
             sticky: false,
+            minindex: None,
         })
     }
 
@@ -1886,6 +2082,7 @@ impl Router {
         constraints: &ProviderConstraints,
         session_ns: &str,
         free_only: bool,
+        minindex: Option<u8>,
     ) -> Result<Decision, RouteRejection> {
         let scope = if free_only { "free " } else { "" };
         let now = now_unix();
@@ -1903,12 +2100,21 @@ impl Router {
                     && (free_only || inline_cost(o).is_some_and(|cost| cost > 0.0))
                     && (!free_only
                         || free_eligible(ranking.as_ref(), &o.model_id, o, now))
+                    && meets_minindex(snapshot, &o.model_id, minindex)
             })
             .collect();
         if base.is_empty() {
             return Err(RouteRejection {
                 code: "no_eligible_offering",
-                message: format!("no decisions-capable {scope}offering is currently eligible"),
+                message: minindex.map_or_else(
+                    || format!("no decisions-capable {scope}offering is currently eligible"),
+                    |floor| {
+                        format!(
+                            "no decisions-capable {scope}offering meets minindex {floor} \
+                             (or none is otherwise eligible)"
+                        )
+                    },
+                ),
             });
         }
         let base: Vec<&Offering> = base
@@ -1954,6 +2160,7 @@ impl Router {
                         precision_class: pick.precision_class.clone(),
                         orientation: Orientation::Default,
                         sticky: true,
+                        minindex,
                     });
                 }
             }
@@ -1987,6 +2194,7 @@ impl Router {
             precision_class: pick.precision_class.clone(),
             orientation: Orientation::Default,
             sticky: false,
+            minindex,
         })
     }
 
@@ -2025,6 +2233,7 @@ impl Router {
         authorization: Option<&str>,
         constraints: &ProviderConstraints,
         session_ns: &str,
+        minindex: Option<u8>,
     ) -> Result<Option<Decision>, RouteRejection> {
         let now = now_unix();
         let ranking = self.ranking.read().unwrap_or_else(|e| e.into_inner());
@@ -2035,6 +2244,7 @@ impl Router {
                 offerings.iter().filter(|o| {
                     constraints.allows(&o.provider_name)
                         && free_eligible(ranking.as_ref(), model_id, o, now)
+                        && meets_minindex(snapshot, model_id, minindex)
                 })
             })
             .collect();
@@ -2090,7 +2300,7 @@ impl Router {
                     );
                     if let Some(pick) = order.into_iter().next() {
                         if free_eligible(ranking.as_ref(), &pick.model_id, pick, now) {
-                            return Ok(Some(free_decision(pick, orientation, true)));
+                            return Ok(Some(free_decision(pick, orientation, true, minindex)));
                         }
                         // Pin stopped being free: fall through and re-route.
                     }
@@ -2130,7 +2340,7 @@ impl Router {
                 },
             );
         }
-        Ok(Some(free_decision(pick, orientation, false)))
+        Ok(Some(free_decision(pick, orientation, false, minindex)))
     }
 
     /// Route a buffered chat-completions body: returns the rewritten body
@@ -2232,6 +2442,14 @@ impl Router {
         if let Some(extra) = extra {
             constraints.ignore.extend(extra.ignore.iter().cloned());
             constraints.only.extend(extra.only.iter().cloned());
+        }
+        // A virtual id with an unusable `minindex` suffix (Iter 33)
+        // fails closed here: the gateway owns this id space.
+        if let Some(message) = invalid_virtual(&model_field) {
+            return Err(RouteRejection {
+                code: "invalid_model",
+                message,
+            });
         }
         // Virtual ids resolve here, not in `decide_constrained`: a
         // rejection must surface, never decay into untouched passthrough
@@ -2564,6 +2782,24 @@ impl Router {
             };
         }
 
+        // A virtual id with an unusable `minindex` suffix (Iter 33)
+        // previews as an invalid id, matching the request path.
+        if let Some(message) = invalid_virtual(model_field) {
+            return Preview {
+                model_field: model_field.to_string(),
+                session_namespace: model_field.to_string(),
+                session_key_hash: authorization.map(|auth| self.session_key(auth, model_field).0),
+                fresh: None,
+                sticky: None,
+                sticky_hit: false,
+                candidates: Vec::new(),
+                rejection: Some(RouteRejection {
+                    code: "invalid_model",
+                    message,
+                }),
+                note: None,
+            };
+        }
         // Virtual ids resolve before catalog lookup, mirroring
         // `decide_constrained` + `route_inner`.
         if let Some(virtual_model) = parse_virtual(model_field) {
@@ -2577,6 +2813,7 @@ impl Router {
                     &constraints,
                     now,
                     top,
+                    virtual_model.minindex,
                 );
                 match (first.rejection.is_none(), &virtual_model.fallback) {
                     (true, _) => return first,
@@ -2610,6 +2847,7 @@ impl Router {
                         &constraints,
                         now,
                         top,
+                        virtual_model.minindex,
                     );
                     match (free.rejection.is_none(), &virtual_model.fallback) {
                         (true, _) => return free,
@@ -2640,6 +2878,7 @@ impl Router {
                         now,
                         virtual_model.free_only,
                         top,
+                        virtual_model.minindex,
                     );
                     match (first.rejection.is_none(), &virtual_model.fallback) {
                         (true, _) => return first,
@@ -2689,6 +2928,7 @@ impl Router {
                         now,
                         tier,
                         top,
+                        virtual_model.minindex,
                     );
                 }
             }
@@ -2709,6 +2949,7 @@ impl Router {
                 &constraints,
                 now,
                 top,
+                None,
             );
             out.model_field = model_field.to_string();
             return out;
@@ -2788,6 +3029,7 @@ impl Router {
                 now,
                 VirtualTier::Low,
                 top,
+                None,
             ),
             "think" => self.preview_ordered_virtual_list(
                 snapshot,
@@ -2798,6 +3040,7 @@ impl Router {
                 now,
                 VirtualTier::Think,
                 top,
+                None,
             ),
             "lowest" => self.preview_lowest_list(
                 snapshot,
@@ -2817,6 +3060,7 @@ impl Router {
                 now,
                 false,
                 top,
+                None,
             ),
             _ => Preview {
                 model_field: model_field.to_string(),
@@ -3101,6 +3345,7 @@ impl Router {
         constraints: &ProviderConstraints,
         now: u64,
         top: usize,
+        minindex: Option<u8>,
     ) -> Preview {
         let orientation = orientation_from(tags);
         let free: Vec<Offering> = snapshot
@@ -3108,7 +3353,9 @@ impl Router {
             .iter()
             .flat_map(|(model_id, offerings)| {
                 offerings.iter().filter(|o| {
-                    constraints.allows(&o.provider_name) && free_eligible(ranking, model_id, o, now)
+                    constraints.allows(&o.provider_name)
+                        && free_eligible(ranking, model_id, o, now)
+                        && meets_minindex(snapshot, model_id, minindex)
                 })
             })
             .cloned()
@@ -3184,6 +3431,7 @@ impl Router {
         now: u64,
         tier: VirtualTier,
         top: usize,
+        minindex: Option<u8>,
     ) -> Preview {
         let tier_name = match tier {
             VirtualTier::Low => "low",
@@ -3198,6 +3446,7 @@ impl Router {
                 constraints.allows(&o.provider_name)
                     && inline_cost(o).is_some_and(|cost| cost > 0.0)
                     && is_known_precision_class(o.precision_class.as_deref().unwrap_or("unknown"))
+                    && meets_minindex(snapshot, &o.model_id, minindex)
             })
             .collect();
         if base.is_empty() {
@@ -3354,6 +3603,7 @@ impl Router {
         now: u64,
         free_only: bool,
         top: usize,
+        minindex: Option<u8>,
     ) -> Preview {
         let scope = if free_only { "free " } else { "" };
         let base: Vec<&Offering> = snapshot
@@ -3365,6 +3615,7 @@ impl Router {
                     && o.supports_decisions == Some(true)
                     && (free_only || inline_cost(o).is_some_and(|cost| cost > 0.0))
                     && (!free_only || free_eligible(ranking, &o.model_id, o, now))
+                    && meets_minindex(snapshot, &o.model_id, minindex)
             })
             .collect();
         if base.is_empty() {
@@ -3424,6 +3675,7 @@ impl Router {
         constraints: &ProviderConstraints,
         now: u64,
         top: usize,
+        minindex: Option<u8>,
     ) -> Preview {
         let mk_empty = |message: String, code: &'static str| Preview {
             model_field: model_field.to_string(),
@@ -3436,6 +3688,15 @@ impl Router {
             rejection: Some(RouteRejection { code, message }),
             note: None,
         };
+        if !meets_minindex(snapshot, model_id, minindex) {
+            return mk_empty(
+                format!(
+                    "model {model_id:?} does not meet minindex {}",
+                    minindex.unwrap_or_default()
+                ),
+                "no_eligible_offering",
+            );
+        }
         let offerings = match snapshot.models.get(model_id) {
             Some(offerings) if !offerings.is_empty() => offerings,
             _ => {
@@ -3575,6 +3836,7 @@ pub fn route_pinned(model_field: &str, mut json: serde_json::Value) -> Option<(V
             precision_class: None,
             orientation: Orientation::Default,
             sticky: false,
+            minindex: None,
         },
     ))
 }
@@ -3707,7 +3969,12 @@ fn offering_from(ep: &EndpointRow) -> Offering {
 
 /// Free-model decision: the rewritten model is the chosen offering's
 /// backend id, not the meta-model.
-fn free_decision(pick: &Offering, orientation: Orientation, sticky: bool) -> Decision {
+fn free_decision(
+    pick: &Offering,
+    orientation: Orientation,
+    sticky: bool,
+    minindex: Option<u8>,
+) -> Decision {
     Decision {
         model_id: pick.model_id.clone(),
         provider: pick.provider_name.clone(),
@@ -3715,6 +3982,7 @@ fn free_decision(pick: &Offering, orientation: Orientation, sticky: bool) -> Dec
         precision_class: pick.precision_class.clone(),
         orientation,
         sticky,
+        minindex,
     }
 }
 
@@ -4701,7 +4969,8 @@ mod tests {
                 privacy: false,
                 free_only: false,
                 fallback: None,
-                pinned_model: None
+                pinned_model: None,
+                minindex: None,
             })
         );
         assert_eq!(
@@ -4711,7 +4980,8 @@ mod tests {
                 privacy: true,
                 free_only: false,
                 fallback: None,
-                pinned_model: None
+                pinned_model: None,
+                minindex: None,
             })
         );
         assert_eq!(
@@ -4721,7 +4991,8 @@ mod tests {
                 privacy: false,
                 free_only: false,
                 fallback: None,
-                pinned_model: None
+                pinned_model: None,
+                minindex: None,
             })
         );
         assert_eq!(
@@ -4731,7 +5002,8 @@ mod tests {
                 privacy: false,
                 free_only: true,
                 fallback: None,
-                pinned_model: None
+                pinned_model: None,
+                minindex: None,
             })
         );
         assert_eq!(
@@ -4742,6 +5014,7 @@ mod tests {
                 free_only: true,
                 fallback: Some("low".to_string()),
                 pinned_model: None,
+                minindex: None,
             })
         );
         assert_eq!(
@@ -4752,6 +5025,7 @@ mod tests {
                 free_only: true,
                 fallback: Some("think".to_string()),
                 pinned_model: None,
+                minindex: None,
             })
         );
         // Fallback stays exclusive to the free scopes.
@@ -4780,7 +5054,8 @@ mod tests {
                 privacy: false,
                 free_only: false,
                 fallback: None,
-                pinned_model: None
+                pinned_model: None,
+                minindex: None,
             })
         );
         assert_eq!(
@@ -4790,28 +5065,32 @@ mod tests {
                 privacy: true,
                 free_only: false,
                 fallback: None,
-                pinned_model: None
+                pinned_model: None,
+                minindex: None,
             })
         );
         assert_eq!(
             parse_smart("openrouter/pair/smart"),
             Some(SmartId {
                 max: false,
-                privacy: false
+                privacy: false,
+                minindex: None,
             })
         );
         assert_eq!(
             parse_smart("openrouter/pair/smart/max"),
             Some(SmartId {
                 max: true,
-                privacy: false
+                privacy: false,
+                minindex: None,
             })
         );
         assert_eq!(
             parse_smart("openrouter/pair/privacy/smart"),
             Some(SmartId {
                 max: false,
-                privacy: true
+                privacy: true,
+                minindex: None,
             })
         );
         assert_eq!(parse_smart("openrouter/pair/low"), None);
@@ -5287,5 +5566,191 @@ mod tests {
         let map = reaped.throttled.read().unwrap();
         assert_eq!(map.len(), 1);
         assert!(map.contains_key(&("fresh".to_string(), "P".to_string())));
+    }
+
+    /// Iter 33: the `minindex` suffix parses on every virtual form and
+    /// composes with `privacy/`, `model/<id>`, and `/fallback/`.
+    #[test]
+    fn minindex_parses_on_virtual_ids() {
+        let low = parse_virtual("openrouter/pair/low/minindex/50").unwrap();
+        assert_eq!(low.tier, VirtualTier::Low);
+        assert_eq!(low.minindex, Some(50));
+
+        let privacy = parse_virtual("openrouter/pair/privacy/think/minindex/40").unwrap();
+        assert!(privacy.privacy);
+        assert_eq!(privacy.minindex, Some(40));
+
+        let pinned =
+            parse_virtual("openrouter/pair/model/deepseek/deepseek-v4.1-flash/minindex/60")
+                .unwrap();
+        assert_eq!(
+            pinned.pinned_model.as_deref(),
+            Some("deepseek/deepseek-v4.1-flash")
+        );
+        assert_eq!(pinned.minindex, Some(60));
+
+        let both = parse_virtual(
+            "openrouter/pair/model/deepseek/deepseek-v4.1-flash/minindex/60/fallback/low",
+        )
+        .unwrap();
+        assert_eq!(both.minindex, Some(60));
+        assert_eq!(both.fallback.as_deref(), Some("low"));
+
+        let free = parse_virtual("openrouter/pair/free/minindex/0").unwrap();
+        assert_eq!(free.minindex, Some(0));
+
+        let smart = parse_smart("openrouter/pair/smart/minindex/40").unwrap();
+        assert_eq!(smart.minindex, Some(40));
+        assert_eq!(
+            parse_virtual("openrouter/pair/smart/minindex/40")
+                .unwrap()
+                .minindex,
+            Some(40)
+        );
+
+        // Leading zeros are the same floor.
+        assert_eq!(
+            parse_virtual("openrouter/pair/low/minindex/050")
+                .unwrap()
+                .minindex,
+            Some(50)
+        );
+        // No suffix stays `None`.
+        assert_eq!(parse_virtual("openrouter/pair/low").unwrap().minindex, None);
+    }
+
+    /// Iter 33: unusable floors fail closed with `invalid_model` — never
+    /// silent passthrough of a gateway-owned id.
+    #[test]
+    fn minindex_invalid_suffixes_fail_closed() {
+        for id in [
+            "openrouter/pair/low/minindex/",
+            "openrouter/pair/low/minindex/50.5",
+            "openrouter/pair/low/minindex/-1",
+            "openrouter/pair/low/minindex/abc",
+            "openrouter/pair/low/minindex/101",
+            "openrouter/pair/low/minindex/50/minindex/60",
+        ] {
+            assert!(parse_virtual(id).is_none(), "{id} must not parse");
+            assert!(invalid_virtual(id).is_some(), "{id} must be invalid");
+        }
+        // Non-virtual ids and valid floors are not "invalid".
+        assert!(invalid_virtual("meta/muse-spark").is_none());
+        assert!(invalid_virtual("openrouter/pair/low/minindex/50").is_none());
+
+        let r = router();
+        let body = routed_body("openrouter/pair/low/minindex/abc", serde_json::json!({}));
+        let err = r
+            .route_request_or_reject(&axum::http::HeaderMap::new(), &body)
+            .unwrap_err();
+        assert_eq!(err.code, "invalid_model");
+    }
+
+    /// Three models, three index states: below the floor, above it, and
+    /// unknown (null). Prices make the unknown one cheapest so a leak
+    /// would be visible.
+    fn indexed_router() -> Router {
+        let snapshot = Snapshot {
+            models: HashMap::from([
+                (
+                    "m/low".to_string(),
+                    vec![priced("m/low", "Low", 1.0, Some("low"))],
+                ),
+                (
+                    "m/high".to_string(),
+                    vec![priced("m/high", "High", 5.0, Some("low"))],
+                ),
+                (
+                    "m/unknown".to_string(),
+                    vec![priced("m/unknown", "Unknown", 0.5, Some("low"))],
+                ),
+            ]),
+            artifact_version: None,
+            aa_coding_index: HashMap::from([("m/low".to_string(), 30), ("m/high".to_string(), 60)]),
+            popular_models: Vec::new(),
+            popular_apps: Vec::new(),
+            popular_as_of: None,
+        };
+        router_with(snapshot)
+    }
+
+    /// Iter 33: the floor is the first gate — a cheaper model below it
+    /// (or with no index) never wins.
+    #[test]
+    fn minindex_filters_cross_model_tiers() {
+        let r = indexed_router();
+        let route = |model: &str| {
+            let body = routed_body(model, serde_json::json!({}));
+            r.route_request_or_reject(&axum::http::HeaderMap::new(), &body)
+                .unwrap()
+                .unwrap()
+                .1
+        };
+
+        // No floor: cheapest wins, unknown index included.
+        assert_eq!(route("openrouter/pair/low").model_id, "m/unknown");
+        // Floor 50: only m/high (60) survives.
+        let d = route("openrouter/pair/low/minindex/50");
+        assert_eq!(d.model_id, "m/high");
+        assert_eq!(d.minindex, Some(50));
+        // Floor 0: "must have any index" — the null model is excluded.
+        assert_eq!(route("openrouter/pair/low/minindex/0").model_id, "m/low");
+        // Floor above every index: fail closed.
+        let body = routed_body("openrouter/pair/low/minindex/90", serde_json::json!({}));
+        let err = r
+            .route_request_or_reject(&axum::http::HeaderMap::new(), &body)
+            .unwrap_err();
+        assert_eq!(err.code, "no_eligible_offering");
+    }
+
+    /// Iter 33: a pinned model is admitted or rejected whole.
+    #[test]
+    fn minindex_gates_pinned_models() {
+        let r = indexed_router();
+        let route = |model: &str| {
+            let body = routed_body(model, serde_json::json!({}));
+            r.route_request_or_reject(&axum::http::HeaderMap::new(), &body)
+        };
+        assert_eq!(
+            route("openrouter/pair/model/m/high/minindex/50")
+                .unwrap()
+                .unwrap()
+                .1
+                .model_id,
+            "m/high"
+        );
+        let err = route("openrouter/pair/model/m/low/minindex/50").unwrap_err();
+        assert_eq!(err.code, "no_eligible_offering");
+        // Unknown index is excluded too.
+        let err = route("openrouter/pair/model/m/unknown/minindex/0").unwrap_err();
+        assert_eq!(err.code, "no_eligible_offering");
+    }
+
+    /// Iter 33: the floor scopes the primary leg only — the fallback
+    /// tier runs unfiltered.
+    #[test]
+    fn minindex_fallback_leg_ignores_floor() {
+        let r = indexed_router();
+        let body = routed_body(
+            "openrouter/pair/free/minindex/90/fallback/low",
+            serde_json::json!({}),
+        );
+        let (_, decision) = r
+            .route_request_or_reject(&axum::http::HeaderMap::new(), &body)
+            .unwrap()
+            .unwrap();
+        assert_eq!(decision.model_id, "m/unknown");
+        assert_eq!(decision.minindex, None);
+    }
+
+    /// Iter 33: the floor rides the decision so the handler can echo it.
+    #[test]
+    fn minindex_helpers_read_the_suffix() {
+        assert_eq!(minindex_of("openrouter/pair/low/minindex/50"), Some(50));
+        assert_eq!(minindex_of("openrouter/pair/low"), None);
+        assert_eq!(minindex_of("meta/muse-spark"), None);
+        assert_eq!(tier_label("openrouter/pair/low/minindex/50"), "low");
+        assert_eq!(tier_label("openrouter/pair/smart/minindex/50"), "smart");
+        assert_eq!(tier_label("meta/muse-spark"), "none");
     }
 }

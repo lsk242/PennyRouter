@@ -1403,7 +1403,12 @@ async fn routed_decisions(
     let virtual_model = model
         .as_ref()
         .and_then(|model| routing::parse_virtual(model));
-    let is_virtual = virtual_model.is_some();
+    // An unusable `minindex` suffix (Iter 33) is still a gateway-owned
+    // id: it must fail closed, never pass through.
+    let is_virtual = virtual_model.is_some()
+        || model
+            .as_deref()
+            .is_some_and(|model| routing::invalid_virtual(model).is_some());
     // Q06-B: privacy virtual ids fail closed on the decisions route.
     // The decisions API has no verified zero-retention field, so
     // serving would send the payload on a promise the gateway cannot
@@ -1434,12 +1439,22 @@ async fn routed_decisions(
     let (forwarded_body, decision, retry_body) = match &state.router {
         Some(router) => match router.route_decision_request(&headers, &buffered) {
             Ok(Some((rewritten, decision))) => {
+                note_minindex(&state, model.as_deref().unwrap_or_default(), "ok");
                 let retry_body = is_virtual.then_some(buffered);
                 (rewritten, Some(decision), retry_body)
             }
             Ok(None) => (buffered, None, None),
             Err(rejection) => {
                 if is_virtual {
+                    note_minindex(
+                        &state,
+                        model.as_deref().unwrap_or_default(),
+                        if rejection.code == "invalid_model" {
+                            "invalid"
+                        } else {
+                            "no_eligible"
+                        },
+                    );
                     return rejection_response(&rejection);
                 }
                 (buffered, None, None)
@@ -1507,11 +1522,7 @@ async fn routed_decisions(
                     rewritten,
                 )
                 .await;
-                if let Ok(provider) = retry_decision.provider.parse() {
-                    response
-                        .headers_mut()
-                        .insert(routing::PROVIDER_HEADER, provider);
-                }
+                response = with_routed_headers(response, &retry_decision);
                 if response.status() == StatusCode::TOO_MANY_REQUESTS {
                     note_throttled_pair(
                         router,
@@ -1565,11 +1576,7 @@ async fn routed_decisions(
                         );
                         state.metrics.throttled();
                     }
-                    if let Ok(provider) = fb_decision.provider.parse() {
-                        response
-                            .headers_mut()
-                            .insert(routing::PROVIDER_HEADER, provider);
-                    }
+                    response = with_routed_headers(response, &fb_decision);
                     return response;
                 }
                 Ok(None) => {}
@@ -1583,11 +1590,7 @@ async fn routed_decisions(
         }
     }
     if let Some(decision) = decision {
-        if let Ok(value) = decision.provider.parse() {
-            response
-                .headers_mut()
-                .insert(routing::PROVIDER_HEADER, value);
-        }
+        response = with_routed_headers(response, &decision);
     }
     response
 }
@@ -1632,7 +1635,12 @@ async fn routed_completion(
     let virtual_model = model
         .as_ref()
         .and_then(|model| routing::parse_virtual(model));
-    let is_virtual = virtual_model.is_some();
+    // An unusable `minindex` suffix (Iter 33) is still a gateway-owned
+    // id: it must fail closed, never pass through.
+    let is_virtual = virtual_model.is_some()
+        || model
+            .as_deref()
+            .is_some_and(|model| routing::invalid_virtual(model).is_some());
     // Free-fallback chains (Iter 21) resolve here: (original model id,
     // fallback tier) for the post-retry leg below.
     let fallback_request: Option<(String, String)> = match (&model, &virtual_model) {
@@ -1694,12 +1702,22 @@ async fn routed_completion(
     let (forwarded_body, decision, retry_body) = match &state.router {
         Some(router) => match router.route_request_or_reject(&headers, &buffered) {
             Ok(Some((rewritten, decision))) => {
+                note_minindex(&state, model.as_deref().unwrap_or_default(), "ok");
                 let retry_body = is_virtual.then_some(buffered);
                 (rewritten, Some(decision), retry_body)
             }
             Ok(None) => (buffered, None, None),
             Err(rejection) => {
                 if is_virtual {
+                    note_minindex(
+                        &state,
+                        model.as_deref().unwrap_or_default(),
+                        if rejection.code == "invalid_model" {
+                            "invalid"
+                        } else {
+                            "no_eligible"
+                        },
+                    );
                     return rejection_response(&rejection);
                 }
                 (buffered, None, None)
@@ -1779,11 +1797,7 @@ async fn routed_completion(
                     rewritten,
                 )
                 .await;
-                if let Ok(provider) = retry_decision.provider.parse() {
-                    response
-                        .headers_mut()
-                        .insert(routing::PROVIDER_HEADER, provider);
-                }
+                response = with_routed_headers(response, &retry_decision);
                 if response.status() == StatusCode::TOO_MANY_REQUESTS {
                     note_throttled_pair(
                         router,
@@ -1843,11 +1857,7 @@ async fn routed_completion(
                     );
                     state.metrics.throttled();
                 }
-                if let Ok(provider) = fb_decision.provider.parse() {
-                    response
-                        .headers_mut()
-                        .insert(routing::PROVIDER_HEADER, provider);
-                }
+                response = with_routed_headers(response, &fb_decision);
                 return response;
             }
             // No fallback route after a retry: the retry response (and
@@ -1859,11 +1869,7 @@ async fn routed_completion(
         }
     }
     if let Some(decision) = decision {
-        if let Ok(value) = decision.provider.parse() {
-            response
-                .headers_mut()
-                .insert(routing::PROVIDER_HEADER, value);
-        }
+        response = with_routed_headers(response, &decision);
     }
     response
 }
@@ -2134,9 +2140,11 @@ async fn smart_completion(
                 match router.route_smart(&buffered, model_field, &tier, None) {
                     Ok(route) => route,
                     Err(rejection) => {
-                        return with_smart_headers(rejection_response(&rejection), &ctx)
+                        note_minindex(state, model_field, "no_eligible");
+                        return with_smart_headers(rejection_response(&rejection), &ctx);
                     }
                 };
+            note_minindex(state, model_field, "ok");
             let base = state.upstream_base_url.clone();
             let mut response = forward_upstream(
                 state,
@@ -2174,12 +2182,12 @@ async fn smart_completion(
                     .await;
                     record_throttle(state, router, &retry_decision, &response);
                     return with_smart_headers(
-                        with_provider_header(response, &retry_decision.provider),
+                        with_routed_headers(response, &retry_decision),
                         &ctx,
                     );
                 }
             }
-            with_smart_headers(with_provider_header(response, &decision.provider), &ctx)
+            with_smart_headers(with_routed_headers(response, &decision), &ctx)
         }
         ClassifierOutcome::Failed {
             result,
@@ -2241,7 +2249,7 @@ async fn smart_completion(
                     )
                     .await;
                     record_throttle(state, router, &decision, &response);
-                    with_smart_headers(with_provider_header(response, &decision.provider), &ctx)
+                    with_smart_headers(with_routed_headers(response, &decision), &ctx)
                 }
                 Err(rejection) => with_smart_headers(rejection_response(&rejection), &ctx),
             }
@@ -2293,12 +2301,30 @@ fn record_throttle(
     state.metrics.throttled();
 }
 
-/// Attach the serving provider, like the normal routed path.
-fn with_provider_header(mut response: Response, provider: &str) -> Response {
-    if let Ok(value) = provider.parse() {
+/// Count a floored request (Iter 33): bounded labels only.
+fn note_minindex(state: &AppState, model_field: &str, result: &'static str) {
+    if let Some(floor) = routing::minindex_of(model_field) {
+        state
+            .metrics
+            .minindex_request(floor, routing::tier_label(model_field), result);
+    }
+}
+
+/// Attach the routed diagnostic headers: the serving provider, plus
+/// the AA coding-index floor when the request carried one (Iter 33).
+fn with_routed_headers(mut response: Response, decision: &routing::Decision) -> Response {
+    if let Ok(value) = decision.provider.parse() {
         response
             .headers_mut()
             .insert(routing::PROVIDER_HEADER, value);
+    }
+    if let Some(floor) = decision.minindex {
+        if let Ok(value) = floor.to_string().parse() {
+            response.headers_mut().insert(
+                axum::http::HeaderName::from_static(routing::MININDEX_HEADER),
+                value,
+            );
+        }
     }
     response
 }
@@ -2808,11 +2834,7 @@ async fn forward_pinned(
     )
     .await;
     if let Some(decision) = decision {
-        if let Ok(value) = decision.provider.parse() {
-            response
-                .headers_mut()
-                .insert(routing::PROVIDER_HEADER, value);
-        }
+        response = with_routed_headers(response, &decision);
     }
     response
 }
