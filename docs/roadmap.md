@@ -693,7 +693,30 @@ Development delivers Docker images, platform delivers deployments.
   clean locally (39 suites); clippy/fmt via CI (sandbox lacks
   the toolchain).
 
-## After Iter 32
+## Iter 34 — Catalog value score + catalog UI (proposed)
+
+- Goal: turn the catalog's stored facts into one deterministic
+  verdict — maximum intelligence for the lowest price — and make the
+  catalog UI answer "what is missing?" and "why is this ranked
+  here?".
+- Value: routing tiers stop being the only quality story; operators
+  see coverage gaps (264/473 models have no AA index) and the exact
+  arithmetic behind every ordering, with no AI or external ranking
+  service in the loop.
+- Shape: `rank_score = quality × efficiency × popularity` (0..100),
+  quality = AA index × precision factor, efficiency =
+  `COST_REF/(cost_per_task+COST_REF)` anchored at the live median
+  ($0.01/task), popularity a ≤10% factor; speed then availability
+  break ties. Schema v7→v8 stores the components; the ranking
+  document gains an optional `score` ordering the gateway ignores
+  until a later iteration. UI: overview (counts, warnings, formula,
+  worked example) + models tabs (`free`/`tiers`/`decision`) with a
+  per-row breakdown.
+- Status: proposal only — `docs/proposals/2026-11-12-catalog-ui-value-score.md`.
+  Open questions: basis choice (intelligence covers 92/473, coding
+  170), `COST_REF` anchor, free-tab ordering.
+
+## After Iter 34
 
 Deferred ideas in [future.md](future.md): exact price prediction,
 parallel fan-out, further score backends. Each becomes roadmap items

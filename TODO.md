@@ -230,3 +230,21 @@ cheap judge model, classifier-based routing.
       cutoff/clamp/identity units + processing tiers/meta +
       precedence + v6→v7 migrate + CLI offline line; full
       workspace green (39 suites).
+- [ ] **Iter 34 — Catalog value score + catalog UI (proposed).**
+      Sync computes a deterministic `rank_score` per offering —
+      `quality × efficiency × popularity`, where quality is the AA
+      index (intelligence → coding → agentic, recorded in
+      `rank_basis`) times a precision factor (fp8 0.97, int8 0.95,
+      int4/fp4 0.88, unknown 0.95), efficiency is
+      `COST_REF/(cost_per_task+COST_REF)` with `COST_REF` = $0.01
+      (the live median), and popularity is a ≤10% factor from the
+      rankings window; speed then availability are tie-breakers.
+      No AI, no external ranking. Schema v7→v8 adds latency/
+      throughput/uptime, popularity, and the `rank_*` components;
+      the ranking document gains an optional `score` ordering the
+      gateway ignores for now. Catalog UI becomes an overview
+      (coverage counts, data-quality warnings, the formula and
+      constants, a worked example) plus a models page with
+      `free`/`tiers`/`decision` tabs sorted by score, each row
+      expanding to its full arithmetic. Proposal:
+      `docs/proposals/2026-11-12-catalog-ui-value-score.md`.
