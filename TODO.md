@@ -233,11 +233,12 @@ cheap judge model, classifier-based routing.
 - [ ] **Iter 34 — Catalog value score + catalog UI (proposed).**
       Sync computes a deterministic `rank_score` per offering —
       `quality × efficiency × popularity`, where quality is the AA
-      index (intelligence → coding → agentic, recorded in
+      index (coding → intelligence → agentic, recorded in
       `rank_basis`) times a precision factor (fp8 0.97, int8 0.95,
       int4/fp4 0.88, unknown 0.95), efficiency is
-      `COST_REF/(cost_per_task+COST_REF)` with `COST_REF` = $0.01
-      (the live median), and popularity is a ≤10% factor from the
+      `COST_HALF_CREDIT/(cost_per_task+COST_HALF_CREDIT)` with
+      `COST_HALF_CREDIT` = $0.01 (the live median), and popularity
+      is a ≤10% factor from the
       rankings window; speed then availability are tie-breakers.
       No AI, no external ranking. Schema v7→v8 adds latency/
       throughput/uptime, popularity, and the `rank_*` components;

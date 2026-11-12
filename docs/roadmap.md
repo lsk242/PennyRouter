@@ -704,17 +704,18 @@ Development delivers Docker images, platform delivers deployments.
   arithmetic behind every ordering, with no AI or external ranking
   service in the loop.
 - Shape: `rank_score = quality × efficiency × popularity` (0..100),
-  quality = AA index × precision factor, efficiency =
-  `COST_REF/(cost_per_task+COST_REF)` anchored at the live median
-  ($0.01/task), popularity a ≤10% factor; speed then availability
-  break ties. Schema v7→v8 stores the components; the ranking
+  quality = AA index (coding first) × precision factor, efficiency =
+  `COST_HALF_CREDIT/(cost_per_task+COST_HALF_CREDIT)` anchored at
+  the live median ($0.01/task), popularity a ≤10% factor; speed
+  then availability break ties. Schema v7→v8 stores the components; the ranking
   document gains an optional `score` ordering the gateway ignores
   until a later iteration. UI: overview (counts, warnings, formula,
   worked example) + models tabs (`free`/`tiers`/`decision`) with a
   per-row breakdown.
 - Status: proposal only — `docs/proposals/2026-11-12-catalog-ui-value-score.md`.
-  Open questions: basis choice (intelligence covers 92/473, coding
-  170), `COST_REF` anchor, free-tab ordering.
+  Decided 2026-11-12: coding-first basis (170/473 models vs 92 for
+  intelligence), `COST_HALF_CREDIT` = $0.01/task, free tab ranked on
+  quality × popularity.
 
 ## After Iter 34
 

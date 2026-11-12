@@ -1,8 +1,8 @@
 # Proposal: catalog value score + catalog UI overview
 
 > Date: 2026-11-12 · Author: freeclaw · Status: Proposed (Iter 34)
-> Depends on: `main` @ `b550757` — schema v7, Iter 31 AA indexes, Iter 32
-> offline tiers, Iter 33 `minindex`.
+> Depends on: schema v7, Iter 31 AA indexes, Iter 32 offline tiers, Iter 33
+> `minindex` (PR #40).
 > Companion: `docs/ranking-index.md` (the ordering contract this extends),
 > `docs/catalog-sync-architecture.md` (pipeline), `docs/proposals/2026-11-03-artificial-analysis-index.md`
 > (the AA signal this consumes).
@@ -29,9 +29,10 @@ Live snapshot used for the numbers below (`GET /v1/models`, 2026-11-12):
 
 Today the catalog has the ingredients but no verdict:
 
-- `quality_tier` / `quality_score` come from the offline scorer, which is just
-  `coding_index / 100` bucketed at 70/40 — a *coding* signal applied to every
-  model, including ones AA only scores for intelligence or agentic work.
+- `quality_tier` / `quality_score` come from the offline scorer: `coding_index /
+  100` bucketed at 70/40. Coding is the right primary signal for this product,
+  but three buckets throw away the index's resolution, and the score never meets
+  price, precision, or popularity.
 - Price lives per endpoint and is never combined with quality. The ranker
   (`rank.rs`) orders by tier, then error rate, then price — a lexicographic
   sort, not a value judgement. A $90/M model and a $0.09/M model with the same
@@ -83,7 +84,7 @@ Per offering (model × provider × precision class), all terms in the DB:
 ```
 quality      = aa_index × precision_factor            # 0..100
 cost_per_task = effective_cost × TASK_TOKENS          # $, balanced profile
-efficiency   = COST_REF / (cost_per_task + COST_REF)  # 0..1, 1 when free
+efficiency   = COST_HALF_CREDIT / (cost_per_task + COST_HALF_CREDIT)  # 0..1
 popularity   = (1 + POP_WEIGHT × share) / (1 + POP_WEIGHT)   # 0.909..1.0
 rank_score   = quality × efficiency × popularity      # 0..100
 ```
@@ -94,14 +95,32 @@ rebuild):
 | Constant | Value | Rationale |
 |---|---|---|
 | `TASK_TOKENS` | 10 000 | the balanced profile's mix at a typical task size (5k in / 4k out / 0.5k cache read / 0.5k cache write) |
-| `COST_REF` | $0.01 | the live median model costs $1.00/M ≈ $0.01/task, so the median model scores 0.5 on efficiency — the curve is centred on the real catalog, not a guess |
+| `COST_HALF_CREDIT` | $0.01 | the cost/task at which price efficiency is exactly 0.5; the live median model costs $1.00/M ≈ $0.01/task, so the curve is centred on the real catalog |
 | `POP_WEIGHT` | 0.10 | popularity can move a score by at most 10%; it never rescues a bad model |
 | `RULESET_VERSION` | `rank-v1` | carried in `rank_ruleset` so a formula change is visible in the artifact |
 
-Why a saturating ratio instead of `quality / cost`: raw ratios are unbounded
+#### What `COST_HALF_CREDIT` is — and is not
+
+It is **not a model**, and **not a fallback for a missing price**. It is one
+number in the price-efficiency curve: the cost per task at which a model earns
+half credit on price. The curve is `ref / (cost + ref)`, so:
+
+| cost/task | efficiency | meaning |
+|---|---|---|
+| $0 (free) | 1.000 | full credit |
+| $0.001 | 0.909 | 10× cheaper than the anchor |
+| $0.01 | 0.500 | the anchor — half credit |
+| $0.05 | 0.167 | |
+| $0.10 | 0.091 | |
+| $1.00 | 0.010 | 100× the anchor |
+
+A **missing price is a different case**: `rank_score = NULL` (§2.5). The model
+is listed last with a "no price" badge, never scored as if it cost the anchor.
+
+Why a saturating curve instead of `quality / cost`: raw ratios are unbounded
 (a $0.0001/task model scores 10 000× a $1/task one) and unstable across
-rebuilds. `COST_REF/(cost+COST_REF)` is monotone, bounded, and has one
-interpretable anchor: **half credit at the median price**.
+rebuilds. `ref/(cost+ref)` is monotone, bounded, and has one interpretable
+anchor: **half credit at the median price**.
 
 Why popularity is normalized by `1 + POP_WEIGHT`: the score stays on a 0..100
 scale (100 = top quality, free, most popular) instead of drifting to 110.
@@ -124,16 +143,23 @@ declared, not fitted.
 
 ### 2.4 Which AA index
 
-`intelligence_index` is the general capability signal, but only 92 of 473 models
-carry it. Fallback chain, recorded in `rank_basis`:
+**Coding first** (decided 2026-11-12): PennyRouter's workload is coding, the
+offline tier scorer and the Iter 33 `minindex` filter already speak
+`coding_index`, and it has the best coverage. Fallback chain, recorded in
+`rank_basis`:
 
 ```
-intelligence_index  →  coding_index  →  agentic_index  →  none
+coding_index  →  intelligence_index  →  agentic_index  →  none
 ```
+
+Live distribution of that chain over 473 models: **coding 170, intelligence 39,
+agentic 0, none 264**. Agentic never becomes the basis today — every
+agentic-scored model also carries coding or intelligence — but it stays in the
+chain as a defensive fallback for a future model that only has it.
 
 `none` means **no score** (`rank_score = NULL`), never a zero: an unmeasured
 model must not sort below a measured bad one. The UI shows the basis per row
-(`intel` / `coding` / `agentic` / `—`).
+(`coding` / `intel` / `agentic` / `—`).
 
 The score reads the AA columns directly, **not** `quality_score`: an online
 scorer verdict must never move a deterministic score.
@@ -143,8 +169,8 @@ scorer verdict must never move a deterministic score.
 - **Free** (`effective_cost == 0`): same formula, `efficiency = 1`. Free models
   therefore top a combined list, which is exactly why the UI separates them into
   their own tab.
-- **Decision models** (`supports_decisions = 1`): different basis — no
-  intelligence/coding index applies to behaviour models, so quality comes from
+- **Decision models** (`supports_decisions = 1`): different basis — the text
+  chain does not apply to behaviour models, so quality comes from
   `agentic_index` (fallback `intelligence_index`), precision factor is 1.0
   (quantization is not the variable there), and the price term is unchanged.
   `rank_basis` records `agentic`. They get their own UI tab and are excluded
@@ -238,9 +264,9 @@ throughput, latency, uptime.
 Each row expands (`<details>`) to the full arithmetic:
 
 ```
-quality      = 60 (intel) × 0.97 (fp8)          = 58.20
+quality      = 60 (coding) × 0.97 (fp8)         = 58.20
 cost/task    = $1.2825/M × 10 000 tokens        = $0.012825
-efficiency   = 0.01 / (0.012825 + 0.01)         = 0.438
+efficiency   = 0.01 / (0.012825 + 0.01)         = 0.438   (COST_HALF_CREDIT)
 popularity   = (1 + 0.10 × 0.42) / 1.10         = 0.947
 rank_score   = 58.20 × 0.438 × 0.947            = 24.1
 tie-breaks   = 82 tok/s · 640 ms · 100% uptime
@@ -274,9 +300,9 @@ per-model detail) · `/ranking` · `/meta` · `/log`. Nav becomes
 Unit (`rank_score.rs`):
 
 - precision factors per class; unknown is uniform.
-- efficiency: free → 1.0, `COST_REF` → 0.5, 100× `COST_REF` → ~0.0099.
+- efficiency: free → 1.0, `COST_HALF_CREDIT` → 0.5, 100× → ~0.0099.
 - popularity: absent → 1.0 factor; top model → 1.0; mid → between.
-- basis chain: intelligence wins, coding next, agentic last, none → `NULL`.
+- basis chain: coding wins, intelligence next, agentic last, none → `NULL`.
 - missing price → `NULL`; missing index → `NULL`; never zero.
 - tie-break chain: equal scores order by throughput, latency, uptime, then
   provider/tag; unknowns sort last.
@@ -319,17 +345,18 @@ Order inside the iteration: schema + extraction → score module + processing �
 ranking document field → UI overview → UI models tabs → docs
 (`ranking-index.md`, `catalog-sync-architecture.md`, `operations.md`).
 
-## 7. Open questions
+## 7. Decisions (2026-11-12)
 
-1. **Basis choice.** Intelligence-first is the general-capability reading, but
-   it covers only 92/473 models; coding-first would cover 170. Proposal keeps
-   intelligence-first with a recorded basis. Confirm before implementation.
-2. **`COST_REF`.** $0.01/task is the live median. A lower value rewards cheap
-   models harder; a higher one flattens the price term. Confirm the anchor.
-3. **Free tab ordering.** Free models all have `efficiency = 1`, so the tab
-   ranks purely on quality × popularity. That is intended, but it means a free
-   model with a low index can outrank a paid one — confirm that is the wanted
-   story.
+1. **Basis: coding first.** `coding_index → intelligence_index → agentic_index
+   → none`. Coding is the product's workload, matches the offline tier scorer
+   and `minindex`, and covers 170/473 models versus 92 for intelligence.
+2. **`COST_HALF_CREDIT` = $0.01/task.** Renamed from `COST_REF` because the
+   name was opaque: it is the cost/task at which price efficiency is exactly
+   0.5, not a model and not a missing-price fallback (§2.2). A missing price
+   yields `rank_score = NULL`.
+3. **Free tab ordering: as proposed.** Free models all have `efficiency = 1`,
+   so the tab ranks on quality × popularity; a free model with a low index can
+   outrank a paid one, which is the intended "free first" story.
 
 ## References
 
