@@ -1,6 +1,15 @@
 # Proposal: `minindex` suffix filter — minimum AA coding index on the model path
 
-> Date: 2026-11-03 · Author: freeclaw · Status: Proposed (not yet implemented)
+> Date: 2026-11-03 · Author: freeclaw · Status: Implemented (Iter 33).
+> As-built deviations from the draft: the floor rides `Decision` and is
+> echoed as `x-pennyrouter-minindex`; metrics are
+> `pennyrouter_minindex_requests_total{minindex,tier,result}` (no
+> `pennyrouter_minindex_floor` gauge); the `/ui` coding-index column
+> landed in Iter 31 as a model-header annotation, not a table column;
+> the draft's `low/minindex/80/fallback/low` example is not valid
+> grammar (fallback stays restricted to `free`/`decision/free` and
+> `model/<id>`), so the fallback-leg test uses
+> `free/minindex/90/fallback/low`.
 > Depends on: `upstream/main` @ `a79e5a8` — schema v5, Iter 28 pinned-model routes; and `docs/proposals/2026-11-03-artificial-analysis-index.md` (AA index ingestion — this doc is the gateway consumer).
 > Companion: `docs/proposals/2026-11-01-openrouter-interface.md` (native paths), `docs/proposals/2026-11-02-smart-classifier.md` (smart classifier).
 

@@ -693,7 +693,31 @@ Development delivers Docker images, platform delivers deployments.
   clean locally (39 suites); clippy/fmt via CI (sandbox lacks
   the toolchain).
 
-## After Iter 32
+## Iter 33 — `minindex` suffix filter (done)
+
+- Goal: let callers ask for a minimum Artificial Analysis coding
+  index on the model path — `openrouter/pair/low/minindex/50` — so
+  "cheapest model above quality X" is one string edit.
+- Value: the AA index ingested in Iter 31 becomes a routing filter
+  without a new header, query param, or API surface; it composes
+  with `privacy/`, `model/<id>`, `smart`, and `/fallback/`.
+- Shipped: `VirtualModel`/`SmartId`/`Decision` carry
+  `minindex: Option<u8>`; `parse_virtual` splits the suffix before
+  `/fallback/` and rejects unusable values (`invalid_model` 400,
+  never passthrough); the floor is the first eligibility gate in
+  `decide_free`, `decide_ordered_virtual`, `decide_decision`,
+  `decide_pinned`, and the preview lists (null/absent indexes are
+  excluded; `minindex/0` means "must have any index"); fallback
+  legs run unfiltered; routed responses echo
+  `x-pennyrouter-minindex`; `pennyrouter_minindex_requests_total`
+  counts by floor/tier/result.
+- Test: parse matrix (valid/invalid/duplicate/leading zeros),
+  cross-model filter, pinned gate, fallback-leg exemption, helper
+  units, plus `tests/minindex.rs` (route + header, 400, 503 with
+  `Retry-After: 1`, metrics). `cargo test --workspace` clean
+  (40 suites); clippy/fmt clean.
+
+## After Iter 33
 
 Deferred ideas in [future.md](future.md): exact price prediction,
 parallel fan-out, further score backends. Each becomes roadmap items

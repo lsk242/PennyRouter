@@ -230,3 +230,18 @@ cheap judge model, classifier-based routing.
       cutoff/clamp/identity units + processing tiers/meta +
       precedence + v6→v7 migrate + CLI offline line; full
       workspace green (39 suites).
+- [x] **Iter 33 — `minindex` suffix filter.** Optional
+      `/minindex/<0..=100>` on every virtual id (`free`, `low`,
+      `think`, `decision`, `model/<id>`, `smart`), placed after the
+      core id and before `/fallback/`. Keeps only models whose
+      catalog `aa_coding_index` meets the floor; the floor is the
+      first eligibility gate (a cheaper model below it, or with no
+      index, never wins; `minindex/0` = "must have any index") and
+      scopes the primary leg only — fallback tiers run unfiltered.
+      Unusable values fail closed with `invalid_model` (400),
+      unsatisfiable floors with `no_eligible_offering` (503);
+      routed responses echo `x-pennyrouter-minindex` and
+      `pennyrouter_minindex_requests_total{minindex,tier,result}`
+      counts them. Test: parse matrix + filter/pinned/fallback
+      units + `tests/minindex.rs` (route/header, 400, 503,
+      metrics); `cargo test --workspace`, clippy, fmt clean.

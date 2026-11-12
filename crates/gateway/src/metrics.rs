@@ -244,6 +244,9 @@ pub struct Metrics {
     classifier_sum_micros: AtomicU64,
     classifier_count: AtomicU64,
     smart_fallback: [AtomicU64; 2],
+    /// Floored requests (Iter 33): (floor, tier, result) → count.
+    /// Bounded: 101 floors × 6 tiers × 3 results.
+    minindex: Mutex<HashMap<(u8, &'static str, &'static str), u64>>,
     classifier_last_error: Mutex<String>,
 }
 
@@ -272,6 +275,7 @@ impl Metrics {
             classifier_sum_micros: AtomicU64::new(0),
             classifier_count: AtomicU64::new(0),
             smart_fallback: [const { AtomicU64::new(0) }; 2],
+            minindex: Mutex::new(HashMap::new()),
             classifier_last_error: Mutex::new(String::new()),
         }
     }
@@ -333,6 +337,14 @@ impl Metrics {
     /// slot is a single bit.
     pub fn smart_fallback(&self, lowest: bool) {
         self.smart_fallback[usize::from(lowest)].fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Count one floored request (Iter 33). Labels are bounded: the
+    /// floor is 0..=100, the tier and result are fixed strings.
+    pub fn minindex_request(&self, floor: u8, tier: &'static str, result: &'static str) {
+        if let Ok(mut counts) = self.minindex.lock() {
+            *counts.entry((floor, tier, result)).or_insert(0) += 1;
+        }
     }
 
     /// Remember the latest classifier failure for `GET /ui` (bounded:
@@ -562,6 +574,20 @@ impl Metrics {
             "pennyrouter_smart_fallback_total{{tier=\"lowest\"}} {}\n",
             self.smart_fallback[1].load(Ordering::Relaxed)
         ));
+        out.push_str(
+            "# HELP pennyrouter_minindex_requests_total Floored requests by floor, tier, result.\n",
+        );
+        out.push_str("# TYPE pennyrouter_minindex_requests_total counter\n");
+        if let Ok(counts) = self.minindex.lock() {
+            let mut pairs: Vec<((u8, &'static str, &'static str), u64)> =
+                counts.iter().map(|(key, n)| (*key, *n)).collect();
+            pairs.sort_unstable();
+            for ((floor, tier, result), n) in pairs {
+                out.push_str(&format!(
+                    "pennyrouter_minindex_requests_total{{minindex=\"{floor}\",tier=\"{tier}\",result=\"{result}\"}} {n}\n"
+                ));
+            }
+        }
         out.push_str("# HELP pennyrouter_log_dropped_total Log lines dropped on a full buffer.\n");
         out.push_str("# TYPE pennyrouter_log_dropped_total counter\n");
         out.push_str(&format!(
