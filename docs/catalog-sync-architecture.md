@@ -26,6 +26,16 @@ Gathering and processing are separate phases (see
 first; indexed facts are distilled afterwards. The gateway never waits
 on either — it keeps serving the last good copy.
 
+## Value score (Iter 34)
+
+Processing ends with a deterministic scoring pass: `rank_score =
+quality × efficiency × popularity` per offering, stored in the
+`rank_*` columns (see [ranking-index.md](ranking-index.md)). It reads
+the AA indexes, the effective price, the precision class, the
+speed/availability metrics, and the popularity window — all extracted
+in the same run. Popularity is fetched **before** processing so the
+score can read the full window, not just the top-10 menu pins.
+
 ## Schema: fixed index over fluid payload
 
 Sources change constantly, so the schema is two-tier:

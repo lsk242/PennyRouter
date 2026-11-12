@@ -99,6 +99,7 @@ fn snapshot_carries_aa_coding_index() {
                 aa_intelligence_index: Some(51),
                 aa_coding_index: Some(71),
                 aa_agentic_index: None,
+                aa_cost_per_task: None,
             },
         )
         .unwrap();

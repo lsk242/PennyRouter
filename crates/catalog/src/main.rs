@@ -176,13 +176,6 @@ fn run() -> Result<(), String> {
         let _ = fs::remove_file(&work_db);
         return Err(gate);
     }
-    let scored = if args.process {
-        run_processing(&catalog, &fetched_at)
-            .map_err(|e| e.to_string())?
-            .scored
-    } else {
-        0
-    };
     // Popularity pins for the gateway menu: top OpenRouter models +
     // hot apps from the public Data API (keyless syncs skip this —
     // the menu still serves virtual ids + operator env lists). A
@@ -207,6 +200,14 @@ fn run() -> Result<(), String> {
             Err(e) => println!("popularity fetch failed ({e}): publishing without pins"),
         },
     }
+    // Popularity lands before processing (Iter 34): the value score
+    // reads the window as a per-model factor.
+    let (scored, ranked) = if args.process {
+        let summary = run_processing(&catalog, &fetched_at).map_err(|e| e.to_string())?;
+        (summary.scored, summary.ranked)
+    } else {
+        (0, 0)
+    };
     drop(catalog);
     let (_db, manifest_path, manifest) = publish(
         &work_db,
@@ -219,7 +220,7 @@ fn run() -> Result<(), String> {
     let _ = fs::remove_file(&work_db);
 
     let stage = if args.process {
-        format!(" (processed, {scored} scored offline)")
+        format!(" (processed, {scored} scored offline, {ranked} ranked)")
     } else {
         String::new()
     };

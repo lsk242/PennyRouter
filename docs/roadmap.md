@@ -723,7 +723,7 @@ Deferred ideas in [future.md](future.md): exact price prediction,
 parallel fan-out, further score backends. Each becomes roadmap items
 only when pulled forward deliberately.
 
-## Iter 34 — Catalog value score + catalog UI (proposed)
+## Iter 34 — Catalog value score + catalog UI (done)
 
 - Goal: turn the catalog's stored facts into one deterministic
   verdict — maximum intelligence for the lowest price — and make the
@@ -742,9 +742,13 @@ only when pulled forward deliberately.
   until a later iteration. UI: overview (counts, warnings, formula,
   worked example) + models tabs (`free`/`tiers`/`decision`) with a
   per-row breakdown.
-- Status: proposal only — `docs/proposals/2026-11-12-catalog-ui-value-score.md`.
-  Decided 2026-11-12: coding-first basis (170/473 models vs 92 for
-  intelligence), `COST_HALF_CREDIT` = $0.01/task, free tab ranked on
-  quality × popularity.
+- Status: implemented. Decided 2026-11-12: coding-first basis
+  (170/473 models vs 92 for intelligence), `COST_HALF_CREDIT` =
+  $0.01/task, free tab ranked on quality × popularity. As built:
+  popularity is fetched before processing (the score reads the full
+  window, not just the top-10 menu pins); `aa_cost_per_task` is
+  stored but unused until AA ships it; the ranking document's
+  `score` ordering is omitted when the catalog was never processed.
+  Proposal: `docs/proposals/2026-11-12-catalog-ui-value-score.md`.
 
 ## After Iter 34

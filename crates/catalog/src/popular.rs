@@ -29,8 +29,12 @@ pub const POPULAR_MODELS_TOP_N: usize = 10;
 pub const POPULAR_APPS_TOP_N: usize = 10;
 
 /// Aggregated popularity: models by summed tokens, apps by volume.
+/// `models` is the menu's top-N pin list; `all_models` is the whole
+/// window, which the value score needs as a per-model factor
+/// (Iter 34).
 pub struct Popularity {
     pub models: Vec<(String, u64)>,
+    pub all_models: Vec<(String, u64)>,
     pub apps: Vec<(String, u64, u64)>,
     pub as_of: Option<String>,
 }
@@ -59,8 +63,14 @@ pub fn fetch_popularity(base_url: &str, api_key: &str) -> Result<Popularity, Err
         .and_then(|meta| meta.get("as_of"))
         .and_then(Value::as_str)
         .map(str::to_string);
+    let all_models = aggregate_models_all(&rankings);
     Ok(Popularity {
-        models: aggregate_models(&rankings, POPULAR_MODELS_TOP_N),
+        models: all_models
+            .iter()
+            .take(POPULAR_MODELS_TOP_N)
+            .cloned()
+            .collect(),
+        all_models,
         apps: aggregate_apps(&apps, POPULAR_APPS_TOP_N),
         as_of,
     })
@@ -93,7 +103,16 @@ fn get_json(client: &reqwest::blocking::Client, url: &str, api_key: &str) -> Res
 
 /// Sum tokens per permaslug over the window, skipping the `other`
 /// aggregate row; unparseable counts never guess (row dropped).
+/// Truncated to `top_n` for the menu pin list.
 pub fn aggregate_models(body: &Value, top_n: usize) -> Vec<(String, u64)> {
+    let mut ranked = aggregate_models_all(body);
+    ranked.truncate(top_n);
+    ranked
+}
+
+/// The whole window, best first: the value score's popularity input
+/// (Iter 34). Same parsing rules as `aggregate_models`.
+pub fn aggregate_models_all(body: &Value) -> Vec<(String, u64)> {
     let mut totals: HashMap<String, u64> = HashMap::new();
     for row in body
         .get("data")
@@ -116,7 +135,6 @@ pub fn aggregate_models(body: &Value, top_n: usize) -> Vec<(String, u64)> {
     }
     let mut ranked: Vec<(String, u64)> = totals.into_iter().collect();
     ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-    ranked.truncate(top_n);
     ranked
 }
 
@@ -169,7 +187,33 @@ pub fn store_popularity(catalog: &Catalog, popularity: &Popularity) -> Result<()
     )?;
     catalog.set_meta("popular_apps", &serde_json::Value::Array(apps).to_string())?;
     catalog.set_meta("popular_as_of", popularity.as_of.as_deref().unwrap_or(""))?;
+    // Full window as a slug -> tokens object: the value score reads it
+    // per model (Iter 34). The menu keeps the top-N array above.
+    let tokens: serde_json::Map<String, Value> = popularity
+        .all_models
+        .iter()
+        .map(|(slug, tokens)| (slug.clone(), serde_json::json!(tokens)))
+        .collect();
+    catalog.set_meta("popular_tokens", &Value::Object(tokens).to_string())?;
     Ok(())
+}
+
+/// Full popularity window as slug -> tokens. Missing or unparseable
+/// (old artifacts, keyless syncs) reads as empty: no factor, no
+/// penalty.
+pub fn read_popular_tokens(catalog: &Catalog) -> HashMap<String, u64> {
+    catalog
+        .get_meta("popular_tokens")
+        .ok()
+        .flatten()
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .and_then(|v| v.as_object().cloned())
+        .map(|map| {
+            map.into_iter()
+                .filter_map(|(slug, tokens)| Some((slug, tokens.as_u64()?)))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Read back: pinned slugs, hot app names, citation timestamp.
@@ -261,6 +305,7 @@ mod tests {
             &catalog,
             &Popularity {
                 models: vec![("a/x".to_string(), 5)],
+                all_models: vec![("a/x".to_string(), 5)],
                 apps: vec![("Cline".to_string(), 9, 2)],
                 as_of: Some("2026-11-04T00:00:00.000Z".to_string()),
             },

@@ -1,8 +1,8 @@
 # Proposal: catalog value score + catalog UI overview
 
-> Date: 2026-11-12 · Author: freeclaw · Status: Proposed (Iter 34)
+> Date: 2026-11-12 · Author: freeclaw · Status: Implemented (Iter 34)
 > Depends on: schema v7, Iter 31 AA indexes, Iter 32 offline tiers, Iter 33
-> `minindex` (PR #40).
+> `minindex` (PR #40). Shipped as schema v8.
 > Companion: `docs/ranking-index.md` (the ordering contract this extends),
 > `docs/catalog-sync-architecture.md` (pipeline), `docs/proposals/2026-11-03-artificial-analysis-index.md`
 > (the AA signal this consumes).
@@ -357,6 +357,36 @@ ranking document field → UI overview → UI models tabs → docs
 3. **Free tab ordering: as proposed.** Free models all have `efficiency = 1`,
    so the tab ranks on quality × popularity; a free model with a low index can
    outrank a paid one, which is the intended "free first" story.
+
+## 8. As built (2026-11-12)
+
+Deviations from the proposal, all deliberate:
+
+- **Popularity is fetched before processing.** The score needs the
+  whole window, not the top-10 menu pins, so `store_popularity` also
+  writes `popular_tokens` (slug → tokens) and the sync pipeline moved
+  the fetch above `run_processing`. A keyless sync stores nothing and
+  the factor is a zero share.
+- **`aa_cost_per_task` is stored but unused.** AA does not ship a
+  cost-per-task field yet; the column and extractor exist so AA's
+  number wins the moment it appears. Until then the score uses the
+  catalog's own effective price.
+- **Promo windows are not applied at processing.** The score uses the
+  static discount column; time-boxed promos are evaluated at ranking
+  rebuild time, as before. A promo therefore does not move
+  `rank_score` until the next processing run.
+- **The ranking document's `score` ordering is omitted when the
+  catalog was never processed** (`skip_serializing_if`), so a v7-era
+  document still parses and an unprocessed DB does not publish a
+  meaningless identity list. Operator assist still applies to it.
+- **The models page defaults to the `tiers` tab** (most offerings
+  live there); `free` and `decision` are one click away. The overview
+  also lists precision-class and tier distributions, which the
+  proposal did not ask for but cost nothing to compute.
+- **Speed metrics come from `latency_last_30m`, `throughput_last_30m`,
+  `uptime_last_30m`.** Today's payloads carry only uptime, so latency
+  and throughput are usually `NULL` and the tie-breakers fall through
+  to provider/tag.
 
 ## References
 

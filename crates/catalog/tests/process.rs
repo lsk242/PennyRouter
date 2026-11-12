@@ -301,7 +301,7 @@ fn migration_v1_to_current_preserves_data() {
     assert_eq!(eps[0].price_override_tokens, None);
     assert_eq!(
         catalog.get_meta("schema_version").unwrap().as_deref(),
-        Some("7")
+        Some("8")
     );
 
     // Migrated models carry the new AA columns (NULL until reprocessed).
@@ -751,6 +751,155 @@ fn migration_v6_to_v7_renames_scoring_columns() {
     assert_eq!(catalog.get_meta("judged_count").unwrap(), None);
     assert_eq!(
         catalog.get_meta("schema_version").unwrap().as_deref(),
-        Some("7")
+        Some("8")
+    );
+}
+
+/// Iter 34: processing writes the value score from the AA index, the
+/// effective price, the precision class, and the popularity window.
+#[test]
+fn processing_writes_value_scores() {
+    let dir = common::scratch("rank-score");
+    let db = dir.join("work.db");
+    let catalog = Catalog::open(&db).unwrap();
+    catalog.init().unwrap();
+
+    let model = |id: &str, payload: &str| ModelRow {
+        model_id: id.into(),
+        name: id.into(),
+        source: "test".into(),
+        payload: payload.into(),
+        fetched_at: "t".into(),
+    };
+    catalog
+        .insert_model(&model(
+            "a/cheap",
+            r#"{"id":"a/cheap","canonical_slug":"a/cheap-1",
+                "benchmarks":{"artificial_analysis":{"coding_index":60,"intelligence_index":70}}}"#,
+        ))
+        .unwrap();
+    catalog
+        .insert_model(&model("b/none", r#"{"id":"b/none"}"#))
+        .unwrap();
+
+    let endpoint = |model_id: &str, provider: &str, payload: &str| EndpointRow {
+        id: 0,
+        model_id: model_id.into(),
+        provider_name: provider.into(),
+        payload: payload.into(),
+        fetched_at: "t".into(),
+        price_prompt: None,
+        price_completion: None,
+        price_cache_read: None,
+        price_cache_write: None,
+        precision_class: None,
+        promo_discount: None,
+        processed_at: None,
+        supports_tools: None,
+        supports_decisions: None,
+        quality_tier: None,
+        quality_score: None,
+        scored_at: None,
+        score_model: None,
+        score_prompt: None,
+        price_override_tokens: None,
+    };
+    // fp8, priced, with live speed metrics.
+    catalog
+        .insert_endpoint(&endpoint(
+            "a/cheap",
+            "P",
+            r#"{"tag":"p/fp8","quantization":"fp8",
+                "pricing":{"prompt":"0.000001","completion":"0.000005",
+                           "input_cache_read":"0.00000005","input_cache_write":"0.00000125"},
+                "latency_last_30m":250,"throughput_last_30m":120,"uptime_last_30m":99.5}"#,
+        ))
+        .unwrap();
+    // Free: efficiency is 1, so the score is quality × popularity.
+    catalog
+        .insert_endpoint(&endpoint(
+            "a/cheap",
+            "Free",
+            r#"{"tag":"p/free","quantization":"fp8",
+                "pricing":{"prompt":"0","completion":"0"}}"#,
+        ))
+        .unwrap();
+    // No price: no score, never a free pass.
+    catalog
+        .insert_endpoint(&endpoint("a/cheap", "Unpriced", r#"{"tag":"p/none"}"#))
+        .unwrap();
+    // No AA index: no score.
+    catalog
+        .insert_endpoint(&endpoint(
+            "b/none",
+            "P",
+            r#"{"tag":"p/fp16","pricing":{"prompt":"0.000001","completion":"0.000001"}}"#,
+        ))
+        .unwrap();
+
+    // Popularity window: a/cheap is the top model, b/none half of it.
+    catalog
+        .set_meta("popular_tokens", r#"{"a/cheap-1":100,"b/none":50}"#)
+        .unwrap();
+
+    let summary = run_processing(&catalog, PROCESSED_AT).unwrap();
+    assert_eq!(summary.processed, 4);
+    assert_eq!(summary.ranked, 2);
+
+    let eps = catalog.endpoints_for("a/cheap").unwrap();
+    let priced = &eps[0];
+    // Speed/availability land in their own columns.
+    let speeds = catalog.endpoint_speeds().unwrap();
+    let speed = &speeds[&priced.id];
+    assert_eq!(speed.latency_ms, Some(250.0));
+    assert_eq!(speed.throughput_tps, Some(120.0));
+    assert_eq!(speed.uptime_pct, Some(99.5));
+
+    let ranks = catalog.endpoint_ranks().unwrap();
+    let rank = &ranks[&priced.id];
+    assert_eq!(rank.rank_basis.as_deref(), Some("coding"));
+    assert_eq!(rank.rank_ruleset.as_deref(), Some("rank-v1"));
+    assert_eq!(rank.ranked_at.as_deref(), Some(PROCESSED_AT));
+    // quality = 60 × 0.97 (fp8)
+    assert!((rank.rank_quality.unwrap() - 58.2).abs() < 1e-9);
+    // cost/task = 0.5·1e-6 + 0.4·5e-6 + 0.05·5e-8 + 0.05·1.25e-6, ×10k
+    let cost_task = 0.02565;
+    let efficiency = 0.01 / (cost_task + 0.01);
+    assert!((rank.rank_efficiency.unwrap() - efficiency).abs() < 1e-9);
+    // Top model: share 1.0 → factor 1.0.
+    assert!((rank.rank_popularity.unwrap() - 1.0).abs() < 1e-9);
+    assert!((rank.rank_score.unwrap() - 58.2 * efficiency).abs() < 1e-6);
+
+    // Free offering: full price credit.
+    let free = &eps[1];
+    let free_rank = &ranks[&free.id];
+    assert_eq!(free_rank.rank_efficiency, Some(1.0));
+    assert!((free_rank.rank_score.unwrap() - 58.2).abs() < 1e-9);
+
+    // Unpriced offering: evaluated, but no score.
+    let unpriced = &eps[2];
+    let unpriced_rank = &ranks[&unpriced.id];
+    assert_eq!(unpriced_rank.rank_score, None);
+    assert_eq!(unpriced_rank.rank_ruleset.as_deref(), Some("rank-v1"));
+
+    // No index: no score even though it is priced.
+    let none = &catalog.endpoints_for("b/none").unwrap()[0];
+    assert_eq!(ranks[&none.id].rank_score, None);
+
+    // Popularity is stored per model, keyed by canonical_slug.
+    let signals = catalog.model_signals().unwrap();
+    assert_eq!(signals["a/cheap"].popularity_tokens, Some(100));
+    assert_eq!(signals["a/cheap"].popularity_share, Some(1.0));
+    assert_eq!(signals["b/none"].popularity_share, Some(0.5));
+    assert_eq!(signals["a/cheap"].aa_coding_index, Some(60));
+
+    // Meta records the pass.
+    assert_eq!(
+        catalog.get_meta("ranked_count").unwrap().as_deref(),
+        Some("2")
+    );
+    assert_eq!(
+        catalog.get_meta("rank_ruleset").unwrap().as_deref(),
+        Some("rank-v1")
     );
 }

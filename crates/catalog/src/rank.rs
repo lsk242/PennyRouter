@@ -44,7 +44,7 @@ fn tier_rank(tier: Option<&str>) -> u8 {
     }
 }
 
-fn asc_nulls_last(a: Option<f64>, b: Option<f64>) -> std::cmp::Ordering {
+pub(crate) fn asc_nulls_last(a: Option<f64>, b: Option<f64>) -> std::cmp::Ordering {
     match (a, b) {
         (Some(x), Some(y)) => x.total_cmp(&y),
         (Some(_), None) => std::cmp::Ordering::Less,
@@ -56,7 +56,7 @@ fn asc_nulls_last(a: Option<f64>, b: Option<f64>) -> std::cmp::Ordering {
 /// Descending numbers with unknowns still last (Iter 11, F10):
 /// reversing the operands of `asc_nulls_last` would also reverse the
 /// null policy and promote missing scores ahead of known ones.
-fn desc_nulls_last(a: Option<f64>, b: Option<f64>) -> std::cmp::Ordering {
+pub(crate) fn desc_nulls_last(a: Option<f64>, b: Option<f64>) -> std::cmp::Ordering {
     match (a, b) {
         (Some(x), Some(y)) => y.total_cmp(&x),
         (Some(_), None) => std::cmp::Ordering::Less,
@@ -285,6 +285,11 @@ pub struct ClassRanking {
     pub default: Vec<RankEntry>,
     pub price: Vec<RankEntry>,
     pub quality: Vec<RankEntry>,
+    /// Value-score ordering (Iter 34). Empty when the catalog was
+    /// never processed, so a v7-era document still parses and the
+    /// gateway can ignore the field until it adopts the score.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub score: Vec<RankEntry>,
 }
 
 /// One free offering (Iter 11, F11): free only through
@@ -343,6 +348,10 @@ pub fn rank_catalog(
     let mut seen_models: Vec<String> = Vec::new();
     let mut endpoints_by_model: HashMap<String, Vec<usize>> = HashMap::new();
     let endpoints = catalog.all_endpoints()?;
+    // Value-score components (Iter 34): stored per endpoint by
+    // processing, read here so the published ordering matches the UI.
+    let ranks = catalog.endpoint_ranks()?;
+    let speeds = catalog.endpoint_speeds()?;
     // Parsed payloads alongside the rows: tag identity for ordering
     // borrows these instead of re-parsing per comparison (Iter 11, A03,
     // and cheaper than the old per-compare parse).
@@ -395,11 +404,39 @@ pub fn rank_catalog(
                     })
                     .collect()
             };
+            // Only publish the score ordering when the catalog was
+            // processed: an unprocessed DB has no scores, and an
+            // all-NULL ordering would be a meaningless identity list.
+            let scored = members.iter().any(|i| {
+                ranks
+                    .get(&endpoints[*i].id)
+                    .and_then(|rank| rank.rank_score)
+                    .is_some()
+            });
+            let score = if scored {
+                let mut sorted = members.clone();
+                sorted.sort_by(|a, b| {
+                    crate::rank_score::compare(
+                        &rank_key(&endpoints[*a], &payloads[*a], &ranks, &speeds),
+                        &rank_key(&endpoints[*b], &payloads[*b], &ranks, &speeds),
+                    )
+                });
+                apply_assist(model_id, &sorted, &endpoints, assist)
+                    .into_iter()
+                    .map(|i| RankEntry {
+                        provider: endpoints[i].provider_name.clone(),
+                        tag: endpoint_tag_of(&endpoints[i]),
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
             rankings.push(ClassRanking {
                 class,
                 default: order(RankOrientation::Default),
                 price: order(RankOrientation::Price),
                 quality: order(RankOrientation::Quality),
+                score,
             });
         }
         by_model.insert(model_id.clone(), rankings);
@@ -512,6 +549,26 @@ fn signals<'a>(
         score: ep.quality_score,
         error_rate: trend.and_then(TrendStats::error_rate),
         latency_ms: trend.and_then(TrendStats::latency_ms),
+    }
+}
+
+/// Ordering key for the value-score ordering (Iter 34): the stored
+/// score plus the tie-breakers, borrowed from the row and payload.
+fn rank_key<'a>(
+    ep: &'a crate::store::EndpointRow,
+    payload: &'a serde_json::Value,
+    ranks: &'a HashMap<i64, crate::store::EndpointRank>,
+    speeds: &'a HashMap<i64, crate::store::EndpointSpeed>,
+) -> crate::rank_score::RankKey<'a> {
+    let rank = ranks.get(&ep.id);
+    let speed = speeds.get(&ep.id);
+    crate::rank_score::RankKey {
+        score: rank.and_then(|rank| rank.rank_score),
+        throughput_tps: speed.and_then(|speed| speed.throughput_tps),
+        latency_ms: speed.and_then(|speed| speed.latency_ms),
+        uptime_pct: speed.and_then(|speed| speed.uptime_pct),
+        provider: &ep.provider_name,
+        tag: crate::score::endpoint_tag(payload),
     }
 }
 

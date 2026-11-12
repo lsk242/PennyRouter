@@ -120,6 +120,7 @@ fn build_db(path: &std::path::Path) {
                     aa_intelligence_index: None,
                     aa_coding_index: Some(coding),
                     aa_agentic_index: None,
+                    aa_cost_per_task: None,
                 },
             )
             .unwrap();

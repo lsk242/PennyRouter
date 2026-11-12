@@ -4311,6 +4311,7 @@ mod tests {
                     default: vec![entry("Dear"), entry("Ghost"), entry("Cheap")],
                     price: vec![entry("Dear"), entry("Cheap")],
                     quality: vec![entry("Dear"), entry("Cheap")],
+                    score: vec![],
                 }],
             )]
             .into_iter()
