@@ -31,11 +31,13 @@ struct Seen {
 }
 
 async fn spawn_batch_mock(seen: Arc<Mutex<Seen>>) -> SocketAddr {
+    let seen_post = seen.clone();
+    let seen_get = seen.clone();
     let app = Router::new()
         .route(
             "/api/v1/batches",
             post(move |headers: HeaderMap, req_body: Bytes| {
-                let seen = seen.clone();
+                let seen = seen_post.clone();
                 async move {
                     *seen.lock().unwrap() = Seen {
                         method: Some("POST".to_string()),
@@ -57,7 +59,7 @@ async fn spawn_batch_mock(seen: Arc<Mutex<Seen>>) -> SocketAddr {
         .route(
             "/api/v1/batches/:id",
             get(move |headers: HeaderMap, Path(id): Path<String>| {
-                let seen = seen.clone();
+                let seen = seen_get.clone();
                 async move {
                     *seen.lock().unwrap() = Seen {
                         method: Some("GET".to_string()),
