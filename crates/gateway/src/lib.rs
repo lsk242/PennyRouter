@@ -834,6 +834,7 @@ fn preview_json(preview: &routing::Preview) -> serde_json::Value {
             "effective_cost": c.effective_cost,
             "promo_discount": c.promo_discount,
             "precision_class": c.precision_class,
+            "quantization": c.quantization,
             "quality_tier": c.quality_tier,
             "quality_score": c.quality_score,
             "supports_tools": c.supports_tools,
@@ -1066,6 +1067,7 @@ async fn ui_page(State(state): State<AppState>) -> Response {
                 "<table><thead><tr><th>#</th><th>provider</th><th>backend model</th><th>tag</th>\
                 <th>prompt $/M</th><th>completion $/M</th><th>cache-read $/M</th>\
                 <th>cache-write $/M</th><th>effective $/M</th><th>promo</th><th>class</th>\
+                <th>quant</th>\
                 <th>tier</th><th>score</th><th>tools</th><th>decisions</th>\
                 <th>free</th><th>availability</th><th>rank</th></tr></thead>",
             );
@@ -1074,7 +1076,7 @@ async fn ui_page(State(state): State<AppState>) -> Response {
                     page.push_str(&format!(
                         "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td>\
                     <td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td>\
-                    <td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td>\
+                    <td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td>\
                     <td>{}</td><td>{}</td><td>{}</td></tr>",
                         n + 1,
                         esc(&c.provider),
@@ -1089,6 +1091,7 @@ async fn ui_page(State(state): State<AppState>) -> Response {
                             .map(|d| format!("{d:.2}"))
                             .unwrap_or_else(|| "-".to_string()),
                         class(&c.precision_class),
+                        text(&c.quantization),
                         text(&c.quality_tier),
                         c.quality_score
                             .map(|s| format!("{s:.3}"))
@@ -1136,7 +1139,7 @@ async fn ui_page(State(state): State<AppState>) -> Response {
         +(c.tag?insEsc(c.tag):'-')+'</td><td>'+insMoney(c.price_prompt)+'</td><td>'+insMoney(c.price_completion)\
         +'</td><td>'+insMoney(c.price_cache_read)+'</td><td>'+insMoney(c.price_cache_write)+'</td><td>'\
         +insMoney(c.effective_cost)+'</td><td>'+((c.promo_discount===null||c.promo_discount===undefined)?'-':Number(c.promo_discount).toFixed(2))\
-        +'</td><td>'+(c.precision_class&&c.precision_class!=='unknown'?insEsc(c.precision_class):'-')+'</td><td>'\
+        +'</td><td>'+(c.precision_class&&c.precision_class!=='unknown'?insEsc(c.precision_class):'-')+'</td><td>'+(c.quantization?insEsc(c.quantization):'-')+'</td><td>'\
         +(c.quality_tier?insEsc(c.quality_tier):'-')+'</td><td>'\
         +((c.quality_score===null||c.quality_score===undefined)?'-':Number(c.quality_score).toFixed(3))\
         +'</td><td>'+insBool(c.supports_tools)+'</td><td>'+insBool(c.supports_decisions)+'</td><td>'\
@@ -1146,7 +1149,7 @@ async fn ui_page(State(state): State<AppState>) -> Response {
         function insTable(data){\
         var h='<table><thead><tr><th>#</th><th>provider</th><th>backend model</th><th>tag</th>'\
         +'<th>prompt $/M</th><th>completion $/M</th><th>cache-read $/M</th><th>cache-write $/M</th>'\
-        +'<th>effective $/M</th><th>promo</th><th>class</th><th>tier</th><th>score</th><th>tools</th>'\
+        +'<th>effective $/M</th><th>promo</th><th>class</th><th>quant</th><th>tier</th><th>score</th><th>tools</th>'\
         +'<th>decisions</th><th>free</th><th>availability</th><th>rank</th><th>session</th></tr></thead><tbody>';\
         for(var i=0;i<data.candidates.length;i++){h+=insRow(data.candidates[i],i);}\
         return h+'</tbody></table>';}\
@@ -1184,7 +1187,7 @@ async fn ui_page(State(state): State<AppState>) -> Response {
         +(c.tag?insEsc(c.tag):'-')+'</td><td>'+insMoney(c.price_prompt)+'</td><td>'+insMoney(c.price_completion)\
         +'</td><td>'+insMoney(c.price_cache_read)+'</td><td>'+insMoney(c.price_cache_write)+'</td><td>'\
         +insMoney(c.effective_cost)+'</td><td>'+((c.promo_discount===null||c.promo_discount===undefined)?'-':Number(c.promo_discount).toFixed(2))\
-        +'</td><td>'+(c.precision_class&&c.precision_class!=='unknown'?insEsc(c.precision_class):'-')+'</td><td>'\
+        +'</td><td>'+(c.precision_class&&c.precision_class!=='unknown'?insEsc(c.precision_class):'-')+'</td><td>'+(c.quantization?insEsc(c.quantization):'-')+'</td><td>'\
         +(c.quality_tier?insEsc(c.quality_tier):'-')+'</td><td>'\
         +((c.quality_score===null||c.quality_score===undefined)?'-':Number(c.quality_score).toFixed(3))\
         +'</td><td>'+insBool(c.supports_tools)+'</td><td>'+insBool(c.supports_decisions)+'</td><td>'\

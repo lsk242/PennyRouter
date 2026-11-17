@@ -1,11 +1,12 @@
-//! Schema v8: fixed core columns + raw JSON payloads + indexed columns
+//! Schema v9: fixed core columns + raw JSON payloads + indexed columns
 //! (deterministic from Phase 2a, model-scored from Phase 2b, tool
 //! support from Iter 22, decision-modality support from Iter 24,
 //! Artificial Analysis indexes from Iter 31, scoring-audit rename
-//! from Iter 32, speed/availability + value score from Iter 34).
+//! from Iter 32, speed/availability + value score from Iter 34,
+//! exact raw quantization from Iter 36).
 
 /// Current schema version, recorded in `sync_meta` on init.
-pub const SCHEMA_VERSION: u32 = 8;
+pub const SCHEMA_VERSION: u32 = 9;
 
 pub const DDL: &str = "
 CREATE TABLE IF NOT EXISTS models (
@@ -32,6 +33,7 @@ CREATE TABLE IF NOT EXISTS endpoints (
     price_cache_read  REAL,
     price_cache_write REAL,
     precision_class   TEXT,
+    quantization      TEXT,
     promo_discount    REAL,
     processed_at      TEXT,
     supports_tools    INTEGER,
@@ -70,6 +72,7 @@ pub const ENDPOINT_INDEXED_COLUMNS: &[(&str, &str)] = &[
     ("price_cache_read", "REAL"),
     ("price_cache_write", "REAL"),
     ("precision_class", "TEXT"),
+    ("quantization", "TEXT"),
     ("promo_discount", "REAL"),
     ("processed_at", "TEXT"),
     ("supports_tools", "INTEGER"),

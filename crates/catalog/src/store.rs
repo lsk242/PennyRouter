@@ -35,6 +35,11 @@ pub struct EndpointRow {
     pub price_cache_read: Option<f64>,
     pub price_cache_write: Option<f64>,
     pub precision_class: Option<String>,
+    /// Exact raw `quantization` string from the endpoint payload
+    /// (Iter 36, verbatim in and out): the wire `quantizations`
+    /// pin sends this back, while `precision_class` stays the
+    /// coarse grouping key for routing decisions.
+    pub quantization: Option<String>,
     pub promo_discount: Option<f64>,
     pub processed_at: Option<String>,
     pub supports_tools: Option<i64>,
@@ -54,6 +59,7 @@ pub struct EndpointIndex {
     pub price_cache_read: Option<f64>,
     pub price_cache_write: Option<f64>,
     pub precision_class: Option<String>,
+    pub quantization: Option<String>,
     pub promo_discount: Option<f64>,
     pub processed_at: String,
     pub supports_tools: Option<i64>,
@@ -129,7 +135,7 @@ pub struct EndpointScore {
 
 const ENDPOINT_COLS: &str = "id, model_id, provider_name, payload, fetched_at,
     price_prompt, price_completion, price_cache_read, price_cache_write,
-    precision_class, promo_discount, processed_at, supports_tools,
+    precision_class, quantization, promo_discount, processed_at, supports_tools,
     supports_decisions, quality_tier, quality_score, scored_at, score_model, score_prompt,
     price_override_tokens";
 
@@ -145,16 +151,17 @@ fn endpoint_row(r: &Row) -> Result<EndpointRow, rusqlite::Error> {
         price_cache_read: r.get(7)?,
         price_cache_write: r.get(8)?,
         precision_class: r.get(9)?,
-        promo_discount: r.get(10)?,
-        processed_at: r.get(11)?,
-        supports_tools: r.get(12)?,
-        supports_decisions: r.get(13)?,
-        quality_tier: r.get(14)?,
-        quality_score: r.get(15)?,
-        scored_at: r.get(16)?,
-        score_model: r.get(17)?,
-        score_prompt: r.get(18)?,
-        price_override_tokens: r.get(19)?,
+        quantization: r.get(10)?,
+        promo_discount: r.get(11)?,
+        processed_at: r.get(12)?,
+        supports_tools: r.get(13)?,
+        supports_decisions: r.get(14)?,
+        quality_tier: r.get(15)?,
+        quality_score: r.get(16)?,
+        scored_at: r.get(17)?,
+        score_model: r.get(18)?,
+        score_prompt: r.get(19)?,
+        price_override_tokens: r.get(20)?,
     })
 }
 
@@ -409,14 +416,15 @@ impl Catalog {
         self.conn.execute(
             "UPDATE endpoints SET price_prompt = ?1, price_completion = ?2,
              price_cache_read = ?3, price_cache_write = ?4, precision_class = ?5,
-             promo_discount = ?6, processed_at = ?7, supports_tools = ?8,
-             supports_decisions = ?9, price_override_tokens = ?10 WHERE id = ?11",
+             quantization = ?6, promo_discount = ?7, processed_at = ?8, supports_tools = ?9,
+             supports_decisions = ?10, price_override_tokens = ?11 WHERE id = ?12",
             params![
                 index.price_prompt,
                 index.price_completion,
                 index.price_cache_read,
                 index.price_cache_write,
                 index.precision_class,
+                index.quantization,
                 index.promo_discount,
                 index.processed_at,
                 index.supports_tools,
@@ -653,7 +661,7 @@ mod tests {
         catalog.init().unwrap();
         assert_eq!(
             catalog.get_meta("schema_version").unwrap().as_deref(),
-            Some("8")
+            Some("9")
         );
         assert_eq!(catalog.counts().unwrap(), (0, 0));
     }

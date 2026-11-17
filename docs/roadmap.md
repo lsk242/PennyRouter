@@ -767,4 +767,34 @@ only when pulled forward deliberately.
   file, confirmation + pending banners); entrypoint probed live in
   one-shot, early-trigger, and short-interval modes.
 
-## After Iter 35
+## Iter 36 — Exact quantization pin (done)
+
+- Goal: stop the gateway 404ing fp4-family offerings — the F04 pin
+  sent the coarse precision class (`int4`) where OpenRouter expects
+  its exact vocabulary (`fp4`/`mxfp4`/`nvfp4` distinct from `int4`),
+  so every routed fp4-family request died with "No endpoints found
+  for the request with quantization: int4" (live-found via litellm,
+  srv.lan).
+- Value: the 205 fp4-family offerings route again; the pin is exact
+  for every current and future quantization string, with no
+  vocabulary list to keep in sync.
+- Shipped: schema v8→v9 adds an endpoint `quantization` column
+  carrying the raw string byte-verbatim (the class column is
+  untouched and stays the grouping key for tiers, pins, and
+  quality); the snapshot carries it, `finish_route` pins it unless
+  the caller constrained quantizations (missing/`unknown` pins
+  nothing, fail-open), and the routing inspector shows a `quant`
+  column plus JSON field so operators see the pinned value.
+- Deploy note: a v9 gateway rejects v8 artifacts — the first v9
+  publish must land before (or with) the gateway image. Reloads
+  keep last-good across the window; a boot on v8 stays in standby
+  passthrough until the first v9 publish.
+- Test: extraction units (verbatim incl. fp4/mxfp4, missing/empty/
+  non-string → None) + processing (raw beside collapsed class) +
+  v8→v9 migrate + wire-pin suite (fp4/mxfp4/nvfp4/int4/fp8/bf16
+  verbatim, unknown/missing open, caller wins) + preview carry.
+  Full workspace green (40 suites). Live-data proof: the srv.lan
+  v8 DB migrated and processed cleanly (1539/1539 raw values,
+  205 fp4-family kept exact).
+
+## After Iter 36

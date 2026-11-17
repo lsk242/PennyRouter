@@ -273,3 +273,10 @@ cheap judge model, classifier-based routing.
       sync loop polls every 10s and starts the next cycle early; the
       loop stays the single writer. Test: `resync_button_…` UI test +
       live entrypoint probes (one-shot/early/short-interval).
+- [x] **Iter 36 — Exact quantization pin.** Schema v8→v9 stores the
+      raw quantization verbatim beside the grouping class; the
+      gateway pins the raw value on the wire (fp4 pins `fp4`, never
+      `int4`; unknown/missing pins nothing; caller still wins) and
+      the inspector shows it. Deploy with/after the first v9
+      publish. Test: extraction + processing + migrate + wire-pin
+      suite + preview carry; full workspace green (40 suites).

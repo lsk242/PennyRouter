@@ -101,12 +101,14 @@ session.
   field (`zdr`, `data_collection`, `only`/`ignore`, `max_price`,
   `quantizations`, …) is preserved; candidates and sticky pins must
   satisfy `only`/`ignore`, otherwise the body passes through untouched
-  for the upstream to enforce (Iter 11, F01). The chosen precision
-  class is forwarded as a `quantizations` requirement unless the
-  caller set one — best-effort, since classes are coarser than exact
-  backend quantizations; same-provider tier targeting beyond the
-  provider pin stays documented-limitation (Iter 11, F04). The choice
-  is echoed in the `x-pennyrouter-provider` response header.
+  for the upstream to enforce (Iter 11, F01). The offering's exact
+  raw quantization is forwarded as a `quantizations` requirement
+  unless the caller set one — verbatim in and out since Iter 36
+  (missing or `unknown` pins nothing, fail-open); the precision
+  class stays a grouping key for tiers and pins, never a filter
+  value. Same-provider tier targeting beyond the provider pin stays
+  documented-limitation (Iter 11, F04). The choice is echoed in the
+  `x-pennyrouter-provider` response header.
 - Source: `CATALOG_DB` (directory takes the newest verified manifest,
   or a manifest/DB file directly). Unset means plain passthrough with
   no reload task. Unloadable at boot attaches a standby router

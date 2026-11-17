@@ -45,6 +45,7 @@ fn scratch_db(test: &str) -> std::path::PathBuf {
             price_cache_read: None,
             price_cache_write: None,
             precision_class: Some("fp16".to_string()),
+            quantization: None,
             promo_discount: None,
             processed_at: Some("t".to_string()),
             supports_tools: None,
@@ -193,6 +194,7 @@ async fn ui_shows_popular_section() {
             price_cache_read: None,
             price_cache_write: None,
             precision_class: None,
+            quantization: None,
             promo_discount: None,
             processed_at: Some("t".to_string()),
             supports_tools: None,
@@ -454,6 +456,7 @@ fn preview_db_inner(test: &str, cheap_price: f64, _tag: &str) -> std::path::Path
                 price_cache_read: None,
                 price_cache_write: None,
                 precision_class: None,
+                quantization: None,
                 promo_discount: None,
                 processed_at: None,
                 supports_tools: None,
@@ -476,6 +479,7 @@ fn preview_db_inner(test: &str, cheap_price: f64, _tag: &str) -> std::path::Path
                     price_cache_read: Some(prompt / 2.0),
                     price_cache_write: Some(prompt / 2.0),
                     precision_class: Some("fp16".to_string()),
+                    quantization: Some("fp16".to_string()),
                     promo_discount: Some(0.0),
                     processed_at: "t".to_string(),
                     supports_tools: tools,
@@ -589,6 +593,7 @@ async fn ui_prices_render_per_million_tokens() {
                     price_cache_read: cheap.price_cache_read,
                     price_cache_write: cheap.price_cache_write,
                     precision_class: Some("unknown".to_string()),
+                    quantization: None,
                     promo_discount: cheap.promo_discount,
                     processed_at: cheap
                         .processed_at
@@ -677,6 +682,7 @@ fn preview_low_top_matches_decide_and_shows_columns() {
         assert!(c.price_cache_write.is_some());
         assert!(c.effective_cost.is_some());
         assert_eq!(c.precision_class.as_deref(), Some("fp16"));
+        assert_eq!(c.quantization.as_deref(), Some("fp16"));
         assert!(c.quality_tier.is_some());
         assert!(c.quality_score.is_some());
         assert!(c.supports_tools.is_some());
@@ -818,6 +824,7 @@ async fn preview_endpoint_serves_json_with_key_hash() {
         "price_cache_write",
         "effective_cost",
         "precision_class",
+        "quantization",
         "quality_tier",
         "quality_score",
         "supports_tools",

@@ -376,6 +376,7 @@ fn sampling_distinguishes_endpoint_tags() {
         price_cache_read: None,
         price_cache_write: None,
         precision_class: None,
+        quantization: None,
         promo_discount: None,
         processed_at: None,
         supports_tools: None,

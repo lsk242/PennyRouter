@@ -119,6 +119,7 @@ pub fn run_processing(catalog: &Catalog, processed_at: &str) -> Result<ProcessSu
                 price_cache_read: extract_price(&payload, "input_cache_read"),
                 price_cache_write: extract_price(&payload, "input_cache_write"),
                 precision_class: Some(classify_precision(&payload)),
+                quantization: extract_quantization(&payload),
                 promo_discount: extract_discount(&payload),
                 price_override_tokens: extract_override_tokens(&payload),
                 processed_at: processed_at.to_string(),
@@ -380,6 +381,18 @@ fn extract_override_tokens(payload: &Value) -> Option<i64> {
 
 /// Quantization label to precision class. Anything unrecognized (including
 /// missing) is "unknown" — never silently treated as a known class.
+/// Exact `quantization` string from the payload, byte-verbatim
+/// (Iter 36): what OpenRouter reported is what the gateway sends
+/// back on the wire pin. Missing, non-string, or empty means
+/// `None` — the gateway then pins nothing (fail-open, as with the
+/// old `unknown` class).
+fn extract_quantization(payload: &Value) -> Option<String> {
+    match payload.get("quantization").and_then(Value::as_str) {
+        Some(q) if !q.is_empty() => Some(q.to_string()),
+        _ => None,
+    }
+}
+
 fn classify_precision(payload: &Value) -> String {
     let q = payload
         .get("quantization")
@@ -490,6 +503,31 @@ mod tests {
         assert_eq!(class("fp8_e4m3"), "fp8");
         assert_eq!(class("int8"), "int8");
         assert_eq!(class("nf4"), "int4");
+    }
+
+    #[test]
+    fn quantization_extracts_verbatim() {
+        let quant = |payload: Value| extract_quantization(&payload);
+        assert_eq!(
+            quant(json!({"quantization": "fp4"})),
+            Some("fp4".to_string())
+        );
+        assert_eq!(
+            quant(json!({"quantization": "mxfp4"})),
+            Some("mxfp4".to_string())
+        );
+        assert_eq!(
+            quant(json!({"quantization": "int4"})),
+            Some("int4".to_string())
+        );
+        assert_eq!(
+            quant(json!({"quantization": "unknown"})),
+            Some("unknown".to_string())
+        );
+        assert_eq!(quant(json!({})), None);
+        assert_eq!(quant(json!({"quantization": ""})), None);
+        assert_eq!(quant(json!({"quantization": 4})), None);
+        assert_eq!(quant(json!({"quantization": null})), None);
     }
 
     #[test]

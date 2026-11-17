@@ -30,6 +30,7 @@ fn processing_fills_expected_indexed_values() {
     assert_eq!(eps[0].price_cache_read, Some(0.000000025));
     assert_eq!(eps[0].price_cache_write, Some(0.000000625));
     assert_eq!(eps[0].precision_class.as_deref(), Some("unknown"));
+    assert_eq!(eps[0].quantization.as_deref(), Some("unknown"));
     assert_eq!(eps[0].promo_discount, Some(0.0));
     assert_eq!(eps[0].processed_at.as_deref(), Some(PROCESSED_AT));
     // Fixture endpoints list "tools" in supported_parameters.
@@ -44,6 +45,7 @@ fn processing_fills_expected_indexed_values() {
     assert_eq!(tencent.price_cache_read, None);
     assert_eq!(tencent.price_cache_write, None);
     assert_eq!(tencent.precision_class.as_deref(), Some("fp8"));
+    assert_eq!(tencent.quantization.as_deref(), Some("fp8"));
     // Its supported_parameters omit "tools".
     assert_eq!(tencent.supports_tools, Some(0));
 
@@ -100,6 +102,7 @@ fn out_of_range_discounts_extract_as_unknown() {
                 price_cache_read: None,
                 price_cache_write: None,
                 precision_class: None,
+                quantization: None,
                 promo_discount: None,
                 processed_at: None,
                 supports_tools: None,
@@ -164,6 +167,7 @@ fn override_threshold_indexed_from_payload() {
                 price_cache_read: None,
                 price_cache_write: None,
                 precision_class: None,
+                quantization: None,
                 promo_discount: None,
                 processed_at: None,
                 supports_tools: None,
@@ -224,6 +228,7 @@ fn corrupt_model_payload_fails_loudly() {
             price_cache_read: None,
             price_cache_write: None,
             precision_class: None,
+            quantization: None,
             promo_discount: None,
             processed_at: None,
             supports_tools: None,
@@ -299,9 +304,10 @@ fn migration_v1_to_current_preserves_data() {
     assert_eq!(eps[0].supports_tools, None);
     assert_eq!(eps[0].supports_decisions, None);
     assert_eq!(eps[0].price_override_tokens, None);
+    assert_eq!(eps[0].quantization, None);
     assert_eq!(
         catalog.get_meta("schema_version").unwrap().as_deref(),
-        Some("8")
+        Some("9")
     );
 
     // Migrated models carry the new AA columns (NULL until reprocessed).
@@ -387,6 +393,74 @@ fn sync_process_publish_pipeline() {
     assert_eq!(eps[0].processed_at.as_deref(), Some(PROCESSED_AT));
 }
 
+/// Iter 36: processing stores the raw quantization verbatim next
+/// to the coarse class — fp4-family rows keep their exact value
+/// (the wire pin sends it back) while the class still groups them
+/// as int4 for routing decisions.
+#[test]
+fn processing_stores_raw_quantization_verbatim() {
+    use pennyrouter_catalog::{EndpointRow, ModelRow};
+
+    let dir = common::scratch("raw-quant");
+    let db = dir.join("work.db");
+    let catalog = Catalog::open(&db).unwrap();
+    catalog.init().unwrap();
+    catalog
+        .insert_model(&ModelRow {
+            model_id: "m/q".into(),
+            name: "m/q".into(),
+            source: "openrouter".into(),
+            payload: "{}".into(),
+            fetched_at: "t".into(),
+        })
+        .unwrap();
+    for (provider, quant) in [
+        ("Fp4Prov", r#"{"quantization":"fp4"}"#),
+        ("MxProv", r#"{"quantization":"mxfp4"}"#),
+        ("NvProv", r#"{"quantization":"nvfp4"}"#),
+        ("IntProv", r#"{"quantization":"int4"}"#),
+        ("BareProv", "{}"),
+    ] {
+        catalog
+            .insert_endpoint(&EndpointRow {
+                id: 0,
+                model_id: "m/q".into(),
+                provider_name: provider.into(),
+                payload: quant.into(),
+                fetched_at: "t".into(),
+                price_prompt: None,
+                price_completion: None,
+                price_cache_read: None,
+                price_cache_write: None,
+                precision_class: None,
+                quantization: None,
+                promo_discount: None,
+                processed_at: None,
+                supports_tools: None,
+                supports_decisions: None,
+                quality_tier: None,
+                quality_score: None,
+                scored_at: None,
+                score_model: None,
+                score_prompt: None,
+                price_override_tokens: None,
+            })
+            .unwrap();
+    }
+
+    run_processing(&catalog, PROCESSED_AT).unwrap();
+
+    let eps = catalog.endpoints_for("m/q").unwrap();
+    assert_eq!(eps.len(), 5);
+    // Exact values in, exact values out; the class still collapses.
+    for (ep, quant) in eps.iter().zip(["fp4", "mxfp4", "nvfp4", "int4"]) {
+        assert_eq!(ep.quantization.as_deref(), Some(quant));
+        assert_eq!(ep.precision_class.as_deref(), Some("int4"));
+    }
+    assert_eq!(eps[4].quantization, None);
+    assert_eq!(eps[4].precision_class.as_deref(), Some("unknown"));
+}
+
 /// Iter 24: decision-modality extraction reads the parent *model*
 /// payload — `decisions` in `architecture.output_modalities` marks
 /// the endpoint, other modalities clear it, missing data is unknown.
@@ -416,6 +490,7 @@ fn processing_extracts_decision_support_from_model_payload() {
         price_cache_read: None,
         price_cache_write: None,
         precision_class: None,
+        quantization: None,
         promo_discount: None,
         processed_at: None,
         supports_tools: None,
@@ -455,6 +530,7 @@ fn processing_extracts_decision_support_from_model_payload() {
                     price_cache_read: None,
                     price_cache_write: None,
                     precision_class: Some("fp16".to_string()),
+                    quantization: None,
                     promo_discount: None,
                     processed_at: "t".to_string(),
                     supports_tools: None,
@@ -510,6 +586,7 @@ fn processing_scores_offline_tiers_from_coding_index() {
         price_cache_read: None,
         price_cache_write: None,
         precision_class: None,
+        quantization: None,
         promo_discount: None,
         processed_at: None,
         supports_tools: None,
@@ -599,6 +676,7 @@ fn offline_scoring_never_overwrites_existing_tiers() {
                 price_cache_read: None,
                 price_cache_write: None,
                 precision_class: None,
+                quantization: None,
                 promo_discount: None,
                 processed_at: None,
                 supports_tools: None,
@@ -751,7 +829,49 @@ fn migration_v6_to_v7_renames_scoring_columns() {
     assert_eq!(catalog.get_meta("judged_count").unwrap(), None);
     assert_eq!(
         catalog.get_meta("schema_version").unwrap().as_deref(),
-        Some("8")
+        Some("9")
+    );
+}
+
+/// Iter 36: the v8→v9 jump adds the exact-quantization column (NULL
+/// until the next processing run) and bumps the version.
+#[test]
+fn migration_v8_to_v9_adds_quantization_column() {
+    use rusqlite::{params, Connection};
+
+    let dir = common::scratch("migrate-v9");
+    let db = dir.join("v8.db");
+    {
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(pennyrouter_catalog::V1_DDL).unwrap();
+        conn.execute(
+            "INSERT INTO models (model_id, name, source, payload, fetched_at)
+             VALUES (?1, 'n', 'openrouter', '{}', 't')",
+            params!["m/id"],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO endpoints (model_id, provider_name, payload, fetched_at)
+             VALUES (?1, 'p', '{}', 't')",
+            params!["m/id"],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_meta (key, value) VALUES ('schema_version', '8')",
+            [],
+        )
+        .unwrap();
+    }
+
+    let catalog = Catalog::open(&db).unwrap();
+    catalog.init().unwrap();
+    assert_eq!(
+        catalog.endpoints_for("m/id").unwrap()[0].quantization,
+        None
+    );
+    assert_eq!(
+        catalog.get_meta("schema_version").unwrap().as_deref(),
+        Some("9")
     );
 }
 
@@ -793,6 +913,7 @@ fn processing_writes_value_scores() {
         price_cache_read: None,
         price_cache_write: None,
         precision_class: None,
+        quantization: None,
         promo_discount: None,
         processed_at: None,
         supports_tools: None,

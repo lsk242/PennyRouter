@@ -59,6 +59,7 @@ async fn ready_is_200_with_snapshot() {
             price_cache_read: None,
             price_cache_write: None,
             precision_class: None,
+            quantization: None,
             promo_discount: None,
             processed_at: Some("t".to_string()),
             supports_tools: None,

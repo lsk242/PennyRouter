@@ -52,6 +52,10 @@ pub struct Offering {
     pub price_cache_write: Option<f64>,
     pub promo_discount: Option<f64>,
     pub precision_class: Option<String>,
+    /// Exact raw quantization from the catalog (Iter 36, verbatim):
+    /// the wire `quantizations` pin sends this back, while
+    /// `precision_class` stays the grouping key for pins and tiers.
+    pub quantization: Option<String>,
     pub quality_tier: Option<String>,
     pub quality_score: Option<f64>,
     /// Per-endpoint tool support from the catalog (Iter 22): `Some(true)`
@@ -110,6 +114,7 @@ pub struct Decision {
     pub provider: String,
     pub tag: Option<String>,
     pub precision_class: Option<String>,
+    pub quantization: Option<String>,
     pub orientation: Orientation,
     /// True when stickiness kept a previously pinned provider.
     pub sticky: bool,
@@ -152,9 +157,11 @@ pub const PROVIDER_HEADER: &str = "x-pennyrouter-provider";
 /// (Iter 33); absent when the id had no `/minindex/` suffix.
 pub const MININDEX_HEADER: &str = "x-pennyrouter-minindex";
 
-/// Precision classes the gateway may forward as an OpenRouter
-/// `quantizations` requirement (Iter 11, F04). Anything else —
-/// including "unknown" — never constrains the wire request.
+/// Precision classes eligible for tier routing: a coarse grouping
+/// key, never a wire value (since Iter 36 the exact raw
+/// quantization pins the request instead). Anything else —
+/// including "unknown" — keeps the offering out of class-gated
+/// tiers.
 fn is_known_precision_class(class: &str) -> bool {
     matches!(class, "fp32" | "fp16" | "fp8" | "int8" | "int4")
 }
@@ -1228,6 +1235,7 @@ impl Router {
                                 provider: pick.provider_name.clone(),
                                 tag: pick.tag.clone(),
                                 precision_class: pick.precision_class.clone(),
+                                quantization: pick.quantization.clone(),
                                 orientation,
                                 sticky: true,
                                 minindex: None,
@@ -1276,6 +1284,7 @@ impl Router {
             provider: pick.provider_name.clone(),
             tag: pick.tag.clone(),
             precision_class: pick.precision_class.clone(),
+            quantization: pick.quantization.clone(),
             orientation,
             sticky: false,
             minindex: None,
@@ -1720,6 +1729,7 @@ impl Router {
                             provider: pick.provider_name.clone(),
                             tag: pick.tag.clone(),
                             precision_class: pick.precision_class.clone(),
+                            quantization: pick.quantization.clone(),
                             orientation: Orientation::Default,
                             sticky: true,
                             minindex,
@@ -1768,6 +1778,7 @@ impl Router {
             provider: pick.provider_name.clone(),
             tag: pick.tag.clone(),
             precision_class: pick.precision_class.clone(),
+            quantization: pick.quantization.clone(),
             orientation: Orientation::Default,
             sticky: false,
             minindex,
@@ -1908,6 +1919,7 @@ impl Router {
                         provider: pick.provider_name.clone(),
                         tag: pick.tag.clone(),
                         precision_class: pick.precision_class.clone(),
+                        quantization: pick.quantization.clone(),
                         orientation: Orientation::Default,
                         sticky: true,
                         minindex,
@@ -1950,6 +1962,7 @@ impl Router {
             provider: pick.provider_name.clone(),
             tag: pick.tag.clone(),
             precision_class: pick.precision_class.clone(),
+            quantization: pick.quantization.clone(),
             orientation: Orientation::Default,
             sticky: false,
             minindex,
@@ -2027,6 +2040,7 @@ impl Router {
                         provider: pick.provider_name.clone(),
                         tag: pick.tag.clone(),
                         precision_class: pick.precision_class.clone(),
+                        quantization: pick.quantization.clone(),
                         orientation: Orientation::Lowest,
                         sticky: true,
                         minindex: None,
@@ -2061,6 +2075,7 @@ impl Router {
             provider: pick.provider_name.clone(),
             tag: pick.tag.clone(),
             precision_class: pick.precision_class.clone(),
+            quantization: pick.quantization.clone(),
             orientation: Orientation::Lowest,
             sticky: false,
             minindex: None,
@@ -2158,6 +2173,7 @@ impl Router {
                         provider: pick.provider_name.clone(),
                         tag: pick.tag.clone(),
                         precision_class: pick.precision_class.clone(),
+                        quantization: pick.quantization.clone(),
                         orientation: Orientation::Default,
                         sticky: true,
                         minindex,
@@ -2192,6 +2208,7 @@ impl Router {
             provider: pick.provider_name.clone(),
             tag: pick.tag.clone(),
             precision_class: pick.precision_class.clone(),
+            quantization: pick.quantization.clone(),
             orientation: Orientation::Default,
             sticky: false,
             minindex,
@@ -2498,13 +2515,16 @@ impl Router {
             serde_json::json!([decision.provider.clone()]),
         );
         provider.insert("allow_fallbacks".to_string(), serde_json::json!(false));
-        // F04: pin the chosen precision class as a quantization
-        // requirement (best-effort: classes are coarse), unless the
-        // caller already constrained quantizations.
+        // F04 (exact since Iter 36): pin the offering's raw
+        // quantization verbatim — what the catalog read is what the
+        // wire sends — unless the caller already constrained
+        // quantizations. Missing or `unknown` pins nothing
+        // (fail-open): the class stays a grouping key, never a
+        // filter value.
         if provider.get("quantizations").is_none() {
-            if let Some(class) = decision.precision_class.as_deref() {
-                if is_known_precision_class(class) {
-                    provider.insert("quantizations".to_string(), serde_json::json!([class]));
+            if let Some(quant) = decision.quantization.as_deref() {
+                if !quant.is_empty() && !quant.eq_ignore_ascii_case("unknown") {
+                    provider.insert("quantizations".to_string(), serde_json::json!([quant]));
                 }
             }
         }
@@ -2673,6 +2693,7 @@ pub struct PreviewCandidate {
     pub effective_cost: Option<f64>,
     pub promo_discount: Option<f64>,
     pub precision_class: Option<String>,
+    pub quantization: Option<String>,
     pub quality_tier: Option<String>,
     pub quality_score: Option<f64>,
     pub supports_tools: Option<bool>,
@@ -3099,6 +3120,7 @@ impl Router {
             effective_cost: inline_cost(offering),
             promo_discount: offering.promo_discount,
             precision_class: offering.precision_class.clone(),
+            quantization: offering.quantization.clone(),
             quality_tier: offering.quality_tier.clone(),
             quality_score: offering.quality_score,
             supports_tools: offering.supports_tools,
@@ -3834,6 +3856,7 @@ pub fn route_pinned(model_field: &str, mut json: serde_json::Value) -> Option<(V
             provider: provider.to_string(),
             tag: None,
             precision_class: None,
+            quantization: None,
             orientation: Orientation::Default,
             sticky: false,
             minindex: None,
@@ -3959,6 +3982,7 @@ fn offering_from(ep: &EndpointRow) -> Offering {
         price_cache_write: ep.price_cache_write,
         promo_discount: ep.promo_discount,
         precision_class: ep.precision_class.clone(),
+        quantization: ep.quantization.clone(),
         quality_tier: ep.quality_tier.clone(),
         quality_score: ep.quality_score,
         supports_tools: ep.supports_tools.map(|v| v != 0),
@@ -3980,6 +4004,7 @@ fn free_decision(
         provider: pick.provider_name.clone(),
         tag: pick.tag.clone(),
         precision_class: pick.precision_class.clone(),
+        quantization: pick.quantization.clone(),
         orientation,
         sticky,
         minindex,
@@ -4239,6 +4264,7 @@ mod tests {
             price_cache_write: None,
             promo_discount: None,
             precision_class: Some("fp16".to_string()),
+            quantization: None,
             quality_tier: tier.map(str::to_string),
             quality_score: None,
             supports_tools: None,
@@ -4908,17 +4934,68 @@ mod tests {
         );
     }
 
-    #[test]
-    fn known_precision_class_pins_quantization() {
-        let r = router();
-        let body = routed_body("meta/muse-spark", serde_json::json!({}));
+    /// One-offering router for pin tests: class stays int4 while
+    /// the raw value varies, proving the wire follows the raw.
+    fn raw_router(raw: Option<&str>) -> Router {
+        let mut o = offering("Solo", Some(1.0), None);
+        o.model_id = "m/q".to_string();
+        o.precision_class = Some("int4".to_string());
+        o.quantization = raw.map(str::to_string);
+        router_with(Snapshot {
+            models: HashMap::from([("m/q".to_string(), vec![o])]),
+            aa_coding_index: HashMap::new(),
+            artifact_version: None,
+            popular_models: Vec::new(),
+            popular_apps: Vec::new(),
+            popular_as_of: None,
+        })
+    }
+
+    fn pin_of(r: &Router, provider: serde_json::Value) -> Option<serde_json::Value> {
+        let body = routed_body("m/q", provider);
         let (rewritten, _) = r
             .route_request(&axum::http::HeaderMap::new(), &body)
             .unwrap();
         let out: serde_json::Value = serde_json::from_slice(&rewritten).unwrap();
+        out.pointer("/provider/quantizations").cloned()
+    }
+
+    /// Iter 36: the wire pin sends the offering's exact raw
+    /// quantization back verbatim — an fp4 endpoint pins ["fp4"],
+    /// never the int4 class it groups under (the srv.lan 404).
+    #[test]
+    fn raw_quantization_pins_verbatim_on_the_wire() {
+        for raw in ["fp4", "mxfp4", "nvfp4", "int4", "fp8", "bf16"] {
+            assert_eq!(
+                pin_of(&raw_router(Some(raw)), serde_json::json!({})),
+                Some(serde_json::json!([raw])),
+                "raw {raw} pins verbatim",
+            );
+        }
+    }
+
+    /// Missing or `unknown` raw values pin nothing (fail-open).
+    #[test]
+    fn unknown_or_missing_quantization_pins_nothing() {
+        for raw in [None, Some("unknown"), Some("UNKNOWN")] {
+            assert_eq!(
+                pin_of(&raw_router(raw), serde_json::json!({})),
+                None,
+                "raw {raw:?} pins nothing",
+            );
+        }
+    }
+
+    /// A caller-supplied `quantizations` constraint still wins over
+    /// the raw pin.
+    #[test]
+    fn caller_quantizations_win_over_raw_pin() {
         assert_eq!(
-            out.pointer("/provider/quantizations"),
-            Some(&serde_json::json!(["fp16"])),
+            pin_of(
+                &raw_router(Some("fp4")),
+                serde_json::json!({"quantizations": ["int8"]}),
+            ),
+            Some(serde_json::json!(["int8"])),
         );
     }
 
