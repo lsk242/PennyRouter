@@ -338,11 +338,17 @@ concurrency/queue bounds the gateway sheds with OpenAI-shaped 503 +
 
 From Iter 3: every request logs one JSON line to stdout with request ID
 (incoming `x-request-id` or generated, also echoed back), method, route,
-status, latency, and outcome. `GET /metrics` serves Prometheus counters
-(requests by route/status, upstream errors by kind, guard rejections,
-in-flight gauge) plus a latency histogram. The chosen provider rides
-the `x-pennyrouter-provider` response header, not the log line.
-Never log bodies, prompts, completions, or Authorization headers. From Iter 8, fallback-proxied
-calls emit an extra `{"fallback_proxy":true,...}` line with method and
-full path (see [api.md](api.md)). Later, readiness/snapshot health
-may complement `/health` without changing its liveness contract.
+status, latency, outcome, and the caller's key suffix (last 4 of the
+`Authorization` credential, `"none"` when absent — never the secret).
+Failure lines also carry `error_code`/`error_message`: gateway-built
+errors log their own code/message, upstream JSON errors log the
+upstream message (capped) under `upstream_error`. `GET /metrics`
+serves Prometheus counters (requests by route/status, upstream errors
+by kind, guard rejections, in-flight gauge) plus a latency histogram.
+The chosen provider rides the `x-pennyrouter-provider` response
+header, not the log line.
+Never log bodies, prompts, completions, or full Authorization headers. From Iter 8, fallback-proxied
+calls emit an extra `{"fallback_proxy":true,...}` line with method,
+full path, and key suffix (see [api.md](api.md)). Later,
+readiness/snapshot health may complement `/health` without changing
+its liveness contract.

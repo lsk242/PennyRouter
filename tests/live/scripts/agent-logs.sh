@@ -37,7 +37,8 @@ SSH=(ssh ${SSH_OPTS:-})
 
 case "$target" in
   router)
-    # Gateway JSON lines: request_id, method, route, status, outcome.
+    # Gateway JSON lines: request_id, method, route, status, outcome,
+    # key (last-4 suffix), plus error_code/message on failures.
     if [[ "$follow" == 1 ]]; then
       "${SSH[@]}" "$DEPLOY_HOST" docker logs -f gateway
     else

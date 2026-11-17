@@ -105,6 +105,77 @@ fn log_line(line: String) {
     }
 }
 
+/// Caller identity for access logs: the last 4 characters of the
+/// `Authorization` credential (scheme stripped), so operators can
+/// tell callers apart without ever storing a key. Missing, empty, or
+/// unparseable reads `"none"`; a present-but-tiny credential reads
+/// `"***"` instead of leaking the whole secret.
+fn key_suffix(headers: &HeaderMap) -> String {
+    let raw = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let Some(raw) = raw else {
+        return "none".to_string();
+    };
+    let credential = match raw.split_once(char::is_whitespace) {
+        // "Bearer <cred>" (any scheme): the credential rides after.
+        Some((_, rest)) => rest.trim(),
+        // Raw credential, no scheme — except a bare scheme word,
+        // which carries no credential at all.
+        None if raw.eq_ignore_ascii_case("bearer") => return "none".to_string(),
+        None => raw,
+    };
+    if credential.is_empty() {
+        return "none".to_string();
+    }
+    let chars: Vec<char> = credential.chars().collect();
+    if chars.len() <= 4 {
+        return "***".to_string();
+    }
+    chars[chars.len() - 4..].iter().collect()
+}
+
+/// Failure detail for access logs: gateway-built error responses
+/// stash their code/message here so `track` can log the reason
+/// without re-reading the body. Upstream JSON pass-throughs stash
+/// the upstream message the same way.
+#[derive(Debug, Clone)]
+struct ErrorLog {
+    code: String,
+    message: String,
+}
+
+/// One access-log JSON line. The key suffix rides every line;
+/// `error_code`/`error_message` appear only when the response
+/// carried an [`ErrorLog`] (gateway-built and upstream errors —
+/// success lines stay lean).
+fn access_log_entry(
+    request_id: &str,
+    method: &str,
+    route: &str,
+    status: u16,
+    latency_ms: f64,
+    key: &str,
+    error: Option<&ErrorLog>,
+) -> String {
+    let mut entry = serde_json::json!({
+        "request_id": request_id,
+        "method": method,
+        "route": route,
+        "status": status,
+        "latency_ms": latency_ms,
+        "outcome": outcome(status),
+        "key": key,
+    });
+    if let Some(detail) = error {
+        entry["error_code"] = serde_json::Value::String(detail.code.clone());
+        entry["error_message"] = serde_json::Value::String(detail.message.clone());
+    }
+    entry.to_string()
+}
+
 fn spawn_log_writer() -> std::sync::mpsc::SyncSender<String> {
     let (tx, rx) = std::sync::mpsc::sync_channel::<String>(LOG_CHANNEL);
     std::thread::Builder::new()
@@ -1337,6 +1408,8 @@ async fn track(State(metrics): State<Arc<Metrics>>, request: Request, next: Next
         .and_then(|value| value.to_str().ok())
         .map(str::to_string)
         .unwrap_or_else(|| format!("{:x}", metrics.next_request_id()));
+    // Caller identity before the request moves into the handler.
+    let key = key_suffix(request.headers());
     // The header-latency guard drops at return; SSE bodies hold their
     // own in-flight slot until the stream ends (Iter 11, A04).
     let _in_flight = metrics.in_flight_guard();
@@ -1348,16 +1421,14 @@ async fn track(State(metrics): State<Arc<Metrics>>, request: Request, next: Next
     if let Ok(value) = request_id.parse() {
         response.headers_mut().insert("x-request-id", value);
     }
-    log_line(format!(
-        "{}",
-        serde_json::json!({
-            "request_id": request_id,
-            "method": method,
-            "route": route.label(),
-            "status": status,
-            "latency_ms": (latency.as_secs_f64() * 1000.0 * 1000.0).round() / 1000.0,
-            "outcome": outcome(status),
-        })
+    log_line(access_log_entry(
+        &request_id,
+        &method,
+        route.label(),
+        status,
+        (latency.as_secs_f64() * 1000.0 * 1000.0).round() / 1000.0,
+        &key,
+        response.extensions().get::<ErrorLog>(),
     ));
     response
 }
@@ -2455,6 +2526,7 @@ async fn fallback_proxy(State(state): State<AppState>, request: Request) -> Resp
             "fallback_proxy": true,
             "method": parts.method.to_string(),
             "path": redact_query(&path),
+            "key": key_suffix(&parts.headers),
         })
     ));
     if !state.allow_management_proxy && !is_proxy_allowed(&parts.method, &path) {
@@ -3096,10 +3168,9 @@ async fn upstream_error(
     // negotiated identity (seen live: gzipped 4xx). Decode so the
     // JSON detect and the snippet below read text, not binary.
     let bytes = decode_error_body(&raw);
-    if serde_json::from_slice::<serde_json::Value>(&bytes)
+    if let Some(error_body) = serde_json::from_slice::<serde_json::Value>(&bytes)
         .ok()
         .and_then(|json| json.get("error").cloned())
-        .is_some()
     {
         let mut response = Response::builder().status(status);
         for (name, value) in preserved.iter() {
@@ -3111,9 +3182,22 @@ async fn upstream_error(
             }
             response = response.header(name, value);
         }
-        return response
+        // Upstream's own message, capped: untrusted content must not
+        // bloat the log line. Message-less errors fall back to the
+        // raw snippet, like the rewritten branch below.
+        let message = error_body
+            .get("message")
+            .and_then(|message| message.as_str())
+            .map(|message| snippet(message.as_bytes()))
+            .unwrap_or_else(|| snippet(&bytes));
+        let mut response = response
             .body(Body::from(bytes))
             .unwrap_or_else(|_| bad_gateway());
+        response.extensions_mut().insert(ErrorLog {
+            code: "upstream_error".to_string(),
+            message: format!("upstream error (http {}): {message}", status.as_u16()),
+        });
+        return response;
     }
     let kind = if status.is_client_error() {
         "invalid_request_error"
@@ -3277,7 +3361,13 @@ fn service_unavailable() -> Response {
 }
 
 fn error_response(status: StatusCode, kind: &str, code: &str, message: String) -> Response {
-    (
+    // One clone on the error path only: the access log reads this,
+    // never the body.
+    let detail = ErrorLog {
+        code: code.to_string(),
+        message: message.clone(),
+    };
+    let mut response = (
         status,
         Json(serde_json::json!({
             "error": {
@@ -3287,7 +3377,9 @@ fn error_response(status: StatusCode, kind: &str, code: &str, message: String) -
             }
         })),
     )
-        .into_response()
+        .into_response();
+    response.extensions_mut().insert(detail);
+    response
 }
 
 #[cfg(test)]
@@ -3352,5 +3444,93 @@ mod tests {
         }
         assert!(!is_proxy_allowed(&Method::PUT, "/v1/embeddings"));
         assert!(!is_proxy_allowed(&Method::DELETE, "/api/v1/keys/x"));
+    }
+
+    /// Access logs identify the caller by key suffix only: last 4 of
+    /// the credential, never the secret itself.
+    #[test]
+    fn key_suffix_truncates_and_never_leaks() {
+        let headers = |value: Option<&str>| {
+            let mut headers = HeaderMap::new();
+            if let Some(value) = value {
+                headers.insert(
+                    axum::http::header::AUTHORIZATION,
+                    value.parse().unwrap(),
+                );
+            }
+            headers
+        };
+        assert_eq!(key_suffix(&headers(None)), "none");
+        assert_eq!(key_suffix(&headers(Some(""))), "none");
+        assert_eq!(key_suffix(&headers(Some("Bearer "))), "none");
+        assert_eq!(key_suffix(&headers(Some("Bearer"))), "none");
+        assert_eq!(
+            key_suffix(&headers(Some("Bearer sk-or-v1-abcdef123456"))),
+            "3456"
+        );
+        assert_eq!(key_suffix(&headers(Some("abcdef123456"))), "3456");
+        // Tiny credentials redact instead of leaking whole.
+        assert_eq!(key_suffix(&headers(Some("Bearer abc"))), "***");
+        assert_eq!(key_suffix(&headers(Some("abcd"))), "***");
+        // Non-UTF8 headers are unparseable, never logged raw.
+        let mut binary = HeaderMap::new();
+        binary.insert(
+            axum::http::header::AUTHORIZATION,
+            axum::http::HeaderValue::from_bytes(b"\xff\xfe").unwrap(),
+        );
+        assert_eq!(key_suffix(&binary), "none");
+    }
+
+    /// Gateway-built errors stash their code/message for the log line.
+    #[test]
+    fn error_responses_carry_log_detail() {
+        let response = error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            "budget_exceeded",
+            "no offering fits".to_string(),
+        );
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let detail = response
+            .extensions()
+            .get::<ErrorLog>()
+            .expect("error detail stashed");
+        assert_eq!(detail.code, "budget_exceeded");
+        assert_eq!(detail.message, "no offering fits");
+    }
+
+    /// Log-line shape: the key rides every line, error fields only on
+    /// failures. (Lines go to the shared stdout writer, so the shape
+    /// is pinned here rather than captured per request.)
+    #[test]
+    fn access_log_entry_marks_errors_only() {
+        let ok: serde_json::Value =
+            serde_json::from_str(&access_log_entry("r1", "GET", "other", 200, 1.5, "3456", None))
+                .unwrap();
+        assert_eq!(ok["key"], serde_json::json!("3456"));
+        assert_eq!(ok["status"], serde_json::json!(200));
+        assert!(ok.get("error_code").is_none());
+        assert!(ok.get("error_message").is_none());
+
+        let detail = ErrorLog {
+            code: "no_eligible_offering".to_string(),
+            message: "no batch offering is currently eligible".to_string(),
+        };
+        let err: serde_json::Value = serde_json::from_str(&access_log_entry(
+            "r2",
+            "POST",
+            "chat",
+            503,
+            2.5,
+            "none",
+            Some(&detail),
+        ))
+        .unwrap();
+        assert_eq!(err["error_code"], serde_json::json!("no_eligible_offering"));
+        assert_eq!(
+            err["error_message"],
+            serde_json::json!("no batch offering is currently eligible")
+        );
+        assert_eq!(err["outcome"], serde_json::json!("load_shed"));
     }
 }
