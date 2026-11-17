@@ -57,7 +57,7 @@ async fn spawn_batch_mock(seen: Arc<Mutex<Seen>>) -> SocketAddr {
             }),
         )
         .route(
-            "/api/v1/batches/:id",
+            "/api/v1/batches/{id}",
             get(move |headers: HeaderMap, Path(id): Path<String>| {
                 let seen = seen_get.clone();
                 async move {
