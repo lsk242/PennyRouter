@@ -751,4 +751,20 @@ only when pulled forward deliberately.
   `score` ordering is omitted when the catalog was never processed.
   Proposal: `docs/proposals/2026-11-12-catalog-ui-value-score.md`.
 
-## After Iter 34
+## Iter 35 — Catalog UI force re-sync (done)
+
+- Goal: let an operator force a catalog re-sync from the catalog UI
+  instead of waiting out the daily schedule.
+- Value: fresh data on demand (new models, price changes) with one
+  click; the gateway serves the new artifact within about a minute.
+- Shipped: `POST /resync` writes a `.resync-requested` dotfile into
+  the artifact dir and redirects to an overview banner; the sync
+  loop polls for it every 10s and starts the next cycle early (the
+  loop stays the single writer, the UI never touches the DB; the
+  dotfile matches no manifest scan). Catalog-ui mounts turned
+  read-write for the trigger; one-shot mode unchanged.
+- Test: `resync_button_requests_a_sync_cycle` (button, 303, trigger
+  file, confirmation + pending banners); entrypoint probed live in
+  one-shot, early-trigger, and short-interval modes.
+
+## After Iter 35

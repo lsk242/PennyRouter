@@ -268,3 +268,8 @@ cheap judge model, classifier-based routing.
       popularity) + ranking `score` ordering + UI overview/tabs;
       full workspace green (39 suites), clippy/fmt clean.
       Proposal: `docs/proposals/2026-11-12-catalog-ui-value-score.md`.
+- [x] **Iter 35 — Catalog UI force re-sync.** Overview `Force re-sync`
+      button (`POST /resync`) drops a `.resync-requested` trigger the
+      sync loop polls every 10s and starts the next cycle early; the
+      loop stays the single writer. Test: `resync_button_…` UI test +
+      live entrypoint probes (one-shot/early/short-interval).

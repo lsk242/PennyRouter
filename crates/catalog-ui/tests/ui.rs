@@ -302,6 +302,21 @@ fn get(server: &Server, path: &str) -> String {
     body
 }
 
+fn post(server: &Server, path: &str) -> String {
+    let mut stream = TcpStream::connect(&server.addr).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    write!(
+        stream,
+        "POST {path} HTTP/1.1\r\nhost: x\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+    )
+    .unwrap();
+    let mut body = String::new();
+    stream.read_to_string(&mut body).unwrap();
+    body
+}
+
 impl Drop for Server {
     fn drop(&mut self) {
         let _ = self.child.kill();
@@ -520,5 +535,52 @@ fn overview_explains_the_score_and_models_tabs_split_free_from_tiers() {
     assert!(
         tiers.contains("no score: no price"),
         "unpriced offering explains why it has no score"
+    );
+}
+
+/// Iter 35: the overview carries a force re-sync button; pressing it
+/// drops a trigger file the sync loop picks up on its next poll.
+#[test]
+fn resync_button_requests_a_sync_cycle() {
+    let out = artifact_dir("resync");
+    let log = out.join("pipe.log");
+    std::fs::write(&log, "").unwrap();
+    let server = spawn(&out, &log);
+
+    let index = get(&server, "/");
+    assert!(index.contains("200 OK"), "got: {index}");
+    assert!(
+        index.contains("action=\"/resync\""),
+        "overview carries the re-sync form, got: {index}"
+    );
+    assert!(
+        index.contains("Force re-sync"),
+        "button is labeled, got: {index}"
+    );
+    assert!(
+        !index.contains("Re-sync pending"),
+        "no pending banner before any request, got: {index}"
+    );
+
+    let posted = post(&server, "/resync");
+    assert!(posted.contains("303"), "redirects back, got: {posted}");
+    assert!(
+        posted.to_lowercase().contains("location: /?resync=requested"),
+        "redirects to the overview banner, got: {posted}"
+    );
+    assert!(
+        out.join(".resync-requested").is_file(),
+        "trigger file lands in the artifact dir"
+    );
+
+    let confirmed = get(&server, "/?resync=requested");
+    assert!(
+        confirmed.contains("Re-sync requested"),
+        "confirmation banner shown, got: {confirmed}"
+    );
+    let overview = get(&server, "/");
+    assert!(
+        overview.contains("Re-sync pending"),
+        "pending banner while the trigger waits, got: {overview}"
     );
 }

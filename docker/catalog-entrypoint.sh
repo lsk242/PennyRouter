@@ -1,11 +1,15 @@
 #!/bin/sh
 # One sync+process+rank cycle into $OUT_DIR, then sleep-loop when
 # SYNC_INTERVAL > 0. Input defaults suit the compose mount layout.
+# Between cycles the loop polls TRIGGER_FILE in short slices, so the
+# catalog-ui force re-sync button (POST /resync) starts the next cycle
+# early instead of waiting out the full interval.
 set -eu
 : "${MODELS:=/input/models.json}"
 : "${ENDPOINTS_DIR:=/input/endpoints}"
 : "${OUT_DIR:=/catalog}"
 : "${SYNC_INTERVAL:=0}"
+: "${TRIGGER_FILE:=$OUT_DIR/.resync-requested}"
 : "${TRENDS:=/input/trends.json}"
 : "${ASSIST:=/input/rank-assist.json}"
 : "${PROMOS:=/input/promos.json}"
@@ -25,5 +29,18 @@ while true; do
   if [ "$SYNC_INTERVAL" -le 0 ]; then
     break
   fi
-  sleep "$SYNC_INTERVAL"
+  remaining=$SYNC_INTERVAL
+  while [ "$remaining" -gt 0 ]; do
+    if [ -f "$TRIGGER_FILE" ]; then
+      rm -f "$TRIGGER_FILE"
+      echo "re-sync requested, starting early"
+      break
+    fi
+    slice=10
+    if [ "$remaining" -lt "$slice" ]; then
+      slice=$remaining
+    fi
+    sleep "$slice"
+    remaining=$((remaining - slice))
+  done
 done

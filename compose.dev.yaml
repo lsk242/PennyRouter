@@ -48,10 +48,12 @@ services:
       MODAL_SCORE_URL: ${MODAL_SCORE_URL:-}
       RANKINGS_API_KEY: ${RANKINGS_API_KEY:-}
     restart: unless-stopped
-  # Read-only artifact browser: no published ports — it joins the
+  # Artifact browser: no published ports — it joins the
   # front-proxy network so Nginx Proxy Manager reaches it at
   # catalog-ui:8080. Create that proxy host in the NPM UI (port 81),
-  # plus one for the gateway at gateway:8080.
+  # plus one for the gateway at gateway:8080. Read-write mount for the
+  # force re-sync trigger file only (POST /resync writes
+  # .resync-requested; the UI never touches the DB).
   catalog-ui:
     image: ${CATALOG_IMAGE:-ghcr.io/lsk242/pennyrouter-catalog:latest}
     container_name: catalog-ui
@@ -59,7 +61,7 @@ services:
     expose:
       - "8080"
     volumes:
-      - catalog-data:/catalog:ro
+      - catalog-data:/catalog
     environment:
       CATALOG_UI: "1"
       PORT: "8080"

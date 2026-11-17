@@ -4,14 +4,20 @@
 //! catalog DB (models, endpoints, rebuild/audit meta), the ranking
 //! document, and — when `--log-file` points at pipeline output — the
 //! execution log tail. Everything is read from disk per request;
-//! nothing is cached and nothing is written, so the UI can never
-//! disturb a running sync.
+//! nothing is cached, and the only write is the `.resync-requested`
+//! trigger file behind the force re-sync button, which the sync
+//! loop picks up on its next poll — the UI never touches the DB.
 //!
 //! Off unless explicitly enabled: `CATALOG_UI=1` is required, the
 //! binary exits otherwise. No auth — binds localhost unless `--bind`
 //! says otherwise; firewall any wider bind.
 
-use axum::{extract::State, response::Html, routing::get, Router};
+use axum::{
+    extract::State,
+    response::{Html, Redirect},
+    routing::{get, post},
+    Router,
+};
 use pennyrouter_catalog::{
     balanced_profile, compare_rank, effective_cost, load_ranking_doc, precision_factor, verify,
     verify_ranking, Catalog, EndpointRank, EndpointRow, EndpointSpeed, ModelSignals, RankKey,
@@ -115,6 +121,17 @@ fn shell(title: &str, nav: &str, body: String) -> String {
 fn nav() -> &'static str {
     "<a href=\"/\">overview</a><a href=\"/models\">models</a>\
     <a href=\"/ranking\">ranking</a><a href=\"/meta\">meta</a><a href=\"/log\">log</a>"
+}
+
+/// Re-sync trigger (Iter 35): `POST /resync` writes this dotfile into
+/// the artifact dir, and the sync loop (`docker/catalog-entrypoint.sh`)
+/// polls for it between scheduled cycles. A dotfile, so it never
+/// matches the `catalog-*.manifest.json` / `ranking-*.manifest.json`
+/// scans on either side.
+const TRIGGER_FILE: &str = ".resync-requested";
+
+fn trigger_path(dir: &Path) -> PathBuf {
+    dir.join(TRIGGER_FILE)
 }
 
 fn read_json(path: &Path) -> Option<serde_json::Value> {
@@ -400,7 +417,10 @@ fn formula_html() -> String {
     )
 }
 
-async fn index(State(state): State<Arc<UiState>>) -> Html<String> {
+async fn index(
+    State(state): State<Arc<UiState>>,
+    query: axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Html<String> {
     let Some(current) = current_db(&state.dir) else {
         return Html(shell(
             "overview",
@@ -514,6 +534,19 @@ async fn index(State(state): State<Arc<UiState>>) -> Html<String> {
             .unwrap_or_else(|| "(none — pass --log-file)".to_string()),
     );
 
+    let confirmed = query.get("resync").is_some_and(|v| v == "requested");
+    if confirmed {
+        body.push_str(
+            "<p><strong>Re-sync requested</strong> — the sync loop picks it up \
+            within ~10 seconds; the new run appears below when the cycle finishes.</p>",
+        );
+    } else if trigger_path(&state.dir).is_file() {
+        body.push_str(
+            "<p><strong>Re-sync pending</strong> — a request is waiting for the \
+            sync loop; the new run appears below when the cycle finishes.</p>",
+        );
+    }
+
     body.push_str(&format!(
         "<h2>Coverage</h2><table>\
         <tr><th>metric</th><th>count</th><th>share</th></tr>\
@@ -606,6 +639,15 @@ async fn index(State(state): State<Arc<UiState>>) -> Html<String> {
         )),
         None => body.push_str("<p>No scored offering to show an example from.</p>"),
     }
+
+    body.push_str(
+        "<h2>Re-sync</h2>\
+        <form method=\"post\" action=\"/resync\">\
+        <button type=\"submit\">Force re-sync</button></form>\
+        <p class=\"muted\">Runs a full sync + process + rank cycle now instead of \
+        waiting for the next scheduled run; the gateway picks the new artifact \
+        up within about a minute.</p>",
+    );
 
     body.push_str(
         "<h2>Runs (newest first)</h2>\
@@ -910,6 +952,32 @@ async fn meta(State(state): State<Arc<UiState>>) -> Html<String> {
     Html(shell("meta", nav(), body))
 }
 
+/// Force a re-sync (Iter 35): drop the trigger file and bounce back
+/// to the overview banner. The sync loop stays the single writer —
+/// the UI only asks. An unwritable artifact dir (pre-Iter-35 `:ro`
+/// compose mounts) answers 500 naming the fix.
+async fn resync(
+    State(state): State<Arc<UiState>>,
+) -> Result<Redirect, (axum::http::StatusCode, Html<String>)> {
+    if let Err(e) = std::fs::write(trigger_path(&state.dir), "requested\n") {
+        return Err((
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Html(shell(
+                "resync",
+                nav(),
+                format!(
+                    "<p>Could not request a re-sync: {}</p>\
+                    <p class=\"muted\">The artifact dir is not writable — redeploy \
+                    so the catalog-ui service mounts it read-write.</p>\
+                    <p><a href=\"/\">back to overview</a></p>",
+                    esc(&e.to_string())
+                ),
+            )),
+        ));
+    }
+    Ok(Redirect::to("/?resync=requested"))
+}
+
 async fn log(State(state): State<Arc<UiState>>) -> Html<String> {
     let mut body = String::from("<h2>Execution log</h2>");
     match &state.log_file {
@@ -996,6 +1064,7 @@ fn run() -> Result<(), String> {
         .route("/ranking", get(ranking))
         .route("/meta", get(meta))
         .route("/log", get(log))
+        .route("/resync", post(resync))
         .with_state(state);
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()

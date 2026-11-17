@@ -272,8 +272,13 @@ code runs when they are off.
   newest-first with verify status), models, endpoints (with score
   provenance), ranking order, rebuild/audit meta, and the last 200
   lines of the log file when given. The binary refuses to start
-  without the flag. Nothing is cached or written, so it can run
-  against the live artifact dir safely. Bind is localhost-only by
+  without the flag. Nothing is cached, and the only write is the
+  `.resync-requested` trigger behind the overview's Force re-sync
+  button (`POST /resync`): the sync loop polls for it every 10s
+  between scheduled cycles and starts the next cycle early, so the
+  UI never touches the DB and the loop stays the single writer. A
+  stale read-only mount answers 500 naming the fix. Bind is
+  localhost-only by
   default; pass `--bind 0.0.0.0` only behind a firewall or reverse
   proxy. In Docker the `catalog-ui` compose service (profile `ui`,
   off by default) serves the shared volume:
