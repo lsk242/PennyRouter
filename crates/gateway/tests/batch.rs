@@ -5,6 +5,7 @@
 
 use axum::{
     body::Bytes,
+    extract::Path,
     http::{HeaderMap, StatusCode},
     routing::{get, post},
     Router,
@@ -14,8 +15,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-const BATCH_SUBMIT_REQUEST: &str =
-    r#"{"input_file_id":"file-abc123","endpoint":"/v1/chat/completions","completion_window":"24h","metadata":{"description":"test batch"}}"#;
+const BATCH_SUBMIT_REQUEST: &str = r#"{"input_file_id":"file-abc123","endpoint":"/v1/chat/completions","completion_window":"24h","metadata":{"description":"test batch"}}"#;
 const API_KEY: &str = "Bearer «redacted:sk-…»";
 
 const BATCH_SUBMIT_RESPONSE: &[u8] = br#"{"id":"batch_abc123","object":"batch","endpoint":"/v1/chat/completions","status":"validating","input_file_id":"file-abc123","completion_window":"24h","created_at":1699999999,"metadata":{"description":"test batch"}}"#;
@@ -56,7 +56,7 @@ async fn spawn_batch_mock(seen: Arc<Mutex<Seen>>) -> SocketAddr {
         )
         .route(
             "/api/v1/batches/:id",
-            get(move |headers: HeaderMap, axum::extract::Path(id): axum::extract::Path<String>| {
+            get(move |headers: HeaderMap, Path(id): Path<String>| {
                 let seen = seen.clone();
                 async move {
                     *seen.lock().unwrap() = Seen {
