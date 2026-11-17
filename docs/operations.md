@@ -252,7 +252,7 @@ code runs when they are off.
   on localhost, or behind firewall + TLS with source CIDRs (the
   Terraform stage does this). There is no shared-secret gate; do not
   invent one per deploy.
-- Inspector (Iter 29): `/ui` shows ten fixed non-smart virtual combos
+- Inspector (Iter 29): `/ui` shows twelve fixed non-smart virtual combos
   top-3 plus a custom-model box. Paste the exact `Authorization`
   header value; the page sends it as the `Authorization` header to
   `GET /ui/preview?model=<id>&top=N`, which hashes it with the same
@@ -269,8 +269,9 @@ code runs when they are off.
 - Catalog: `CATALOG_UI=1 catalog-ui --dir <artifact-dir>
   [--port 8080] [--bind 127.0.0.1] [--log-file <path>]` serves a
   browser over the published artifacts: run history (manifests
-  newest-first with verify status), models, endpoints (with score
-  provenance), ranking order, rebuild/audit meta, and the last 200
+  newest-first with verify status), models (free/tiers/batch/decision
+  tabs with per-row score breakdowns), endpoints (with score
+  provenance), rebuild/audit meta, and the last 200
   lines of the log file when given. The binary refuses to start
   without the flag. Nothing is cached, and the only write is the
   `.resync-requested` trigger behind the overview's Force re-sync

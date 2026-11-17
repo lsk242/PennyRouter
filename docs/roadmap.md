@@ -283,7 +283,7 @@ Development delivers Docker images, platform delivers deployments.
 ## Iter 13 — Virtual model catalog, free-first (done)
 
 - Goal: serve the curated virtual-model menu and nothing else (six
-  at the time; fourteen curated ids + pinned-model/fallback forms
+  at the time; sixteen curated ids + pinned-model/fallback forms
   today). Ids carry the provider first so future providers slot in
   (today only OpenRouter, BYOK key forwarded as now):
   `openrouter/pair/free`, `openrouter/pair/low`,
@@ -535,7 +535,7 @@ Development delivers Docker images, platform delivers deployments.
   so mocks and Ollama bases keep working); non-GET key, coinbase,
   and workspace-budget paths answer 403 `management_proxy_disabled`
   unless `ALLOW_MANAGEMENT_PROXY=1`. `GET /api/v1/models` proxies the
-  full upstream catalog (the curated fourteen-id menu stays on
+  full upstream catalog (the curated sixteen-id menu stays on
   `GET /v1/models`).
 - Test: `crates/gateway/tests/openrouter_native.rs` (alias rewrite,
   root composition with and without the `/api` suffix, upstream
@@ -605,7 +605,7 @@ Development delivers Docker images, platform delivers deployments.
   leg); `GET /ui/preview?model=<id>&top=N` JSON behind `GATEWAY_UI=1`
   (key as `Authorization`, never logged/stored, never pins; missing
   model 400, no router 503, disabled falls through); `/ui` inspector
-  (key box with hash, ten fixed non-smart virtual ids top-3
+  (key box with hash, twelve fixed non-smart virtual ids top-3
   server-rendered anonymous plus keyed refresh, custom-model box
   with sticky/fresh panel and full column tables).
 - Test: `crates/gateway/tests/ui.rs` preview suite (low top-1 matches

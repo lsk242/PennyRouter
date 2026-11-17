@@ -932,3 +932,47 @@ async fn ui_page_contains_inspector() {
         "plain-request caveat shown"
     );
 }
+
+#[tokio::test]
+async fn favicon_serves_the_shared_penny_svg() {
+    let _guard = lock_env().await;
+    std::env::remove_var("GATEWAY_UI");
+    let (mock, _) = spawn_mock().await;
+    let state = pennyrouter_gateway::AppState::new(format!("http://{mock}"));
+    let app = pennyrouter_gateway::app_with_state(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let gw = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let icon = client()
+        .get(format!("http://{gw}/favicon.ico"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(icon.status(), axum::http::StatusCode::OK);
+    assert!(
+        icon.headers()["content-type"]
+            .to_str()
+            .unwrap()
+            .contains("image/svg+xml"),
+        "svg content type"
+    );
+    assert_eq!(
+        icon.text().await.unwrap(),
+        pennyrouter_catalog::FAVICON_SVG,
+        "identical bytes to the catalog-ui icon"
+    );
+
+    let landing = client()
+        .get(format!("http://{gw}/"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        landing.contains(r#"<link rel="icon" href="/favicon.ico""#),
+        "landing links the icon"
+    );
+}

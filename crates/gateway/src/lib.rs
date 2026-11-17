@@ -649,6 +649,7 @@ pub fn app_with_state(state: AppState) -> Router {
     let metrics = state.metrics.clone();
     let router = Router::new()
         .route("/", get(landing))
+        .route("/favicon.ico", get(favicon))
         .route("/health", get(health))
         .route("/ready", get(ready))
         .route("/metrics", get(metrics_handler))
@@ -695,6 +696,17 @@ pub fn app_with_state(state: AppState) -> Router {
 /// everything else is fixed markup. Always registered — it answers
 /// only its own path, so API traffic is unaffected.
 const LANDING_TEMPLATE: &str = include_str!("../templates/landing.html");
+
+/// Brand mark (shared penny SVG): served locally so browser icon
+/// fetches never fall through to the upstream proxy. SVG bytes under
+/// the classic path — browsers honor the content type.
+async fn favicon() -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        [(CONTENT_TYPE, "image/svg+xml")],
+        pennyrouter_catalog::FAVICON_SVG,
+    )
+}
 
 async fn landing(State(state): State<AppState>) -> Response {
     fn esc(text: &str) -> String {
@@ -1175,9 +1187,10 @@ async fn ui_page(State(state): State<AppState>) -> Response {
         var ids=[];var els=document.querySelectorAll('[id^=\"fixed-\"][id$=\"-rows\"]');\
         for(var k=0;k<els.length;k++){ids.push(k);}\
         var models=['openrouter/pair/free','openrouter/pair/low','openrouter/pair/think',\
-        'openrouter/pair/decision','openrouter/pair/decision/free','openrouter/pair/privacy/free',\
+        'openrouter/pair/decision','openrouter/pair/decision/free','openrouter/pair/batch',\
+        'openrouter/pair/privacy/free',\
         'openrouter/pair/privacy/low','openrouter/pair/privacy/think','openrouter/pair/privacy/decision',\
-        'openrouter/pair/privacy/decision/free'];\
+        'openrouter/pair/privacy/decision/free','openrouter/pair/privacy/batch'];\
         for(var i=0;i<models.length;i++){\
         try{var data=await insFetch(models[i],3);\
         var rows=document.getElementById('fixed-'+i+'-rows');\

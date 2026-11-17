@@ -211,7 +211,7 @@ fn mock_app(
 }
 
 #[tokio::test]
-async fn models_menu_lists_exactly_the_fourteen_virtual_ids() {
+async fn models_menu_lists_exactly_the_sixteen_virtual_ids() {
     let db = scratch_db("menu");
     build_db(&db);
     let mock = spawn_mock(mock_app(
@@ -240,10 +240,12 @@ async fn models_menu_lists_exactly_the_fourteen_virtual_ids() {
     assert_eq!(
         ids,
         [
+            "openrouter/pair/batch",
             "openrouter/pair/decision",
             "openrouter/pair/decision/free",
             "openrouter/pair/free",
             "openrouter/pair/low",
+            "openrouter/pair/privacy/batch",
             "openrouter/pair/privacy/decision",
             "openrouter/pair/privacy/decision/free",
             "openrouter/pair/privacy/free",
@@ -709,18 +711,22 @@ async fn free_fallback_serves_paid_after_free_429() {
 
 /// I10(d): the fallback dispatch serves every tier target, not just
 /// `low` — think (best quality), lowest (cheapest paid), decision
-/// (decisions-capable only).
+/// (decisions-capable only), batch (`:batch` variants only).
 #[tokio::test]
 async fn free_fallback_serves_each_tier_target() {
     let db = scratch_db("free-fallback-tiers");
     build_db(&db);
-    // Decisions-capable paid offering for the `decision` target.
-    {
+    // Decisions-capable paid offering for the `decision` target, plus
+    // a batch-variant offering for the `batch` target.
+    for (model, provider, decisions) in [
+        ("m/score", "Decider", Some(1)),
+        ("m/deferred:batch", "Batcher", None),
+    ] {
         let catalog = Catalog::open(&db).unwrap();
         catalog
             .insert_model(&ModelRow {
-                model_id: "m/score".to_string(),
-                name: "m/score".to_string(),
+                model_id: model.to_string(),
+                name: model.to_string(),
                 source: "test".to_string(),
                 payload: "{}".to_string(),
                 fetched_at: "t".to_string(),
@@ -729,8 +735,8 @@ async fn free_fallback_serves_each_tier_target() {
         catalog
             .insert_endpoint(&EndpointRow {
                 id: 0,
-                model_id: "m/score".to_string(),
-                provider_name: "Decider".to_string(),
+                model_id: model.to_string(),
+                provider_name: provider.to_string(),
                 payload: "{}".to_string(),
                 fetched_at: "t".to_string(),
                 price_prompt: None,
@@ -751,7 +757,7 @@ async fn free_fallback_serves_each_tier_target() {
                 price_override_tokens: None,
             })
             .unwrap();
-        let id = catalog.endpoints_for("m/score").unwrap()[0].id;
+        let id = catalog.endpoints_for(model).unwrap()[0].id;
         catalog
             .update_endpoint_index(
                 id,
@@ -765,7 +771,7 @@ async fn free_fallback_serves_each_tier_target() {
                     promo_discount: None,
                     processed_at: "t".to_string(),
                     supports_tools: None,
-                    supports_decisions: Some(1),
+                    supports_decisions: decisions,
                     price_override_tokens: None,
                 },
             )
@@ -793,6 +799,7 @@ async fn free_fallback_serves_each_tier_target() {
         ("think", "Dear", "m/dear"),
         ("lowest", "Cheap", "m/cheap"),
         ("decision", "Decider", "m/score"),
+        ("batch", "Batcher", "m/deferred:batch"),
     ] {
         let res = post_chat(gw, &format!("openrouter/pair/free/fallback/{target}")).await;
         assert_eq!(res.status(), StatusCode::OK, "target {target}");
@@ -809,10 +816,11 @@ async fn free_fallback_serves_each_tier_target() {
         );
     }
     let guard = seen.lock().unwrap();
-    assert_eq!(guard.hits.get("Freebie"), Some(&3));
+    assert_eq!(guard.hits.get("Freebie"), Some(&4));
     assert_eq!(guard.hits.get("Dear"), Some(&1));
     assert_eq!(guard.hits.get("Cheap"), Some(&1));
     assert_eq!(guard.hits.get("Decider"), Some(&1));
+    assert_eq!(guard.hits.get("Batcher"), Some(&1));
 }
 
 /// B04 probe: when the free attempt AND its retry both 429, the
@@ -1362,6 +1370,8 @@ async fn menu_lists_virtual_popular_and_configured_providers() {
         "openrouter/pair/privacy/decision",
         "openrouter/pair/decision/free",
         "openrouter/pair/privacy/decision/free",
+        "openrouter/pair/batch",
+        "openrouter/pair/privacy/batch",
         "openrouter/pair/smart",
         "openrouter/pair/privacy/smart",
         "openrouter/pair/smart/max",

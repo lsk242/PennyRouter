@@ -33,8 +33,8 @@ to whatever paid offering costs least catalog-wide, with no quality
 floor — the fallback when free turns run out.
 `openrouter/pair/free/fallback/<tier>` (Iter 21) chains them: serves
 free while any free offering is eligible, else exactly one pick from
-the named tier (`low`, `think`, `lowest`, `decision` — resolved
-through the shared tier dispatch, so future tiers plug in
+the named tier (`low`, `think`, `lowest`, `decision`, `batch` —
+resolved through the shared tier dispatch, so future tiers plug in
 automatically). Unknown tier names fail closed with
 `no_eligible_offering` at request time (parse accepts any non-empty
 target; the dispatch rejects unknown names); auth/config errors
@@ -83,7 +83,7 @@ session.
   and first recognized orientation wins (`price/lowest` stays
   same-model).
 - Free-fallback chains (Iter 21): `openrouter/pair/free/fallback/<tier>`
-  (`low` | `think` | `lowest` | `decision`). Free leg first with existing free
+  (`low` | `think` | `lowest` | `decision` | `batch`). Free leg first with existing free
   semantics; on free exhaustion (`no_eligible_offering`) or upstream
   429/502/503/504 after the single virtual retry, one fallback pick
   that skips the just-failed provider. Session pins under the full
@@ -149,6 +149,17 @@ session.
   tier only sees what the catalog synced: the models list omits
   non-text-output models, so `EXTRA_MODEL_IDS` (comma-separated,
   catalog-sync env) nominates such ids for individual fetching.
+- Batch tier: `openrouter/pair/[privacy/]batch` routes to the cheapest
+  `:batch`-variant offering (OpenRouter's async batch API pricing,
+  model ids ending in `:batch`). Paid-only keeps tier disjointness
+  (zero-cost serves `free` only); no quality floor and no
+  precision-class requirement — the suffix is the capability match,
+  like `decision`. Same tool/budget/throttle/stickiness semantics as
+  the other cross-model tiers, same chat path (the body is rewritten
+  to the batch backend id and pinned like any virtual route), and a
+  valid `/fallback/` target. Async processing is a caller-level
+  latency tradeoff, so `batch` stays out of the smart classifier's
+  tier domain.
 - Decisions route (Iter 27): `POST /v1/decisions` dispatches through
   the same virtual ids (`decision`, `decision/free`,
   `decision/free/fallback/decision`) but rewrites the model only —
@@ -173,8 +184,8 @@ session.
   other virtual routes. An unknown model id fails closed with
   `no_eligible_offering` (503) rather than leaking the virtual name.
 - AA coding-index floor (Iter 33): an optional `/minindex/<0..=100>`
-  suffix on any virtual id (`low`, `think`, `decision`, `free`,
-  `model/<id>`, `smart`) keeps only models whose catalog
+  suffix on any virtual id (`low`, `think`, `decision`, `batch`,
+  `free`, `model/<id>`, `smart`) keeps only models whose catalog
   `aa_coding_index` is at or above the floor. It sits after the core
   id and before `/fallback/`:
   `openrouter/pair/privacy/think/minindex/40/fallback/low`. The floor
@@ -257,7 +268,7 @@ stores a pin. Throttled pins fall through exactly like the request
 path; fallback ids preview the leg that would serve; smart ids
 preview as `smart_requires_classifier` because their tier comes
 from the live classifier leg, not the local index. The `/ui` page
-renders the ten fixed non-smart virtual combos top-3 plus a custom
+renders the twelve fixed non-smart virtual combos top-3 plus a custom
 model box on top of this endpoint. Plain-request view: tools, budget,
 and only/ignore constraints are not applied, so a capped request can
 fail closed where the preview shows a pick.

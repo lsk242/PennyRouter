@@ -187,29 +187,34 @@ pub const FREE_MODEL: &str = "openrouter/free";
 /// Virtual tiers (Iter 13): `free` = zero-cost offering, `low` =
 /// cheapest basic offering, `think` = best-quality offering,
 /// `decision` (Iter 24) = cheapest decisions-capable offering
-/// (behavior-scoring models). Tiers compare by the documented price
-/// metric (blended input/output/cache effective cost) with
-/// eligibility before price; FP resolution is a separate class,
-/// never a silent substitute.
+/// (behavior-scoring models), `batch` = cheapest `:batch`-variant
+/// offering (async batch API pricing). Tiers compare by the
+/// documented price metric (blended input/output/cache effective
+/// cost) with eligibility before price; FP resolution is a separate
+/// class, never a silent substitute.
 ///
 /// `smart` (Iter 26) is not a tier but a classifier mode: the gateway
 /// calls a decision model to pick one of `free`/`lowest`/`low`
 /// (`smart/max` additionally allows `think`), then dispatches through
-/// the normal tier path with no session pinning.
+/// the normal tier path with no session pinning. Batch stays out of
+/// the classifier's domain: async processing is a caller-level
+/// latency tradeoff, never a per-request guess.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VirtualTier {
     Free,
     Low,
     Think,
     Decision,
+    Batch,
     Smart,
     SmartMax,
 }
 
 /// A virtual model id: `<provider>/pair/[privacy/]<free|low|think|\
-/// decision|smart|smart/max>` with an optional `/free` cost scope on
-/// `decision`, plus the fallback form `<provider>/pair/[privacy/]\
-/// <free|decision/free>/fallback/<tier>` (Iter 21). The provider
+/// decision|batch|smart|smart/max>` with an optional `/free` cost
+/// scope on `decision`, plus the fallback form
+/// `<provider>/pair/[privacy/]<free|decision/free>/fallback/<tier>`
+/// (Iter 21). The provider
 /// segment is first so future providers slot in; only OpenRouter
 /// exists today. Smart ids never take a `/fallback/` suffix (see
 /// [`is_smart_fallback`]): the classifier replaces the chain. Iter 28
@@ -326,6 +331,7 @@ fn parse_virtual_checked(model_field: &str) -> Result<VirtualModel, VirtualParse
         "low" if fallback.is_none() => (VirtualTier::Low, false),
         "think" if fallback.is_none() => (VirtualTier::Think, false),
         "decision" if fallback.is_none() => (VirtualTier::Decision, false),
+        "batch" if fallback.is_none() => (VirtualTier::Batch, false),
         "smart" if fallback.is_none() => (VirtualTier::Smart, false),
         "smart/max" if fallback.is_none() => (VirtualTier::SmartMax, false),
         _ => return Err(VirtualParseError::NotVirtual),
@@ -359,12 +365,13 @@ pub fn invalid_virtual(model_field: &str) -> Option<String> {
 }
 
 /// Canonical virtual ids served by `GET /v1/models` (Iter 13; decision
-/// ids from Iter 24; smart ids from Iter 26). The menu is static: smart
-/// ids list even when no classifier is configured, in which case they
-/// fail closed with `classifier_not_configured` instead of serving.
-/// Ordered small-first: each tier's pair (base, then privacy) before
-/// the next tier up.
-pub const VIRTUAL_MODELS: [&str; 14] = [
+/// ids from Iter 24; smart ids from Iter 26; batch ids for the async
+/// batch API). The menu is static: smart ids list even when no
+/// classifier is configured, in which case they fail closed with
+/// `classifier_not_configured` instead of serving. Ordered
+/// small-first: each tier's pair (base, then privacy) before the
+/// next tier up.
+pub const VIRTUAL_MODELS: [&str; 16] = [
     "openrouter/pair/free",
     "openrouter/pair/privacy/free",
     "openrouter/pair/low",
@@ -375,6 +382,8 @@ pub const VIRTUAL_MODELS: [&str; 14] = [
     "openrouter/pair/privacy/decision",
     "openrouter/pair/decision/free",
     "openrouter/pair/privacy/decision/free",
+    "openrouter/pair/batch",
+    "openrouter/pair/privacy/batch",
     "openrouter/pair/smart",
     "openrouter/pair/privacy/smart",
     "openrouter/pair/smart/max",
@@ -557,6 +566,14 @@ fn free_eligible(
         })
 }
 
+/// Batch-variant model id (OpenRouter `:batch` suffix): the async
+/// batch API's discounted pricing. The `batch` tier matches only
+/// these, the way the `decision` tier matches only
+/// decisions-capable offerings.
+fn is_batch_model(model_id: &str) -> bool {
+    model_id.ends_with(":batch")
+}
+
 /// Minimum AA coding index gate (Iter 33): `None` admits every model;
 /// otherwise the model must carry a known index at or above the floor.
 /// Null or absent indexes are excluded — an unknown score cannot be
@@ -582,6 +599,7 @@ pub fn tier_label(model_field: &str) -> &'static str {
         Some(VirtualTier::Low) => "low",
         Some(VirtualTier::Think) => "think",
         Some(VirtualTier::Decision) => "decision",
+        Some(VirtualTier::Batch) => "batch",
         Some(VirtualTier::Smart | VirtualTier::SmartMax) => "smart",
         None => "none",
     }
@@ -1340,6 +1358,13 @@ impl Router {
                 false,
                 minindex,
             ),
+            "batch" => self.decide_batch(
+                snapshot,
+                authorization,
+                constraints,
+                model_field,
+                minindex,
+            ),
             _ => Err(RouteRejection {
                 code: "no_eligible_offering",
                 message: format!("unknown fallback tier {tier:?}"),
@@ -1522,6 +1547,15 @@ impl Router {
                     ),
                 }
             }
+            // Batch ids take no `/fallback/` suffix (parse rejects
+            // it), so the pick passes through unchanged.
+            VirtualTier::Batch => self.decide_batch(
+                snapshot,
+                authorization,
+                constraints,
+                model_field,
+                virtual_model.minindex,
+            ),
             // Smart ids never route synchronously: the classifier leg
             // is async and lives in the handler (`lib.rs`). Reaching
             // here means the handler missed the intercept, so fail
@@ -1798,6 +1832,9 @@ impl Router {
             // (it has its own pick without a scored floor, like
             // `lowest`); the arm exists for exhaustiveness.
             VirtualTier::Decision => 0,
+            // Batch likewise has its own pick (cheapest `:batch`
+            // variant); the arm exists for exhaustiveness.
+            VirtualTier::Batch => 0,
             // Smart modes never reach the ordered path either (their
             // legs dispatch through `decide_tier` per classified tier).
             VirtualTier::Smart | VirtualTier::SmartMax => 0,
@@ -1825,6 +1862,7 @@ impl Router {
             VirtualTier::Think => "think",
             // Same note as `tier_floor`: unreachable via this path.
             VirtualTier::Decision => "decision",
+            VirtualTier::Batch => "batch",
             VirtualTier::Smart => "smart",
             VirtualTier::SmartMax => "smart/max",
         };
@@ -2193,6 +2231,131 @@ impl Router {
             .ok_or_else(|| RouteRejection {
                 code: "no_eligible_offering",
                 message: format!("no decisions-capable {scope}offering is currently eligible"),
+            })?;
+        if let Some(key) = key {
+            self.store_pin(
+                key,
+                Pin {
+                    provider: pick.provider_name.clone(),
+                    precision_class: pick.precision_class.clone(),
+                },
+            );
+        }
+        Ok(Decision {
+            model_id: pick.model_id.clone(),
+            provider: pick.provider_name.clone(),
+            tag: pick.tag.clone(),
+            precision_class: pick.precision_class.clone(),
+            quantization: pick.quantization.clone(),
+            orientation: Orientation::Default,
+            sticky: false,
+            minindex,
+        })
+    }
+
+    /// Cross-model pick for the `batch` tier: cheapest `:batch`
+    ///-variant offering (async batch API pricing), paid only — tiers
+    /// are disjoint by design, like `low`/`think`, so a zero-cost
+    /// batch variant (if one ever appears) serves the `free` tier.
+    /// Same shape as [`Router::decide_decision`]: no quality floor
+    /// and no precision-class requirement (the `:batch` suffix is
+    /// the capability match), with the same tool, budget,
+    /// throttle, stickiness, and deterministic tie-breaks as the
+    /// other cross-model picks.
+    fn decide_batch(
+        &self,
+        snapshot: &Snapshot,
+        authorization: Option<&str>,
+        constraints: &ProviderConstraints,
+        session_ns: &str,
+        minindex: Option<u8>,
+    ) -> Result<Decision, RouteRejection> {
+        let base: Vec<&Offering> = snapshot
+            .models
+            .values()
+            .flatten()
+            .filter(|o| {
+                constraints.allows(&o.provider_name)
+                    && is_batch_model(&o.model_id)
+                    && inline_cost(o).is_some_and(|cost| cost > 0.0)
+                    && meets_minindex(snapshot, &o.model_id, minindex)
+            })
+            .collect();
+        if base.is_empty() {
+            return Err(RouteRejection {
+                code: "no_eligible_offering",
+                message: minindex.map_or_else(
+                    || "no batch offering is currently eligible".to_string(),
+                    |floor| {
+                        format!(
+                            "no batch offering meets minindex {floor} \
+                             (or none is otherwise eligible)"
+                        )
+                    },
+                ),
+            });
+        }
+        let base: Vec<&Offering> = base
+            .into_iter()
+            .filter(|o| constraints.tool_allows(o))
+            .collect();
+        if base.is_empty() {
+            return Err(tools_unsupported());
+        }
+        let fitting: Vec<&Offering> = base
+            .into_iter()
+            .filter(|o| constraints.context_allows(o))
+            .collect();
+        if fitting.is_empty() {
+            return Err(context_exceeded("batch"));
+        }
+        let budgeted: Vec<&Offering> = fitting
+            .into_iter()
+            .filter(|o| constraints.budget_allows(o))
+            .collect();
+        if budgeted.is_empty() {
+            return Err(RouteRejection {
+                code: "budget_exceeded",
+                message: "no batch offering fits the price ceiling".to_string(),
+            });
+        }
+        let candidates = self.skip_throttled(budgeted);
+        let key = authorization.map(|auth| self.session_key(auth, session_ns));
+        if let Some(key) = &key {
+            if let Some(pin) = self.lookup_pin(key) {
+                // Same cheapest-first comparator as the fresh pick below.
+                if let Some(pick) = Self::pinned_pick(&candidates, &pin, |a, b| {
+                    inline_cost(a)
+                        .partial_cmp(&inline_cost(b))
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then_with(|| a.model_id.cmp(&b.model_id))
+                        .then_with(|| a.provider_name.cmp(&b.provider_name))
+                }) {
+                    return Ok(Decision {
+                        model_id: pick.model_id.clone(),
+                        provider: pick.provider_name.clone(),
+                        tag: pick.tag.clone(),
+                        precision_class: pick.precision_class.clone(),
+                        quantization: pick.quantization.clone(),
+                        orientation: Orientation::Default,
+                        sticky: true,
+                        minindex,
+                    });
+                }
+            }
+        }
+        let pick = candidates
+            .into_iter()
+            .min_by(|a, b| {
+                inline_cost(a)
+                    .partial_cmp(&inline_cost(b))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.model_id.cmp(&b.model_id))
+                    .then_with(|| a.provider_name.cmp(&b.provider_name))
+            })
+            .ok_or_else(|| RouteRejection {
+                code: "no_eligible_offering",
+                message: "no batch offering is currently eligible".to_string(),
             })?;
         if let Some(key) = key {
             self.store_pin(
@@ -2666,17 +2829,19 @@ impl Router {
 /// Fixed inspector ids (Iter 29): the non-smart virtual menu. Smart ids
 /// need a live classifier leg, so they preview as an explanatory
 /// rejection instead of a candidate list.
-pub const FIXED_PREVIEW_IDS: [&str; 10] = [
+pub const FIXED_PREVIEW_IDS: [&str; 12] = [
     "openrouter/pair/free",
     "openrouter/pair/low",
     "openrouter/pair/think",
     "openrouter/pair/decision",
     "openrouter/pair/decision/free",
+    "openrouter/pair/batch",
     "openrouter/pair/privacy/free",
     "openrouter/pair/privacy/low",
     "openrouter/pair/privacy/think",
     "openrouter/pair/privacy/decision",
     "openrouter/pair/privacy/decision/free",
+    "openrouter/pair/privacy/batch",
 ];
 
 /// One preview row: every stored column the router actually reads,
@@ -2922,6 +3087,18 @@ impl Router {
                         }
                     }
                 }
+                VirtualTier::Batch => {
+                    return self.preview_batch_list(
+                        &snapshot,
+                        ranking.as_ref(),
+                        model_field,
+                        authorization,
+                        &constraints,
+                        now,
+                        top,
+                        virtual_model.minindex,
+                    );
+                }
                 VirtualTier::Smart | VirtualTier::SmartMax => {
                     return Preview {
                         model_field: model_field.to_string(),
@@ -3080,6 +3257,16 @@ impl Router {
                 constraints,
                 now,
                 false,
+                top,
+                None,
+            ),
+            "batch" => self.preview_batch_list(
+                snapshot,
+                ranking,
+                model_field,
+                authorization,
+                constraints,
+                now,
                 top,
                 None,
             ),
@@ -3680,6 +3867,76 @@ impl Router {
             Some(RouteRejection {
                 code: "no_eligible_offering",
                 message: format!("no decisions-capable {scope}offering is currently eligible"),
+            }),
+            None,
+        )
+    }
+
+    /// `batch` tier preview: cheapest `:batch`-variant offering,
+    /// paid only — the same filter [`Router::decide_batch`] routes.
+    #[allow(clippy::too_many_arguments)]
+    fn preview_batch_list(
+        &self,
+        snapshot: &Snapshot,
+        ranking: Option<&RankingDocument>,
+        model_field: &str,
+        authorization: Option<&str>,
+        constraints: &ProviderConstraints,
+        now: u64,
+        top: usize,
+        minindex: Option<u8>,
+    ) -> Preview {
+        let base: Vec<&Offering> = snapshot
+            .models
+            .values()
+            .flatten()
+            .filter(|o| {
+                constraints.allows(&o.provider_name)
+                    && is_batch_model(&o.model_id)
+                    && inline_cost(o).is_some_and(|cost| cost > 0.0)
+                    && meets_minindex(snapshot, &o.model_id, minindex)
+            })
+            .collect();
+        if base.is_empty() {
+            return Preview {
+                model_field: model_field.to_string(),
+                session_namespace: model_field.to_string(),
+                session_key_hash: authorization.map(|auth| self.session_key(auth, model_field).0),
+                fresh: None,
+                sticky: None,
+                sticky_hit: false,
+                candidates: Vec::new(),
+                rejection: Some(RouteRejection {
+                    code: "no_eligible_offering",
+                    message: "no batch offering is currently eligible".to_string(),
+                }),
+                note: None,
+            };
+        }
+        let mut sorted: Vec<&Offering> = base;
+        sorted.sort_by(|a, b| {
+            inline_cost(a)
+                .partial_cmp(&inline_cost(b))
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.model_id.cmp(&b.model_id))
+                .then_with(|| a.provider_name.cmp(&b.provider_name))
+        });
+        let ordered_all: Vec<(Offering, Option<usize>)> = sorted
+            .into_iter()
+            .enumerate()
+            .map(|(i, o)| (o.clone(), Some(i)))
+            .collect();
+        self.finish_preview(
+            model_field,
+            model_field,
+            authorization,
+            ordered_all,
+            ranking,
+            now,
+            top,
+            Some(RouteRejection {
+                code: "no_eligible_offering",
+                message: "no batch offering is currently eligible".to_string(),
             }),
             None,
         )
@@ -5106,8 +5363,31 @@ mod tests {
                 minindex: None,
             })
         );
+        assert_eq!(
+            parse_virtual("openrouter/pair/batch"),
+            Some(VirtualModel {
+                tier: VirtualTier::Batch,
+                privacy: false,
+                free_only: false,
+                fallback: None,
+                pinned_model: None,
+                minindex: None,
+            })
+        );
+        assert_eq!(
+            parse_virtual("openrouter/pair/privacy/batch"),
+            Some(VirtualModel {
+                tier: VirtualTier::Batch,
+                privacy: true,
+                free_only: false,
+                fallback: None,
+                pinned_model: None,
+                minindex: None,
+            })
+        );
         // Fallback stays exclusive to the free scopes.
         assert_eq!(parse_virtual("openrouter/pair/decision/fallback/low"), None);
+        assert_eq!(parse_virtual("openrouter/pair/batch/fallback/low"), None);
         assert_eq!(parse_virtual("openrouter/pair/low/fallback/low"), None);
         assert_eq!(parse_virtual("azure/pair/free"), None);
         assert_eq!(parse_virtual("openrouter/pair/ultra"), None);
@@ -5115,7 +5395,7 @@ mod tests {
         assert_eq!(parse_virtual("openrouter/pair/free/extra"), None);
         assert_eq!(parse_virtual("openrouter/free"), None);
         assert_eq!(parse_virtual("meta/muse-spark"), None);
-        assert_eq!(VIRTUAL_MODELS.len(), 14);
+        assert_eq!(VIRTUAL_MODELS.len(), 16);
         assert!(VIRTUAL_MODELS.iter().all(|id| parse_virtual(id).is_some()));
     }
 
@@ -5829,6 +6109,18 @@ mod tests {
         assert_eq!(minindex_of("meta/muse-spark"), None);
         assert_eq!(tier_label("openrouter/pair/low/minindex/50"), "low");
         assert_eq!(tier_label("openrouter/pair/smart/minindex/50"), "smart");
+        assert_eq!(tier_label("openrouter/pair/batch"), "batch");
         assert_eq!(tier_label("meta/muse-spark"), "none");
+    }
+
+    /// The batch matcher is the `:batch` id suffix, nothing else.
+    #[test]
+    fn batch_models_match_by_suffix() {
+        assert!(is_batch_model("openai/gpt-4:batch"));
+        assert!(is_batch_model("m/cheap:batch"));
+        assert!(!is_batch_model("m/cheap"));
+        assert!(!is_batch_model("m/batch"));
+        assert!(!is_batch_model("m/cheap:batch/nested"));
+        assert!(!is_batch_model("m/cheap:free"));
     }
 }

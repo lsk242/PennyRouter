@@ -216,6 +216,43 @@ fn artifact_dir(test: &str) -> std::path::PathBuf {
             },
         )
         .unwrap();
+
+    // A priced batch-variant offering: without the batch split it
+    // would land in the tiers tab.
+    catalog
+        .insert_model(&ModelRow {
+            model_id: "paid/model:batch".to_string(),
+            name: "paid/model:batch".to_string(),
+            source: "test".to_string(),
+            payload: "{}".to_string(),
+            fetched_at: "t".to_string(),
+        })
+        .unwrap();
+    catalog
+        .insert_endpoint(&EndpointRow {
+            id: 0,
+            model_id: "paid/model:batch".to_string(),
+            provider_name: "BatchProvider".to_string(),
+            payload: "{}".to_string(),
+            fetched_at: "t".to_string(),
+            price_prompt: Some(1.0),
+            price_completion: Some(2.0),
+            price_cache_read: None,
+            price_cache_write: None,
+            precision_class: Some("fp16".to_string()),
+            quantization: None,
+            promo_discount: None,
+            processed_at: Some("t".to_string()),
+            supports_tools: None,
+            supports_decisions: None,
+            quality_tier: None,
+            quality_score: None,
+            scored_at: None,
+            score_model: None,
+            score_prompt: None,
+            price_override_tokens: None,
+        })
+        .unwrap();
     drop(catalog);
     let out = dir.join("out");
     let (_, _, manifest) = publish(&work, &out, "test", 1, 1).unwrap();
@@ -402,7 +439,7 @@ fn invalid_bind_rejected() {
 }
 
 #[test]
-fn serves_runs_models_ranking_meta_and_log() {
+fn serves_runs_models_meta_and_log() {
     let out = artifact_dir("serve");
     let log = out.join("pipe.log");
     std::fs::write(&log, "line one\nline two\n").unwrap();
@@ -424,7 +461,10 @@ fn serves_runs_models_ranking_meta_and_log() {
     assert!(endpoints.contains("recorded / recorded"));
 
     let ranking = get(&server, "/ranking");
-    assert!(ranking.contains("UiProvider"));
+    assert!(
+        ranking.contains("404"),
+        "ranking page removed, got: {ranking}"
+    );
 
     let meta = get(&server, "/meta");
     assert!(meta.contains("score_backend"));
@@ -587,5 +627,84 @@ fn resync_button_requests_a_sync_cycle() {
     assert!(
         overview.contains("Re-sync pending"),
         "pending banner while the trigger waits, got: {overview}"
+    );
+}
+
+/// Batch variants (`:batch` suffix) live in their own tab, out of the
+/// interactive free/tiers views; the rank number opens the
+/// calculation in a row under the model instead of a side column.
+#[test]
+fn batch_tab_lists_batch_models_and_rank_number_opens_calc_row() {
+    let out = artifact_dir("batch-tab");
+    let log = out.join("pipe.log");
+    std::fs::write(&log, "").unwrap();
+    let server = spawn(&out, &log);
+
+    let batch = get(&server, "/models?tab=batch");
+    assert!(batch.contains("200 OK"), "got: {batch}");
+    assert!(
+        batch.contains("paid/model:batch"),
+        "batch offering listed, got: {batch}"
+    );
+    assert!(
+        !batch.contains("UiProvider"),
+        "interactive offerings stay out of the batch tab, got: {batch}"
+    );
+
+    let tiers = get(&server, "/models?tab=tiers");
+    assert!(
+        !tiers.contains(":batch"),
+        "batch variants stay out of the tiers tab, got: {tiers}"
+    );
+    let free = get(&server, "/models?tab=free");
+    assert!(
+        !free.contains(":batch"),
+        "batch variants stay out of the free tab, got: {free}"
+    );
+
+    assert!(
+        batch.contains("href=\"#calc-1\""),
+        "rank number links to the calc row, got: {batch}"
+    );
+    assert!(
+        batch.contains("</tr><tr id=\"calc-1\""),
+        "calc row sits directly under its model row, got: {batch}"
+    );
+    assert!(
+        batch.contains("colspan=\"17\""),
+        "calc row spans the table width, got: {batch}"
+    );
+    assert!(
+        !batch.contains("<th>calc</th>"),
+        "no more calc side column, got: {batch}"
+    );
+    assert!(
+        batch.contains(".wrap{width:100%;margin:0}"),
+        "layout uses the full screen width, got: {batch}"
+    );
+}
+
+#[test]
+fn favicon_serves_the_shared_penny_svg() {
+    let out = artifact_dir("favicon");
+    let log = out.join("pipe.log");
+    std::fs::write(&log, "").unwrap();
+    let server = spawn(&out, &log);
+
+    let icon = get(&server, "/favicon.ico");
+    assert!(icon.contains("200 OK"), "got: {icon}");
+    assert!(
+        icon.contains("image/svg+xml"),
+        "svg content type, got: {icon}"
+    );
+    assert!(
+        icon.contains(pennyrouter_catalog::FAVICON_SVG),
+        "identical bytes to the gateway icon, got: {icon}"
+    );
+
+    let index = get(&server, "/");
+    assert!(
+        index.contains(r#"<link rel="icon" href="/favicon.ico""#),
+        "overview links the icon, got: {index}"
     );
 }

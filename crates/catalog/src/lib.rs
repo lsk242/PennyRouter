@@ -142,3 +142,8 @@ impl From<reqwest::Error> for Error {
         Error::Http(e)
     }
 }
+
+/// Shared brand mark for the gateway and catalog UIs: a copper penny
+/// `P` on the arcade-theme background, one inline SVG so both
+/// binaries serve the identical bytes with no asset files.
+pub const FAVICON_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" fill="#0d0f1e"/><circle cx="32" cy="32" r="24" fill="#c87533"/><circle cx="32" cy="32" r="24" fill="none" stroke="#7a4a1f" stroke-width="4"/><circle cx="32" cy="32" r="16" fill="none" stroke="#7a4a1f" stroke-width="2"/><text x="32" y="43" font-family="monospace" font-size="30" font-weight="bold" text-anchor="middle" fill="#0d0f1e">P</text></svg>"##;

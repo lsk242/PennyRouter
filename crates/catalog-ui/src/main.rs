@@ -1,9 +1,9 @@
 //! catalog-ui: read-only web browser over a catalog artifact directory.
 //!
 //! Shows run history (published manifests, newest first), the current
-//! catalog DB (models, endpoints, rebuild/audit meta), the ranking
-//! document, and — when `--log-file` points at pipeline output — the
-//! execution log tail. Everything is read from disk per request;
+//! catalog DB (models, endpoints, rebuild/audit meta), and — when
+//! `--log-file` points at pipeline output — the execution log tail.
+//! Everything is read from disk per request;
 //! nothing is cached, and the only write is the `.resync-requested`
 //! trigger file behind the force re-sync button, which the sync
 //! loop picks up on its next poll — the UI never touches the DB.
@@ -14,14 +14,15 @@
 
 use axum::{
     extract::State,
-    response::{Html, Redirect},
+    http::StatusCode,
+    response::{Html, IntoResponse, Redirect},
     routing::{get, post},
     Router,
 };
 use pennyrouter_catalog::{
-    balanced_profile, compare_rank, effective_cost, load_ranking_doc, precision_factor, verify,
-    verify_ranking, Catalog, EndpointRank, EndpointRow, EndpointSpeed, ModelSignals, RankKey,
-    COST_HALF_CREDIT, POP_WEIGHT, RANK_RULESET_VERSION, SCHEMA_VERSION, TASK_TOKENS,
+    balanced_profile, compare_rank, effective_cost, precision_factor, verify, verify_ranking,
+    Catalog, EndpointRank, EndpointRow, EndpointSpeed, ModelSignals, RankKey, COST_HALF_CREDIT,
+    POP_WEIGHT, RANK_RULESET_VERSION, SCHEMA_VERSION, TASK_TOKENS,
 };
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -70,6 +71,7 @@ fn shell(title: &str, nav: &str, body: String) -> String {
     format!(
         "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\">\
         <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
+        <link rel=\"icon\" href=\"/favicon.ico\" type=\"image/svg+xml\">\
         <title>{title} — PennyRouter catalog</title>\
         <style>:root{{color-scheme:dark;--bg:#0d0f1e;--panel:#151a33;--panel-2:#1c2342;\
         --ink:#e9ecff;--muted:#a3acc9;--line:#2c3560;--cyan:#00e5ff;--magenta:#ff2e88;\
@@ -81,7 +83,7 @@ fn shell(title: &str, nav: &str, body: String) -> String {
         background:repeating-linear-gradient(0deg,rgba(0,0,0,.14) 0 1px,transparent 1px 3px)}}\
         a{{color:var(--cyan)}}a:hover{{color:var(--yellow)}}\
         :focus-visible{{outline:2px solid var(--yellow);outline-offset:2px}}\
-        .wrap{{max-width:72em;margin:0 auto}}\
+        .wrap{{width:100%;margin:0}}\
         header.top{{background:var(--panel);border-bottom:3px solid var(--magenta);\
         box-shadow:0 3px 0 #000;margin:0 -1.5em 1.5em;padding:1.2em 1.5em}}\
         h1{{font-size:1.4em;margin:0 0 .6em;letter-spacing:.06em;color:var(--yellow);\
@@ -93,7 +95,7 @@ fn shell(title: &str, nav: &str, body: String) -> String {
         text-decoration:none;color:var(--muted);background:var(--bg);border:2px solid var(--line);\
         box-shadow:3px 3px 0 #000;padding:.5em .9em}}\
         nav a:hover{{color:var(--ink);border-color:var(--cyan)}}\
-        table{{border-collapse:collapse;margin:1em 0;background:var(--panel);\
+        table{{border-collapse:collapse;width:100%;margin:1em 0;background:var(--panel);\
         border:3px solid var(--line);box-shadow:6px 6px 0 #000}}\
         th,td{{border:1px solid var(--line);padding:.4em .7em;text-align:left;font-size:.9em}}\
         th{{background:var(--panel-2);color:var(--yellow);letter-spacing:.08em;\
@@ -105,7 +107,8 @@ fn shell(title: &str, nav: &str, body: String) -> String {
         nav.tabs{{margin:1em 0}}nav.tabs a.active{{color:var(--bg);background:var(--cyan);\
         border-color:var(--cyan)}}\
         .calc{{font-size:.8em;color:var(--muted);white-space:pre-wrap;padding:.4em 0}}\
-        details summary{{cursor:pointer;color:var(--cyan);font-size:.85em}}\
+        .calc-row{{display:none}}.calc-row:target{{display:table-row}}\
+        .ranknum{{font-weight:700}}\
         input[type=search]{{background:var(--bg);color:var(--ink);border:2px solid var(--line);\
         padding:.4em .6em;font-family:inherit}}\
         button{{background:var(--panel-2);color:var(--ink);border:2px solid var(--line);\
@@ -120,7 +123,7 @@ fn shell(title: &str, nav: &str, body: String) -> String {
 
 fn nav() -> &'static str {
     "<a href=\"/\">overview</a><a href=\"/models\">models</a>\
-    <a href=\"/ranking\">ranking</a><a href=\"/meta\">meta</a><a href=\"/log\">log</a>"
+    <a href=\"/meta\">meta</a><a href=\"/log\">log</a>"
 }
 
 /// Re-sync trigger (Iter 35): `POST /resync` writes this dotfile into
@@ -260,6 +263,13 @@ impl<'a> Row<'a> {
         self.ep.supports_decisions == Some(1)
     }
 
+    /// Batch variant (OpenRouter `:batch` suffix): async batch API
+    /// pricing, a category of its own — never mixed into the
+    /// interactive free/tiers tabs.
+    fn batch(&self) -> bool {
+        self.ep.model_id.ends_with(":batch")
+    }
+
     fn score(&self) -> Option<f64> {
         self.rank.and_then(|rank| rank.rank_score)
     }
@@ -383,9 +393,15 @@ fn breakdown(row: &Row) -> String {
     lines.join("\n")
 }
 
-fn breakdown_html(row: &Row) -> String {
+/// The breakdown as a full-width row under its model row, revealed
+/// when the rank number links to it (`:target` shows it, no JS).
+fn breakdown_row(position: usize, row: &Row, columns: usize) -> String {
     format!(
-        "<details><summary>calc</summary><div class=\"calc\">{}</div></details>",
+        "<tr id=\"calc-{position}\" class=\"calc-row\"><td colspan=\"{columns}\">\
+        <div class=\"calc\">calc — {} / {}<br>{}</div>\
+        <a href=\"#\" class=\"muted\">close</a></td></tr>",
+        esc(&row.ep.model_id),
+        esc(&row.ep.provider_name),
         esc(&breakdown(row)).replace('\n', "<br>")
     )
 }
@@ -696,7 +712,7 @@ async fn models(
     // the free tab is one click away.
     let tab = query.get("tab").map(String::as_str).unwrap_or("tiers");
     let tab = match tab {
-        "free" | "decision" => tab,
+        "free" | "batch" | "decision" => tab,
         _ => "tiers",
     };
     let search = query.get("q").cloned().unwrap_or_default().to_lowercase();
@@ -712,20 +728,25 @@ async fn models(
             )
         })
         .collect();
+    let batch_count = rows.iter().filter(|row| row.batch()).count();
     let free_count = rows
         .iter()
-        .filter(|row| !row.decision() && row.cost == Some(0.0))
+        .filter(|row| !row.batch() && !row.decision() && row.cost == Some(0.0))
         .count();
     let tier_count = rows
         .iter()
-        .filter(|row| !row.decision() && row.cost != Some(0.0))
+        .filter(|row| !row.batch() && !row.decision() && row.cost != Some(0.0))
         .count();
-    let decision_count = rows.iter().filter(|row| row.decision()).count();
+    let decision_count = rows
+        .iter()
+        .filter(|row| !row.batch() && row.decision())
+        .count();
 
     rows.retain(|row| match tab {
-        "decision" => row.decision(),
-        "tiers" => !row.decision() && row.cost != Some(0.0),
-        _ => !row.decision() && row.cost == Some(0.0),
+        "batch" => row.batch(),
+        "decision" => !row.batch() && row.decision(),
+        "tiers" => !row.batch() && !row.decision() && row.cost != Some(0.0),
+        _ => !row.batch() && !row.decision() && row.cost == Some(0.0),
     });
     if !search.is_empty() {
         rows.retain(|row| row.ep.model_id.to_lowercase().contains(&search));
@@ -737,13 +758,14 @@ async fn models(
         format!("<a href=\"/models?tab={name}\"{class}>{label} ({count})</a>")
     };
     let mut body = format!(
-        "<h2>Models (catalog {})</h2><nav class=\"tabs\">{}{}{}</nav>\
+        "<h2>Models (catalog {})</h2><nav class=\"tabs\">{}{}{}{}</nav>\
         <form method=\"get\" action=\"/models\"><input type=\"hidden\" name=\"tab\" value=\"{}\">\
         <input type=\"search\" name=\"q\" value=\"{}\" placeholder=\"filter model id\"> \
         <button type=\"submit\">filter</button></form>",
         esc(&current.version),
         tab_link("free", "free", free_count),
         tab_link("tiers", "tiers", tier_count),
+        tab_link("batch", "batch", batch_count),
         tab_link("decision", "decision", decision_count),
         esc(tab),
         esc(&search),
@@ -759,8 +781,10 @@ async fn models(
         <th>precision</th><th>index</th><th>factor</th><th>quality</th>\
         <th>in $/M</th><th>out $/M</th><th>cost/task</th><th>efficiency</th>\
         <th>popularity</th><th>score</th><th>tok/s</th><th>latency</th>\
-        <th>uptime</th><th>calc</th></tr>",
+        <th>uptime</th></tr>",
     );
+    // Data columns above; the breakdown row spans all of them.
+    const COLUMNS: usize = 17;
     for (position, row) in rows.iter().enumerate() {
         let index = match row.index() {
             Some(value) => format!(
@@ -773,10 +797,12 @@ async fn models(
             None => "<span class=\"muted\">-</span>".to_string(),
         };
         body.push_str(&format!(
-            "<tr><td>{}</td><td><a href=\"/endpoints?model={}\">{}</a></td>\
+            "<tr><td><a class=\"ranknum\" href=\"#calc-{}\" title=\"show calculation\">{}</a></td>\
+            <td><a href=\"/endpoints?model={}\">{}</a></td>\
             <td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{:.2}</td>\
             <td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td>\
-            <td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+            <td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+            position + 1,
             position + 1,
             url_encode(&row.ep.model_id),
             esc(&row.ep.model_id),
@@ -803,8 +829,8 @@ async fn models(
             num(row.speed.and_then(|speed| speed.throughput_tps), 0),
             num(row.speed.and_then(|speed| speed.latency_ms), 0),
             num(row.speed.and_then(|speed| speed.uptime_pct), 1),
-            breakdown_html(row),
         ));
+        body.push_str(&breakdown_row(position + 1, row, COLUMNS));
     }
     body.push_str("</table>");
     Html(shell("models", nav(), body))
@@ -874,55 +900,6 @@ async fn endpoints(
     Html(shell("endpoints", nav(), body))
 }
 
-async fn ranking(State(state): State<Arc<UiState>>) -> Html<String> {
-    let mut found: Option<(String, PathBuf)> = None;
-    for (path, doc) in manifests(&state.dir, ".manifest.json") {
-        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        if !name.starts_with("ranking-") || !verify_ranking(&path).unwrap_or(false) {
-            continue;
-        }
-        let file = doc
-            .get("ranking_file")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        found = Some((file.to_string(), state.dir.join(file)));
-        break;
-    }
-    let mut body = String::from("<h2>Ranking</h2>");
-    match found {
-        None => body.push_str("<p>No verifying ranking found.</p>"),
-        Some((file, path)) => match load_ranking_doc(&path) {
-            Err(e) => body.push_str(&format!("<p>Ranking error: {}</p>", esc(&e.to_string()))),
-            Ok(doc) => {
-                body.push_str(&format!(
-                    "<p>{} (created {})</p>",
-                    esc(&file),
-                    esc(&doc.created_at)
-                ));
-                for (model, classes) in &doc.models {
-                    body.push_str(&format!("<h3>{}</h3>", esc(model)));
-                    for class in classes {
-                        let order: Vec<String> = class
-                            .default
-                            .iter()
-                            .map(|e| match &e.tag {
-                                Some(t) => format!("{} ({t})", e.provider),
-                                None => e.provider.clone(),
-                            })
-                            .collect();
-                        body.push_str(&format!(
-                            "<p>{}: {}</p>",
-                            esc(class.class.as_deref().unwrap_or("any")),
-                            esc(&order.join(" > ")),
-                        ));
-                    }
-                }
-            }
-        },
-    }
-    Html(shell("ranking", nav(), body))
-}
-
 async fn meta(State(state): State<Arc<UiState>>) -> Html<String> {
     let Some(current) = current_db(&state.dir) else {
         return Html(shell(
@@ -976,6 +953,16 @@ async fn resync(
         ));
     }
     Ok(Redirect::to("/?resync=requested"))
+}
+
+/// Brand mark (shared penny SVG with the gateway): served locally
+/// so browser icon fetches 200 instead of 404ing.
+async fn favicon() -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        [("content-type", "image/svg+xml")],
+        pennyrouter_catalog::FAVICON_SVG,
+    )
 }
 
 async fn log(State(state): State<Arc<UiState>>) -> Html<String> {
@@ -1059,9 +1046,9 @@ fn run() -> Result<(), String> {
     let state = Arc::new(UiState { dir, log_file });
     let app = Router::new()
         .route("/", get(index))
+        .route("/favicon.ico", get(favicon))
         .route("/models", get(models))
         .route("/endpoints", get(endpoints))
-        .route("/ranking", get(ranking))
         .route("/meta", get(meta))
         .route("/log", get(log))
         .route("/resync", post(resync))
