@@ -5,6 +5,7 @@
 //! the DB format both sides share. See `docs/catalog-sync-architecture.md`.
 
 mod artifact;
+mod benchmarks;
 mod fetch;
 mod popular;
 mod price;
@@ -23,6 +24,9 @@ mod store;
 mod sync;
 
 pub use artifact::{now_rfc3339, publish, sha256_hex, verify, Manifest};
+pub use benchmarks::{
+    aggregate_intelligence, fetch_benchmarks, read_benchmark_intel, store_benchmarks, Benchmarks,
+};
 pub use fetch::{fetch_openrouter, fetch_openrouter_extra, Fetched};
 pub use popular::{
     aggregate_apps, aggregate_models, aggregate_models_all, fetch_popularity, read_popular_tokens,

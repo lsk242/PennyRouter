@@ -1024,3 +1024,84 @@ fn processing_writes_value_scores() {
         Some("rank-v1")
     );
 }
+
+#[test]
+fn benchmark_backfill_fills_missing_intelligence_only() {
+    let dir = common::scratch("intel-backfill");
+    let db = dir.join("work.db");
+    let catalog = Catalog::open(&db).unwrap();
+    catalog.init().unwrap();
+
+    let model = |id: &str, payload: &str| ModelRow {
+        model_id: id.into(),
+        name: id.into(),
+        source: "test".into(),
+        payload: payload.into(),
+        fetched_at: "t".into(),
+    };
+    // Embedded score present: the backfill must not move it.
+    catalog
+        .insert_model(&model(
+            "a/emb",
+            r#"{"id":"a/emb","canonical_slug":"a/emb",
+                "benchmarks":{"artificial_analysis":{"intelligence_index":70}}}"#,
+        ))
+        .unwrap();
+    // No embedded benchmarks at all: the backfill row applies.
+    catalog
+        .insert_model(&model(
+            "b/gap",
+            r#"{"id":"b/gap","canonical_slug":"b/gap"}"#,
+        ))
+        .unwrap();
+    let endpoint = |model_id: &str| EndpointRow {
+        id: 0,
+        model_id: model_id.into(),
+        provider_name: "P".into(),
+        payload: r#"{"pricing":{"prompt":"0.000001","completion":"0.000001"}}"#.into(),
+        fetched_at: "t".into(),
+        price_prompt: None,
+        price_completion: None,
+        price_cache_read: None,
+        price_cache_write: None,
+        precision_class: None,
+        quantization: None,
+        promo_discount: None,
+        processed_at: None,
+        supports_tools: None,
+        supports_decisions: None,
+        quality_tier: None,
+        quality_score: None,
+        scored_at: None,
+        score_model: None,
+        score_prompt: None,
+        price_override_tokens: None,
+    };
+    catalog.insert_endpoint(&endpoint("a/emb")).unwrap();
+    catalog.insert_endpoint(&endpoint("b/gap")).unwrap();
+
+    catalog
+        .set_meta("benchmark_intel", r#"{"a/emb":99,"b/gap":55}"#)
+        .unwrap();
+
+    run_processing(&catalog, PROCESSED_AT).unwrap();
+
+    let signals = catalog.model_signals().unwrap();
+    assert_eq!(
+        signals["a/emb"].aa_intelligence_index,
+        Some(70),
+        "embedded score wins over the backfill"
+    );
+    assert_eq!(
+        signals["b/gap"].aa_intelligence_index,
+        Some(55),
+        "missing embedded score backfilled by slug"
+    );
+
+    // The backfilled model now scores on the intel basis instead of
+    // going unscored.
+    let ranks = catalog.endpoint_ranks().unwrap();
+    let gap = &catalog.endpoints_for("b/gap").unwrap()[0];
+    assert_eq!(ranks[&gap.id].rank_basis.as_deref(), Some("intel"));
+    assert!(ranks[&gap.id].rank_score.is_some());
+}

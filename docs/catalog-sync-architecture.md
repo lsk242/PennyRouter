@@ -34,7 +34,11 @@ quality × efficiency × popularity` per offering, stored in the
 the AA indexes, the effective price, the precision class, the
 speed/availability metrics, and the popularity window — all extracted
 in the same run. Popularity is fetched **before** processing so the
-score can read the full window, not just the top-10 menu pins.
+score can read the full window, not just the top-10 menu pins. The
+benchmarks endpoint is fetched in the same pre-processing step and
+backfills `aa_intelligence_index` for models whose embedded payload
+carries no score — embedded values always win, so the backfill only
+adds scores, never moves them.
 
 ## Schema: fixed index over fluid payload
 
@@ -69,10 +73,12 @@ remote hosts later.
 ## Operations
 
 - Own schedule (periodic); independent deploy and scaling.
-- Gathering reads only public source endpoints — no API keys
-  involved. Live score backends (Phase 4) take keys from env vars
-  (repo-root `.env`, shipped by deploys), never from fixtures or
-  the repo. (Gateway serving keys still travel with requests.)
+- Gathering reads public source endpoints, plus two keyed auxiliary
+  fetches sharing `RANKINGS_API_KEY`: popularity pins and the
+  intelligence backfill (unset = published without them). Live score
+  backends (Phase 4) take keys from env vars (repo-root `.env`,
+  shipped by deploys), never from fixtures or the repo. (Gateway
+  serving keys still travel with requests.)
 - Never serves gateway traffic; never shares a process with the gateway.
 
 ## Deployment

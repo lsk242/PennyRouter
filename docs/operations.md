@@ -146,7 +146,8 @@ Catalog pipeline: `CATALOG_IMAGE` (sync image tag), `SYNC_INTERVAL`
 (seconds between sync cycles, 0 = run once), `FETCH_OPENROUTER`
 (1 = live fetch, 0 = baked fixtures), `EXTRA_MODEL_IDS`
 (comma-separated ids fetched individually), `RANKINGS_API_KEY` (menu
-popularity pins via the Data API, plus the OpenRouter scoring leg;
+popularity pins via the Data API, plus the OpenRouter scoring leg
+and the intelligence backfill from the benchmarks endpoint;
 unset = published without pins), `OPENROUTER_SCORE_MODEL` (scorer
 model for `--score-backend openrouter`; unset = that backend fails
 closed), score keys (`BASETEN_API_KEY`,

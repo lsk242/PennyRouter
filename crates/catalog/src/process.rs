@@ -3,6 +3,7 @@
 //! Pure-code extraction only (Phase 2a). Model-scored signals plug in
 //! later (Phase 2b) behind the same per-endpoint update.
 
+use crate::benchmarks::read_benchmark_intel;
 use crate::rank_score::{self, RankInputs, RULESET_VERSION};
 use crate::score_offline::OfflineScorer;
 use crate::store::{
@@ -48,23 +49,34 @@ pub fn run_processing(catalog: &Catalog, processed_at: &str) -> Result<ProcessSu
         // penalty.
         let popular = crate::popular::read_popular_tokens(catalog);
         let max_tokens = popular.values().copied().max().unwrap_or(0);
+        // Intelligence backfill from the benchmarks endpoint: fills
+        // models whose embedded payload carries no score.
+        let backfill = read_benchmark_intel(catalog);
         let mut signals: HashMap<String, ModelSignals> = HashMap::new();
         for model in catalog.all_models()? {
             let payload: Value = serde_json::from_str(&model.payload)?;
-            let index = ModelIndex {
-                aa_intelligence_index: extract_aa_index(&payload, "intelligence_index"),
-                aa_coding_index: extract_aa_index(&payload, "coding_index"),
-                aa_agentic_index: extract_aa_index(&payload, "agentic_index"),
-                aa_cost_per_task: extract_aa_cost_per_task(&payload),
-            };
-            catalog.update_model_index(&model.model_id, &index)?;
-            // The rankings dataset keys on the permaslug, which the
+            // Both auxiliary datasets key on the permaslug, which the
             // model payload carries as `canonical_slug`; the plain id
             // is the fallback for payloads without one.
             let slug = payload
                 .get("canonical_slug")
                 .and_then(Value::as_str)
                 .unwrap_or(&model.model_id);
+            let index = ModelIndex {
+                // Embedded first: the backfill only adds scores, never
+                // moves existing ones.
+                aa_intelligence_index: extract_aa_index(&payload, "intelligence_index")
+                    .or_else(|| {
+                        backfill
+                            .get(slug)
+                            .or_else(|| backfill.get(&model.model_id))
+                            .copied()
+                    }),
+                aa_coding_index: extract_aa_index(&payload, "coding_index"),
+                aa_agentic_index: extract_aa_index(&payload, "agentic_index"),
+                aa_cost_per_task: extract_aa_cost_per_task(&payload),
+            };
+            catalog.update_model_index(&model.model_id, &index)?;
             let tokens = popular
                 .get(slug)
                 .or_else(|| popular.get(&model.model_id))

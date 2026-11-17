@@ -200,6 +200,28 @@ fn run() -> Result<(), String> {
             Err(e) => println!("popularity fetch failed ({e}): publishing without pins"),
         },
     }
+    // Intelligence backfill from the benchmarks endpoint: models
+    // whose embedded payload lacks a score get one from the fuller
+    // dataset. Same shared key as popularity; a failed fetch warns
+    // and publishes without backfill, like pins.
+    match std::env::var("RANKINGS_API_KEY")
+        .ok()
+        .filter(|k| !k.is_empty())
+    {
+        None => println!("no RANKINGS_API_KEY: publishing without benchmark backfill"),
+        Some(key) => match pennyrouter_catalog::fetch_benchmarks("https://openrouter.ai", &key) {
+            Ok(benchmarks) => {
+                println!(
+                    "benchmarks: {} intelligence rows (as of {})",
+                    benchmarks.intelligence.len(),
+                    benchmarks.as_of.as_deref().unwrap_or("unknown")
+                );
+                pennyrouter_catalog::store_benchmarks(&catalog, &benchmarks)
+                    .map_err(|e| e.to_string())?;
+            }
+            Err(e) => println!("benchmarks fetch failed ({e}): publishing without backfill"),
+        },
+    }
     // Popularity lands before processing (Iter 34): the value score
     // reads the window as a per-model factor.
     let (scored, ranked) = if args.process {
