@@ -640,7 +640,7 @@ async fn batch_submit(
 async fn batch_status(
     State(state): State<AppState>,
     headers: HeaderMap,
-    uri: axum::http::Uri,
+    _uri: axum::http::Uri,
     Path(id): Path<String>,
 ) -> Response {
     let permit = match acquire_upstream_slot(&state).await {
