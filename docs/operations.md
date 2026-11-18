@@ -48,7 +48,7 @@ Deploy targets are env vars (see the header of
 `.env.deploy` file (see [`.env.deploy.sample`](../.env.deploy.sample)),
 which both scripts load automatically when present — explicit
 environment still wins over file values: `DEPLOY_HOST`
-(default `apps.lan`), `DEPLOY_DIR` (default
+(default `srv.lan`), `DEPLOY_DIR` (default
 `/opt/stacks/pennyrouter`), `COMPOSE_FILE` (default
 `compose.dev.yaml`); app config comes from the merged shipped
 `.env` (base `DEPLOY_ENV_FILE`, default `.env.dev`, plus secrets

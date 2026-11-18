@@ -12,13 +12,13 @@ URLs, model ids); this skill holds the procedure.
 
 ## Lab hosts
 
-- `apps.lan` — deploy target, stack at `/opt/stacks/pennyrouter`
+- `srv.lan` — deploy target, stack at `/opt/stacks/pennyrouter`
   (services `gateway` + `catalog-sync`, container name `gateway`).
 - `openclaw.lan` — OpenClaw agent (foreground session, no log files yet).
 - `hermes.lan` — Hermes agent, logs at `~/.hermes/logs/agent.log`.
 - `openhands.lan` — OpenHands agent server in tmux `canvas:0`
   (logs via read-only pane capture).
-- Agent-facing router URL: `http://gateway.apps.lan`
+- Agent-facing router URL: `http://gateway.srv.lan`
   (`/health` → `{"status":"ok"}`, `/v1/models` → six virtual ids).
 
 ## Local tooling (`tests/live/`)
@@ -56,15 +56,15 @@ For variable meanings see the header of `scripts/deploy.sh`.
 ## Restart
 
 ```sh
-ssh apps.lan 'cd /opt/stacks/pennyrouter && docker compose up -d'  # after config/image change
-ssh apps.lan 'docker restart gateway'                              # same-image bounce
-curl -fsS http://gateway.apps.lan/health                           # confirm
+ssh srv.lan 'cd /opt/stacks/pennyrouter && docker compose up -d'  # after config/image change
+ssh srv.lan 'docker restart gateway'                              # same-image bounce
+curl -fsS http://gateway.srv.lan/health                           # confirm
 ```
 
 ## Validation flow
 
 1. `router-smoke.sh` green against the deployed router.
-2. Point one agent at `http://gateway.apps.lan`, free tier first
+2. Point one agent at `http://gateway.srv.lan`, free tier first
    (model ids in `tests/live/.env`).
 3. Watch `agent-logs.sh router --follow` plus the agent's own log;
    confirm the call routes (log line + `x-pennyrouter-provider`) and

@@ -27,7 +27,7 @@ help: ## Show this help.
 	@echo "  smoke        curl /health on the local gateway  [HOST_PORT=3000]"
 	@echo "  load         tests/load/run.sh (health-only scaffold)"
 	@echo "  compose-config  validate compose files render with .env.dev"
-	@echo "  deploy       ./scripts/deploy.sh  [ships .env.dev+.env; DEPLOY_HOST=apps.lan]"
+	@echo "  deploy       ./scripts/deploy.sh  [ships .env.dev+.env; DEPLOY_HOST=srv.lan]"
 	@echo "  deploy-webhook  ./scripts/deploy-webhook.sh  [POST redeploy hook]"
 
 test: ## Run unit + integration tests.

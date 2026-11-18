@@ -19,7 +19,7 @@
 # Configuration (all via environment, or the gitignored `.env.deploy`
 # file — see `.env.deploy.sample` — which loads automatically when
 # present; explicit environment wins over file values):
-#   DEPLOY_HOST          ssh target, e.g. user@example.com. Default: apps.lan.
+#   DEPLOY_HOST          ssh target, e.g. user@example.com. Default: srv.lan.
 #   DEPLOY_DIR           Remote directory. Default: /opt/stacks/pennyrouter.
 #   COMPOSE_FILE         Local compose file to ship. Default: compose.dev.yaml
 #                        (gateway + catalog-sync). Must be pull-only (no
@@ -45,7 +45,7 @@
 #                        redacted) without touching the server.
 #
 # Usage:
-#   ./scripts/deploy.sh                  # defaults: dev stack to apps.lan
+#   ./scripts/deploy.sh                  # defaults: dev stack to srv.lan
 #   DEPLOY_HOST=user@example.com make deploy
 set -euo pipefail
 
@@ -71,7 +71,7 @@ if [[ -f "$ROOT/.env.deploy" ]]; then
   done < "$ROOT/.env.deploy"
 fi
 
-DEPLOY_HOST="${DEPLOY_HOST:-apps.lan}"
+DEPLOY_HOST="${DEPLOY_HOST:-srv.lan}"
 DEPLOY_DIR="${DEPLOY_DIR:-/opt/stacks/pennyrouter}"
 COMPOSE_FILE="${COMPOSE_FILE:-compose.dev.yaml}"
 DRY_RUN="${DRY_RUN:-0}"

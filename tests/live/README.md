@@ -54,9 +54,9 @@ set -a; . tests/live/.env; set +a
 
 ## Missing info checklist
 
-- [x] Router public URL the agents will use — `http://gateway.apps.lan`
+- [x] Router public URL the agents will use — `http://gateway.srv.lan`
   (`/health` OK, six virtual ids in `/v1/models`, `/ui` 404 as expected)
-- [x] Deploy SSH target — `apps.lan`, stack at `/opt/stacks/pennyrouter`
+- [x] Deploy SSH target — `srv.lan`, stack at `/opt/stacks/pennyrouter`
   (gateway + catalog-sync running, image `ghcr.io/...:latest`)
 - [x] Agent log access — [scripts/agent-logs.sh](scripts/agent-logs.sh):
   `router` (docker logs), `hermes` (`~/.hermes/logs/agent.log`),

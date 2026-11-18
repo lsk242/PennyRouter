@@ -37,7 +37,7 @@ OPENROUTER_BASE_URL=https://openrouter.ai/api
 # or per-pinned provider (Iter 16 pattern): MODAL_BASE_URL, BASETEN_BASE_URL
 ```
 
-Client points at the gateway `http://gateway.apps.lan` or `https://pennymux.example.com` directly. Zero spoofing, observability intact (`x-pennyrouter-provider`, `route="other"` metrics), deployable behind Caddy/Terraform Hetzner as today (`compose.prod.yaml` pulls GHCR).
+Client points at the gateway `http://gateway.srv.lan` or `https://pennymux.example.com` directly. Zero spoofing, observability intact (`x-pennyrouter-provider`, `route="other"` metrics), deployable behind Caddy/Terraform Hetzner as today (`compose.prod.yaml` pulls GHCR).
 
 ### DNS-transparent intercept ("replace hostname so client won't notice")
 
@@ -117,7 +117,7 @@ Explicitly **deny by default**: `POST /api/v1/keys`, `.../credits/coinbase` paym
     "pennyrouter": {
       "npm": "@ai-sdk/openai-compatible",
       "name": "PennyRouter (gateway)",
-      "options": { "baseURL": "http://gateway.apps.lan/v1" },
+      "options": { "baseURL": "http://gateway.srv.lan/v1" },
       "models": {
         "openrouter/pair/free": { "name": "Pair free — free-first coding" },
         "openrouter/pair/low": { "name": "Pair low — cheapest basic" },
@@ -129,7 +129,7 @@ Explicitly **deny by default**: `POST /api/v1/keys`, `.../credits/coinbase` paym
 }
 ```
 
-No key in file — `/connect` still provides the OpenRouter BYOK key forwarded upstream (gateway is BYOK today). For native OpenRouter SDKs, the same gateway address with `baseURL: http://gateway.apps.lan/api/v1` works once Iter A aliases land.
+No key in file — `/connect` still provides the OpenRouter BYOK key forwarded upstream (gateway is BYOK today). For native OpenRouter SDKs, the same gateway address with `baseURL: http://gateway.srv.lan/api/v1` works once Iter A aliases land.
 
 ## 7. Risks & open questions
 

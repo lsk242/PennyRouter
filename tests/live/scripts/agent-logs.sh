@@ -15,7 +15,7 @@ if [[ -f "$HERE/../.env" ]]; then
   # shellcheck disable=SC1091
   set -a; . "$HERE/../.env"; set +a
 fi
-DEPLOY_HOST="${DEPLOY_HOST:-apps.lan}"
+DEPLOY_HOST="${DEPLOY_HOST:-srv.lan}"
 OPENCLAW_HOST="${OPENCLAW_HOST:-openclaw.lan}"
 HERMES_HOST="${HERMES_HOST:-hermes.lan}"
 OPENHANDS_HOST="${OPENHANDS_HOST:-openhands.lan}"
