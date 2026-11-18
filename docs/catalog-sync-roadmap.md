@@ -27,15 +27,15 @@ one. Gateway-side milestones stay in [roadmap.md](roadmap.md).
 
 ## Phase 2b — Processing (AI-assisted) (done)
 
-- Goal: model-judged signals (e.g. quality flags) fill further indexed
+- Goal: model-scored signals (e.g. quality flags) fill further indexed
   columns behind the hook Phase 2a establishes.
-- Value: judgment-based facts that pure extraction cannot produce.
+- Value: score-based facts that pure extraction cannot produce.
 - Test: fixtures with recorded model outputs yield the expected indexed
   values; no live model calls in tests.
-- Landed: `Judge` trait + `RecordedJudge` (validated JSON: tier
+- Landed: `Scorer` trait + `RecordedScorer` (validated JSON: tier
   high/standard/low, score 0–1, tag-narrowed matching) fill
-  `quality_tier`/`quality_score`/`judged_at` (schema v3) via
-  `catalog-process --judge`; `cargo test`, clippy, and fmt pass.
+  `quality_tier`/`quality_score`/`scored_at` (schema v3) via
+  `catalog-process --score`; `cargo test`, clippy, and fmt pass.
 
 ## Phase 3 — Local deployment
 
@@ -47,47 +47,59 @@ one. Gateway-side milestones stay in [roadmap.md](roadmap.md).
 - Test: catalog image builds; one-shot container publishes an artifact
   a read-only mount can see; compose file renders.
 
-## Phase 4 — Judge backends: Baseten + Modal (done)
+## Phase 4 — Scorer backends: Baseten + Modal (done)
 
-- Goal: add the first live `Judge` backends behind the trait Phase 2b
+- Goal: add the first live `Scorer` backends behind the trait Phase 2b
   establishes: models served on Baseten (OpenAI-compatible chat at
   `https://inference.baseten.co/v1`, hackathon model
   `meta-models/muse-spark-open-1026`) and Modal (endpoint shape TBD
-  from its docs). They judge OpenRouter catalog offerings into the
-  same indexed columns (`quality_tier`/`quality_score`/`judged_at`)
+  from its docs). They score OpenRouter catalog offerings into the
+  same indexed columns (`quality_tier`/`quality_score`/`scored_at`)
   — OpenRouter stays the only catalog source; Baseten/Modal are
   processing LLMs, not onboarded sources.
-- Value: real model judgments replace hand-written recordings in
+- Value: real model scores replace hand-written recordings in
   production while tests stay offline and deterministic; the catalog
-  proves pluggable judge backends early, before the index needs them.
+  proves pluggable score backends early, before the index needs them.
 - Test: recorded-output fixtures still yield the expected indexed
   values with no live model calls; each live backend ships a
   recorded fixture plus a redacted config guide; live calls are
   explicit opt-in via env keys only (never in config, fixtures, or
   repo); workspace gates pass.
 - Steps:
-  - Baseten judge: request/response shape, prompt + output
+  - Baseten score: request/response shape, prompt + output
     validation (tier high/standard/low, score 0–1), recorded
     fixture, redacted config guide in `docs/` if setup is needed.
-  - Modal judge from its docs (endpoint shape, models, auth);
+  - Modal score from its docs (endpoint shape, models, auth);
     same recorded fixture → validation → test flow; config guide
     if setup is needed.
   - Backend selection for `catalog-process` (recorded stays the
     default; live backends are explicit opt-in); same-input
-    determinism per the `Judge` contract.
+    determinism per the `Scorer` contract.
 - Not in this phase: new catalog sources (no Baseten/Modal
   model/endpoint rows), gateway use (single OpenRouter upstream
   unchanged), multi-backend routing (still deferred, see
   [future.md](future.md)).
-- Landed: `BasetenJudge` + `ModalJudge` behind the Phase 2b trait over
+- Landed: `BasetenScorer` + `ModalScorer` behind the Phase 2b trait over
   a shared OpenAI-chat core (temperature 0, JSON-object replies, same
   tier/score validation as recorded); `catalog-process
-  --judge-backend baseten|modal` with recorded still the default;
-  recorded fixtures per backend; live smoke judged 4/4 fixture
+  --score-backend baseten|modal` with recorded still the default;
+  recorded fixtures per backend; live smoke scored 4/4 fixture
   endpoints on each backend with real varied verdicts; `cargo test`,
   clippy, and fmt pass.
 
+## Phase 5 — Live fetching (done, landed as gateway Iter 18)
+
+- Goal: `catalog-sync --fetch-openrouter` pulls the public `GET
+  /models` list plus one per-model endpoints body (no auth, no keys)
+  through the unchanged fixture boundary; `FETCH_OPENROUTER=1`
+  flips the container off fixtures.
+- Value: routing decides over live data instead of three fixture
+  models; fixtures stay the offline default for tests and local work.
+- Test: stub-server fetch tests; no live calls in tests. Live
+  one-shot synced 456 models / 1483 endpoints with 18 zero-price
+  offerings.
+
 ## Later
 
-Further sources, live fetching, remote artifact delivery, retention
-policy — pulled forward deliberately, never by default.
+Further sources, remote artifact delivery, retention policy —
+pulled forward deliberately, never by default.

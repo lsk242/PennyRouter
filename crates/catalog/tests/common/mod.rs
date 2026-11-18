@@ -4,6 +4,7 @@ use pennyrouter_catalog::{load_endpoints_dir, now_rfc3339, run_fixture_sync, Cat
 use std::fs;
 use std::path::PathBuf;
 
+#[allow(dead_code)]
 pub const MODELS: &[u8] = include_bytes!("../fixtures/models.json");
 
 pub fn fixtures_dir() -> PathBuf {
@@ -20,6 +21,7 @@ pub fn scratch(test: &str) -> PathBuf {
 }
 
 /// Sync the fixtures into a fresh DB; returns (scratch dir, db path).
+#[allow(dead_code)]
 pub fn synced_db(test: &str) -> (PathBuf, PathBuf) {
     let dir = scratch(test);
     let db = dir.join("work.db");

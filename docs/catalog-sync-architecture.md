@@ -26,6 +26,20 @@ Gathering and processing are separate phases (see
 first; indexed facts are distilled afterwards. The gateway never waits
 on either — it keeps serving the last good copy.
 
+## Value score (Iter 34)
+
+Processing ends with a deterministic scoring pass: `rank_score =
+quality × efficiency × popularity` per offering, stored in the
+`rank_*` columns (see [ranking-index.md](ranking-index.md)). It reads
+the AA indexes, the effective price, the precision class, the
+speed/availability metrics, and the popularity window — all extracted
+in the same run. Popularity is fetched **before** processing so the
+score can read the full window, not just the top-10 menu pins. The
+benchmarks endpoint is fetched in the same pre-processing step and
+backfills `aa_intelligence_index` for models whose embedded payload
+carries no score — embedded values always win, so the backfill only
+adds scores, never moves them.
+
 ## Schema: fixed index over fluid payload
 
 Sources change constantly, so the schema is two-tier:
@@ -35,8 +49,9 @@ Sources change constantly, so the schema is two-tier:
 - **Flexible JSON payload columns** preserving the raw source data, so
   nothing is lost when a source adds or renames fields.
 - **Fixed indexed columns**, added by the processing phase: normalized
-  prices, precision class, quality signals, promo windows — the stable,
-  queryable projection routing and ranking read.
+  prices, precision class, quality signals, promo windows, per-model
+  Artificial Analysis indexes (Iter 31) — the stable, queryable
+  projection routing and ranking read.
 
 The fixed schema grows only with proven index needs; the payload keeps
 everything else.
@@ -58,10 +73,12 @@ remote hosts later.
 ## Operations
 
 - Own schedule (periodic); independent deploy and scaling.
-- Gathering reads only public source endpoints — no API keys in config
-  or repo. Live judge backends (Phase 4) take keys from env vars only,
-  never from config, fixtures, or repo. (Gateway request keys still
-  travel with requests.)
+- Gathering reads public source endpoints, plus two keyed auxiliary
+  fetches sharing `RANKINGS_API_KEY`: popularity pins and the
+  intelligence backfill (unset = published without them). Live score
+  backends (Phase 4) take keys from env vars (repo-root `.env`,
+  shipped by deploys), never from fixtures or the repo. (Gateway
+  serving keys still travel with requests.)
 - Never serves gateway traffic; never shares a process with the gateway.
 
 ## Deployment

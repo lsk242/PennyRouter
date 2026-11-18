@@ -3,7 +3,7 @@
 
 use axum::{body::Bytes, http::StatusCode, routing::post, Router};
 use pennyrouter_catalog::{
-    publish_ranking, rank_catalog, Assist, Catalog, EndpointIndex, EndpointJudgment, EndpointRow,
+    publish_ranking, rank_catalog, Assist, Catalog, EndpointIndex, EndpointRow, EndpointScore,
     ModelRow, Promos, Trends,
 };
 use std::{
@@ -49,13 +49,17 @@ fn insert_offering(catalog: &Catalog, model: &str, provider: &str, price: f64, t
             price_cache_read: None,
             price_cache_write: None,
             precision_class: None,
+            quantization: None,
             promo_discount: None,
             processed_at: None,
+            supports_tools: None,
+            supports_decisions: None,
             quality_tier: None,
             quality_score: None,
-            judged_at: None,
-            judge_model: None,
-            judge_prompt: None,
+            scored_at: None,
+            score_model: None,
+            score_prompt: None,
+            price_override_tokens: None,
         })
         .unwrap();
     let ep = catalog.endpoints_for(model).unwrap().pop().unwrap();
@@ -68,20 +72,24 @@ fn insert_offering(catalog: &Catalog, model: &str, provider: &str, price: f64, t
                 price_cache_read: None,
                 price_cache_write: None,
                 precision_class: None,
+                quantization: None,
                 promo_discount: None,
                 processed_at: "t".to_string(),
+                supports_tools: None,
+                supports_decisions: None,
+                price_override_tokens: None,
             },
         )
         .unwrap();
     catalog
-        .update_endpoint_judgment(
+        .update_endpoint_score(
             ep.id,
-            &EndpointJudgment {
+            &EndpointScore {
                 quality_tier: Some(tier.to_string()),
                 quality_score: None,
-                judged_at: "t".to_string(),
-                judge_model: None,
-                judge_prompt: None,
+                scored_at: "t".to_string(),
+                score_model: None,
+                score_prompt: None,
             },
         )
         .unwrap();
@@ -123,13 +131,19 @@ fn rank_dir(test: &str) -> (std::path::PathBuf, std::path::PathBuf) {
         ),
     )
     .unwrap();
+    // B18: explicit loads reject over-age rankings, so the fixture is
+    // stamped at test time — a fixed old stamp would (correctly) fail
+    // the staleness gate. This test covers serve/fallback, not age.
+    let now = time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap();
     let doc = rank_catalog(
         &catalog,
         &Trends::empty(),
         &Assist::load(&assist_path).unwrap(),
         &Promos::empty(),
-        "2026-01-01T00:00:00Z",
-        "2026-01-01T00:00:00Z",
+        &now,
+        &now,
         None,
     )
     .unwrap();

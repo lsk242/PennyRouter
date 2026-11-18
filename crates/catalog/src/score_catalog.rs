@@ -1,16 +1,16 @@
 //! Decision-model catalog + selection policy (Iter 15).
 //!
-//! Which model judges, and how it is chosen, is config — not tribal
-//! knowledge. A judges file lists one entry per backend (recorded
-//! plus live), with the judge model, base URL, the *names* of the
+//! Which model scorers, and how it is chosen, is config — not tribal
+//! knowledge. A scorers file lists one entry per backend (recorded
+//! plus live), with the scorer model, base URL, the *names* of the
 //! environment variables holding its secrets (never values), the
 //! prompt version it is expected to answer, and the optional known
 //! per-call cost. A policy section governs selection: sampling rate,
 //! per-endpoint scope, and per-rebuild call/spend caps.
 //!
 //! ```json
-//! {"judges": [
-//!    {"backend": "recorded", "recording": "judgments.json"},
+//! {"scorers": [
+//!    {"backend": "recorded", "recording": "scores.json"},
 //!    {"backend": "baseten", "model": "meta-models/muse-spark-open-1026",
 //!     "base_url": "https://inference.baseten.co/v1",
 //!     "auth_env": ["BASETEN_API_KEY"], "prompt_version": "v1"}
@@ -18,25 +18,25 @@
 //!  "policy": {"sample_rate": 0.1, "max_calls": 200}}
 //! ```
 //!
-//! Recorded judging is the default (free, deterministic); live judges
+//! Recorded scoring is the default (free, deterministic); live scorers
 //! run only when explicitly selected, sampled, and within caps. Caps
-//! are checked *before* any judgment is written, so a breached cap
-//! fails closed with the DB untouched. Judges never run on the
+//! are checked *before* any score is written, so a breached cap
+//! fails closed with the DB untouched. Scorers never run on the
 //! request path — this is all offline batch.
 
-use crate::judge::RecordedJudge;
+use crate::score::RecordedScorer;
 use crate::store::EndpointRow;
-use crate::{BasetenJudge, Error, ModalJudge};
+use crate::{BasetenScorer, Error, ModalScorer, OpenRouterScorer};
 use serde_json::Value;
 use std::path::Path;
 
 /// Backends the gateway knows how to construct. Anything else in a
-/// judges file is rejected at load, never mid-rebuild.
-pub const KNOWN_BACKENDS: &[&str] = &["recorded", "baseten", "modal"];
+/// scorers file is rejected at load, never mid-rebuild.
+pub const KNOWN_BACKENDS: &[&str] = &["recorded", "baseten", "modal", "openrouter"];
 
-/// One cataloged judge: how to build it and what it costs.
+/// One cataloged scorer: how to build it and what it costs.
 #[derive(Debug, Clone)]
-pub struct JudgeEntry {
+pub struct ScorerEntry {
     pub backend: String,
     pub model: String,
     pub base_url: String,
@@ -46,13 +46,13 @@ pub struct JudgeEntry {
     pub recording: Option<String>,
 }
 
-/// Selection policy: which endpoints a live rebuild judges and how
+/// Selection policy: which endpoints a live rebuild scorers and how
 /// much it may spend. Recorded runs ignore sampling and caps (free
 /// and deterministic); live runs enforce all of it.
 #[derive(Debug, Clone)]
-pub struct JudgePolicy {
-    /// Fraction of in-scope endpoints to judge, 0.0..=1.0.
-    /// Deterministic per endpoint (FNV hash), so rebuilds re-judge
+pub struct ScorerPolicy {
+    /// Fraction of in-scope endpoints to score, 0.0..=1.0.
+    /// Deterministic per endpoint (FNV hash), so rebuilds re-score
     /// the same subset as the catalog grows.
     pub sample_rate: f64,
     /// Empty means every model/provider is in scope (exact match).
@@ -65,7 +65,7 @@ pub struct JudgePolicy {
     pub max_spend_usd: Option<f64>,
 }
 
-impl Default for JudgePolicy {
+impl Default for ScorerPolicy {
     fn default() -> Self {
         Self {
             sample_rate: 1.0,
@@ -77,7 +77,7 @@ impl Default for JudgePolicy {
     }
 }
 
-impl JudgePolicy {
+impl ScorerPolicy {
     pub fn validate(&self) -> Result<(), Error> {
         if !(0.0..=1.0).contains(&self.sample_rate) {
             return Err(Error::InvalidFixture(format!(
@@ -108,14 +108,14 @@ impl JudgePolicy {
     }
 }
 
-/// The loaded judges file.
+/// The loaded scorers file.
 #[derive(Debug, Clone)]
-pub struct JudgeCatalog {
-    pub judges: Vec<JudgeEntry>,
-    pub policy: JudgePolicy,
+pub struct ScorerCatalog {
+    pub scorers: Vec<ScorerEntry>,
+    pub policy: ScorerPolicy,
 }
 
-impl JudgeCatalog {
+impl ScorerCatalog {
     pub fn load(path: &Path) -> Result<Self, Error> {
         let raw = std::fs::read_to_string(path)?;
         Self::from_str(&raw)
@@ -123,21 +123,24 @@ impl JudgeCatalog {
 
     fn from_str(raw: &str) -> Result<Self, Error> {
         let doc: Value = serde_json::from_str(raw)
-            .map_err(|e| Error::InvalidFixture(format!("judges file is not valid JSON: {e}")))?;
-        let list = doc.get("judges").and_then(Value::as_array).ok_or_else(|| {
-            Error::InvalidFixture("judges file needs a \"judges\" array".to_string())
-        })?;
+            .map_err(|e| Error::InvalidFixture(format!("scorers file is not valid JSON: {e}")))?;
+        let list = doc
+            .get("scorers")
+            .and_then(Value::as_array)
+            .ok_or_else(|| {
+                Error::InvalidFixture("scorers file needs a \"scorers\" array".to_string())
+            })?;
         if list.is_empty() {
             return Err(Error::InvalidFixture(
-                "judges file needs at least one judge".to_string(),
+                "scorers file needs at least one scorer".to_string(),
             ));
         }
-        let mut judges = Vec::with_capacity(list.len());
+        let mut scorers = Vec::with_capacity(list.len());
         for (i, item) in list.iter().enumerate() {
-            judges.push(entry_from(item, i)?);
+            scorers.push(entry_from(item, i)?);
         }
         let policy = match doc.get("policy") {
-            None | Some(Value::Null) => JudgePolicy::default(),
+            None | Some(Value::Null) => ScorerPolicy::default(),
             Some(policy) if policy.is_object() => policy_from(policy)?,
             Some(other) => {
                 return Err(Error::InvalidFixture(format!(
@@ -146,19 +149,19 @@ impl JudgeCatalog {
             }
         };
         policy.validate()?;
-        Ok(Self { judges, policy })
+        Ok(Self { scorers, policy })
     }
 
-    /// Resolve a `--judge-backend` name to its entry. Unknown names
+    /// Resolve a `--score-backend` name to its entry. Unknown names
     /// fail here, never after half a rebuild.
-    pub fn resolve(&self, backend: &str) -> Result<&JudgeEntry, Error> {
-        self.judges
+    pub fn resolve(&self, backend: &str) -> Result<&ScorerEntry, Error> {
+        self.scorers
             .iter()
             .find(|entry| entry.backend == backend)
             .ok_or_else(|| {
-                Error::Judge(format!(
-                    "unknown judge backend: {backend} (cataloged: {})",
-                    self.judges
+                Error::Scorer(format!(
+                    "unknown score backend: {backend} (cataloged: {})",
+                    self.scorers
                         .iter()
                         .map(|entry| entry.backend.as_str())
                         .collect::<Vec<_>>()
@@ -168,8 +171,8 @@ impl JudgeCatalog {
     }
 }
 
-fn entry_from(item: &Value, i: usize) -> Result<JudgeEntry, Error> {
-    let at = |what: &str| format!("judges[{i}]: {what}");
+fn entry_from(item: &Value, i: usize) -> Result<ScorerEntry, Error> {
+    let at = |what: &str| format!("scorers[{i}]: {what}");
     let backend = item
         .get("backend")
         .and_then(Value::as_str)
@@ -232,10 +235,10 @@ fn entry_from(item: &Value, i: usize) -> Result<JudgeEntry, Error> {
     }
     let prompt_version = match non_empty("prompt_version") {
         Some(version) => {
-            if live && version != crate::judge_openai::PROMPT_VERSION {
+            if live && version != crate::score_openai::PROMPT_VERSION {
                 return Err(Error::InvalidFixture(at(&format!(
-                    "prompt_version {version:?} does not match the judging prompt ({}) — update one of them",
-                    crate::judge_openai::PROMPT_VERSION
+                    "prompt_version {version:?} does not match the scoring prompt ({}) — update one of them",
+                    crate::score_openai::PROMPT_VERSION
                 ))));
             }
             version
@@ -271,11 +274,11 @@ fn entry_from(item: &Value, i: usize) -> Result<JudgeEntry, Error> {
         None if live => None,
         None => {
             return Err(Error::InvalidFixture(at(
-                "recorded entries need a \"recording\" judgments file",
+                "recorded entries need a \"recording\" scores file",
             )));
         }
     };
-    Ok(JudgeEntry {
+    Ok(ScorerEntry {
         backend: backend.to_string(),
         model,
         base_url,
@@ -286,7 +289,7 @@ fn entry_from(item: &Value, i: usize) -> Result<JudgeEntry, Error> {
     })
 }
 
-fn policy_from(policy: &Value) -> Result<JudgePolicy, Error> {
+fn policy_from(policy: &Value) -> Result<ScorerPolicy, Error> {
     let strings = |key: &str| match policy.get(key) {
         None | Some(Value::Null) => Ok(Vec::new()),
         Some(Value::Array(list)) => list
@@ -340,7 +343,7 @@ fn policy_from(policy: &Value) -> Result<JudgePolicy, Error> {
             "\"policy.{key}\" must be a number, got {other}"
         ))),
     };
-    let out = JudgePolicy {
+    let out = ScorerPolicy {
         sample_rate,
         only_models: strings("only_models")?,
         only_providers: strings("only_providers")?,
@@ -353,6 +356,9 @@ fn policy_from(policy: &Value) -> Result<JudgePolicy, Error> {
 
 /// Deterministic FNV-1a membership: the same endpoint samples the
 /// same way on every rebuild, independent of catalog order or size.
+/// Keyed by model + provider + tag: same-provider tag variants are
+/// distinct endpoints and must sample independently (the DB `id`
+/// would do it too, but re-sync reassigns ids every cycle).
 fn sampled(endpoint: &EndpointRow, rate: f64) -> bool {
     if rate >= 1.0 {
         return true;
@@ -360,12 +366,19 @@ fn sampled(endpoint: &EndpointRow, rate: f64) -> bool {
     if rate <= 0.0 {
         return false;
     }
+    // Unparseable or untagged payloads share the untagged bucket.
+    let tag = serde_json::from_str::<Value>(&endpoint.payload)
+        .ok()
+        .and_then(|payload| crate::score::endpoint_tag(&payload).map(str::to_string))
+        .unwrap_or_default();
     let mut hash: u64 = 0xcbf29ce484222325;
     for byte in endpoint
         .model_id
         .bytes()
         .chain([0])
         .chain(endpoint.provider_name.bytes())
+        .chain([0])
+        .chain(tag.bytes())
     {
         hash ^= u64::from(byte);
         hash = hash.wrapping_mul(0x100000001b3);
@@ -374,7 +387,7 @@ fn sampled(endpoint: &EndpointRow, rate: f64) -> bool {
 }
 
 /// Policy-selected endpoints for a rebuild, in catalog order.
-pub fn select_endpoints(endpoints: &[EndpointRow], policy: &JudgePolicy) -> Vec<EndpointRow> {
+pub fn select_endpoints(endpoints: &[EndpointRow], policy: &ScorerPolicy) -> Vec<EndpointRow> {
     endpoints
         .iter()
         .filter(|ep| policy.in_scope(ep) && sampled(ep, policy.sample_rate))
@@ -384,23 +397,23 @@ pub fn select_endpoints(endpoints: &[EndpointRow], policy: &JudgePolicy) -> Vec<
 
 /// Costed call plan for a live rebuild.
 #[derive(Debug, Clone, PartialEq)]
-pub struct JudgePlan {
+pub struct ScorerPlan {
     pub calls: usize,
     /// `None` when the per-call cost is unknown.
     pub spend_usd: Option<f64>,
 }
 
-/// Check call/spend caps *before* any judgment is written (Iter 15):
+/// Check call/spend caps *before* any score is written (Iter 15):
 /// a breached cap fails closed with the DB untouched. Unknown
 /// per-call cost fails a spend cap rather than guessing it.
 pub fn plan_live_calls(
     selected: usize,
-    entry: &JudgeEntry,
-    policy: &JudgePolicy,
-) -> Result<JudgePlan, Error> {
+    entry: &ScorerEntry,
+    policy: &ScorerPolicy,
+) -> Result<ScorerPlan, Error> {
     if policy.max_calls.is_some_and(|cap| selected as u64 > cap) {
-        return Err(Error::Judge(format!(
-            "live judging needs {selected} calls, over the max_calls cap ({})",
+        return Err(Error::Scorer(format!(
+            "live scoring needs {selected} calls, over the max_calls cap ({})",
             policy.max_calls.unwrap_or(0)
         )));
     }
@@ -408,28 +421,28 @@ pub fn plan_live_calls(
     if let Some(cap) = policy.max_spend_usd {
         match spend_usd {
             None => {
-                return Err(Error::Judge(
+                return Err(Error::Scorer(
                     "cannot enforce max_spend_usd with unknown cost_per_call_usd".to_string(),
                 ));
             }
             Some(spend) if spend > cap => {
-                return Err(Error::Judge(format!(
-                    "live judging would spend ${spend:.4}, over the max_spend_usd cap (${cap:.4})"
+                return Err(Error::Scorer(format!(
+                    "live scoring would spend ${spend:.4}, over the max_spend_usd cap (${cap:.4})"
                 )));
             }
             Some(_) => {}
         }
     }
-    Ok(JudgePlan {
+    Ok(ScorerPlan {
         calls: selected,
         spend_usd,
     })
 }
 
 /// Read the secret variables an entry names (Iter 15): values travel
-/// from the environment straight into the judge constructor — never
+/// from the environment straight into the scorer constructor — never
 /// through config, logs, or errors (only variable *names* appear).
-fn read_auth(entry: &JudgeEntry, want: usize) -> Result<Vec<String>, Error> {
+fn read_auth(entry: &ScorerEntry, want: usize) -> Result<Vec<String>, Error> {
     if entry.auth_env.len() != want {
         return Err(Error::InvalidFixture(format!(
             "backend {:?} needs {want} auth variable(s), catalog lists {}",
@@ -444,28 +457,28 @@ fn read_auth(entry: &JudgeEntry, want: usize) -> Result<Vec<String>, Error> {
             std::env::var(name)
                 .ok()
                 .filter(|value| !value.is_empty())
-                .ok_or_else(|| Error::Judge(format!("{name} is not set (see .env.example)")))
+                .ok_or_else(|| Error::Scorer(format!("{name} is not set (see .env.example)")))
         })
         .collect()
 }
 
-/// Construct the cataloged judge (Iter 15). Live backends read keys
+/// Construct the cataloged scorer (Iter 15). Live backends read keys
 /// from the environment; the recorded backend reads its file.
 /// Construction never touches the network, so unknown backends and
-/// missing secrets fail before any judgment is written.
-pub fn build_judge(entry: &JudgeEntry) -> Result<Box<dyn crate::judge::Judge>, Error> {
+/// missing secrets fail before any score is written.
+pub fn build_score(entry: &ScorerEntry) -> Result<Box<dyn crate::score::Scorer>, Error> {
     match entry.backend.as_str() {
         "recorded" => {
             let path = entry.recording.as_deref().ok_or_else(|| {
                 Error::InvalidFixture(
-                    "recorded entries need a \"recording\" judgments file".to_string(),
+                    "recorded entries need a \"recording\" scores file".to_string(),
                 )
             })?;
-            Ok(Box::new(RecordedJudge::load(std::path::Path::new(path))?))
+            Ok(Box::new(RecordedScorer::load(std::path::Path::new(path))?))
         }
         "baseten" => {
             let vars = read_auth(entry, 1)?;
-            Ok(Box::new(BasetenJudge::new(
+            Ok(Box::new(BasetenScorer::new(
                 &entry.base_url,
                 &vars[0],
                 &entry.model,
@@ -473,19 +486,30 @@ pub fn build_judge(entry: &JudgeEntry) -> Result<Box<dyn crate::judge::Judge>, E
         }
         "modal" => {
             let vars = read_auth(entry, 2)?;
-            Ok(Box::new(ModalJudge::new(
-                &entry.base_url,
+            // B21: accept deployment-root URLs like from_env (a
+            // /v1-suffixed entry passes through unchanged).
+            let base_url = crate::score_modal::api_root(&entry.base_url);
+            Ok(Box::new(ModalScorer::new(
+                &base_url,
                 &vars[0],
                 &vars[1],
                 &entry.model,
             )?))
         }
-        backend => Err(Error::Judge(format!("unknown judge backend: {backend}"))),
+        "openrouter" => {
+            let vars = read_auth(entry, 1)?;
+            Ok(Box::new(OpenRouterScorer::new(
+                &entry.base_url,
+                &vars[0],
+                &entry.model,
+            )?))
+        }
+        backend => Err(Error::Scorer(format!("unknown score backend: {backend}"))),
     }
 }
 
 /// One log line per live rebuild: calls, unit cost, total, caps.
-pub fn spend_line(plan: &JudgePlan, entry: &JudgeEntry, policy: &JudgePolicy) -> String {
+pub fn spend_line(plan: &ScorerPlan, entry: &ScorerEntry, policy: &ScorerPolicy) -> String {
     let unit = entry
         .cost_per_call_usd
         .map(|c| format!("${c:.6}"))
@@ -507,7 +531,7 @@ pub fn spend_line(plan: &JudgePlan, entry: &JudgeEntry, policy: &JudgePolicy) ->
         ),
     };
     format!(
-        "judge spend: {} live calls x {unit} = {total} ({caps})",
+        "score spend: {} live calls x {unit} = {total} ({caps})",
         plan.calls
     )
 }

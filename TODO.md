@@ -2,7 +2,8 @@
 
 Rule: each iteration ships one small layer that is testable by itself and
 adds value on its own. Detail and acceptance criteria live in
-[docs/roadmap.md](docs/roadmap.md).
+[docs/roadmap.md](docs/roadmap.md). Status source: TODO checkboxes;
+roadmap headers mirror them in the same commit.
 
 - [x] **Iter 0 — Repo skeleton + docs.** Value: reviewable
       structure, vision, and plan before any code. Test: tree + link audit.
@@ -58,14 +59,22 @@ adds value on its own. Detail and acceptance criteria live in
 
 - [x] Docker local dev + minimal image (Dockerfile + compose added in 1a;
       build + `/health` verified locally via `docker build` and compose).
-- [x] Dev/prod compose split with `.env` settings (`compose.yaml`
-      builds locally; `compose.prod.yaml` pulls the `ghcr.io` image
-      with no `build:` section, CI-guarded).
+- [x] Local/server compose files with `.env.dev` + `.env` settings
+      (`compose.yaml` builds locally and publishes ports;
+      `compose.dev.yaml` pulls the `ghcr.io` images with no
+      `build:` section, CI-guarded, proxy-reached with no
+      published ports).
 - [x] `scp` server deploy (`scripts/deploy.sh` + `make deploy`):
-      ships pull-only prod compose + generated `.env`, pulls the
-      `ghcr.io` image, restarts, health-checks; gateway only on
-      host port 3000. `Makefile` covers current common tasks
-      (test/run/dev/build/smoke/load/prod-config).
+      ships pull-only server compose + merged `.env` (`.env.dev`
+      base + `.env` secrets), pulls the `ghcr.io` images,
+      restarts, health-checks via the proxy network (one-off
+      curl container, no host port to probe).
+      `Makefile` covers current common tasks
+      (test/run/dev/build/smoke/load/compose-config).
+- [x] Git-stack deploy (same pull-only compose file as a git
+      stack, push-to-deploy via repo webhook;
+      `scripts/deploy-webhook.sh` + `make deploy-webhook`
+      trigger a redeploy via a configured API endpoint).
 - [x] Docker build + push pipeline with `/health` smoke check (proven
       green on main across the v0.1.0–v0.6.0 merges, image pushed).
 - [x] Select first cloud provider: Hetzner (see
@@ -79,12 +88,6 @@ backends, parallel fan-out (fastest/all/judge), traffic review via a local or
 cheap judge model, classifier-based routing.
 
 ## Next (planned — detail in [docs/roadmap.md](docs/roadmap.md))
-
-- [ ] **Iter 19 — OpenRouter Batch API support.** Custom handlers for
-  `POST /api/v1/batches` (submit async batch, returns 202) and
-  `GET /api/v1/batches/{id}` (poll status). Concurrency limits and body
-  cap apply; metrics tracked under `batch_submit` / `batch_status` routes.
-  Test: submit + poll against mock backend; metrics labels appear.
 
 - [x] **Iter 9 — Resilience bounds.** Bounded upstream concurrency +
       queue depth with explicit 503 shedding + graceful shutdown.
@@ -132,3 +135,155 @@ cheap judge model, classifier-based routing.
       boundary; `FETCH_OPENROUTER=1` flips the container off fixtures.
       Test: stub-server fetch tests; live one-shot synced 456 models /
       1483 endpoints with 18 zero-price offerings.
+- [x] **Iter 19 — `lowest` tag.** Cross-model cheapest-paid pick with
+      no quality floor (fallback when free turns run out); fail-closed
+      rejections, exactly-once. Test: 7 routing unit tests (pick,
+      first-wins, passthrough, fail-closed, budget, tie-break, wire
+      rewrite).
+- [x] **Iter 20 — Decode gzipped upstream errors.** Live-found: gzipped
+      4xx bodies were wrapped raw into error messages. Decode (bounded)
+      on the error path only; success bytes stay untouched. Test: 2
+      passthrough tests (readable wrap, decoded JSON forward without
+      encoding claim).
+- [x] **Iter 21 — Free fallback + header-driven 429s.** `…/free/fallback/
+      <tier>` serves free, then one tier pick on exhaustion; 429s cool
+      offerings for the header-stated duration and surface reset info.
+      Test: unit (headers, parse, triggers) + 2 integration (fallback
+      200, 429 headers). Live: fallback chain serves DeepInfra paid
+      pick on constrained trigger.
+- [x] **Iter 22 — Tool-aware routing.** Index per-endpoint tool
+      support (`supported_parameters` → `supports_tools`, schema v4);
+      tool-bearing requests match only capable endpoints on every
+      leg; starvation fails closed with `tools_unsupported` (400).
+      Test: extraction asserts (1/0/NULL) + unit (detect/allow) + 2
+      integration (routes capable, fails closed).
+- [x] **Iter 23 — Standby router recovery.** Boot against an
+      unloadable catalog attaches an empty standby router; the
+      periodic reload heals it when a good artifact lands.
+      Test: standby-heals integration (passthrough → routed, ready).
+- [x] **Iter 24 — Decision tier.** `openrouter/pair/decision[/free]`
+      routes decisions-capable offerings (schema v5 index from model
+      modality); `decision/free/fallback/<tier>` falls back past
+      exhaustion; `EXTRA_MODEL_IDS` syncs unlisted models.
+      Test: extraction trio + fetch merge + parse + 3 integration
+      (route, fallback, fail-closed).
+- [x] **Iter 25 — OpenRouter-native interface.** `/api/v1/chat/completions`
+      + `/api/v1/responses` alias to the routed handler; native fallback
+      paths compose against the upstream root (no double `/api`);
+      management writes deny by default (`ALLOW_MANAGEMENT_PROXY=1` opts
+      in). Test: `tests/openrouter_native.rs` + metrics unit test;
+      `cargo test`, clippy, fmt clean.
+- [x] **Iter 26 — Smart classifier.** `openrouter/pair/smart[/max]`
+      (+ `privacy/` variants) picks a tier per request via one
+      decision-model leg (`free`/`lowest`/`low`, plus `think` on
+      `smart/max`), then the normal tier dispatch with no session
+      pinning; fail-closed when unconfigured, marked fallback tier
+      otherwise, rejected tiers never re-picked; classifier metrics +
+      `/ui` panel. Test: `crates/gateway/tests/smart_classifier.rs`
+      (16 integration over mock classifier + mock upstream) +
+      classifier/verdict + routing unit tests. `cargo test`, clippy,
+      fmt clean.
+- [x] **Iter 27 — Decisions route.** `POST /v1/decisions` forwards
+      model-rewritten bodies to the upstream alpha endpoint with
+      retry + decision-only fallback. Test: 5 integration (route,
+      fail-closed, passthrough, fallback, wrong-target).
+- [x] **Iter 28 — Pinned-model routes.** `openrouter/pair/model/<id>`
+      (+ `privacy/model/<id>`) pins to one specific catalog model and
+      picks the best provider for it — ranking/cost, throttle skip,
+      budget caps, tool filter, `.../fallback/<tier>` all scope to that
+      model's offerings. Test: parse + integration (route/fallback/
+      budget/tool/throttle/privacy/unknown).
+- [x] **Iter 29 — Routing inspector.** `GET /ui` inspector + `GET
+      /ui/preview?model=<id>&top=N` (behind `GATEWAY_UI=1`): fixed
+      non-smart virtual combos top-3 plus a custom-model box, every
+      stored column (prices, effective cost, class, tier/score, tools,
+      decisions, promo, free, availability, rank) with sticky-vs-fresh
+      picks and the session hash. Key travels as `Authorization`,
+      never logged/stored; previews never pin. Test: `tests/ui.rs`
+      preview suite (ordering, sticky/fresh, no-pin, throttle,
+      disabled gate, page content).
+- [x] **Iter 30 — OpenRouter catalog judge.** `--judge-backend
+      openrouter` judges through an operator-picked OpenRouter
+      model (`OPENROUTER_JUDGE_MODEL`, fail-closed) on the shared
+      OpenAI-chat core, keyed by the shared `RANKINGS_API_KEY`;
+      cataloged like the other live backends. Test: stub-server
+      round trip + fail-closed matrix + catalog + CLI dispatch.
+- [x] **Iter 31 — Artificial Analysis index ingestion.** Schema
+      v5→v6: `models` gains `aa_intelligence/coding/agentic_index`
+      (ints rounded from live int/float values, `None` when
+      absent/null/non-numeric/out-of-range), distilled by
+      `run_processing`; gateway snapshot carries the coding map
+      (display-only, `/ui` model headers) for future filters.
+      Deploy with/after the first v6 publish (v6 gateway rejects
+      v5 artifacts; last-good covers reloads). Test: extract
+      vectors + migrate + processing + snapshot carry + live
+      one-shot (168/469 coding).
+- [x] **Iter 32 — Scoring rename + offline tiers.** Judging →
+      scoring end to end (`Scorer`, `--score-backend`,
+      `scorers.json`/`scores.json`, `OPENROUTER_SCORE_MODEL`,
+      `MODAL_SCORE_URL`, schema v6→v7 audit-column rename);
+      `OfflineScorer` derives tiers from the AA coding index
+      (70+ high, 40+ standard, else low) in `run_processing`
+      on untiered rows only — online verdicts always win.
+      Deploy with/after the first v7 publish (v7 gateway rejects
+      v6 artifacts) + rename the two env vars in `.env`. Test:
+      cutoff/clamp/identity units + processing tiers/meta +
+      precedence + v6→v7 migrate + CLI offline line; full
+      workspace green (39 suites).
+- [x] **Iter 33 — `minindex` suffix filter.** Optional
+      `/minindex/<0..=100>` on every virtual id (`free`, `low`,
+      `think`, `decision`, `model/<id>`, `smart`), placed after the
+      core id and before `/fallback/`. Keeps only models whose
+      catalog `aa_coding_index` meets the floor; the floor is the
+      first eligibility gate (a cheaper model below it, or with no
+      index, never wins; `minindex/0` = "must have any index") and
+      scopes the primary leg only — fallback tiers run unfiltered.
+      Unusable values fail closed with `invalid_model` (400),
+      unsatisfiable floors with `no_eligible_offering` (503);
+      routed responses echo `x-pennyrouter-minindex` and
+      `pennyrouter_minindex_requests_total{minindex,tier,result}`
+      counts them. Test: parse matrix + filter/pinned/fallback
+      units + `tests/minindex.rs` (route/header, 400, 503,
+      metrics); `cargo test --workspace`, clippy, fmt clean.
+- [x] **Iter 34 — Catalog value score + catalog UI.** Sync computes
+      a deterministic `rank_score` per offering —
+      `quality × efficiency × popularity`, where quality is the AA
+      index (coding → intelligence → agentic, recorded in
+      `rank_basis`) times a precision factor (fp16 1.00, fp8 0.97,
+      int8 0.95, int4/fp4 0.88, unknown 0.95), efficiency is
+      `COST_HALF_CREDIT/(cost_per_task+COST_HALF_CREDIT)` with
+      `COST_HALF_CREDIT` = $0.01 (the live median), and popularity
+      is a ≤10% factor from the rankings window; speed then
+      availability are tie-breakers. No AI, no external ranking.
+      Schema v7→v8 adds latency/throughput/uptime, popularity, and
+      the `rank_*` components; the ranking document gains an
+      optional `score` ordering the gateway ignores for now.
+      Catalog UI is now an overview (coverage counts, data-quality
+      warnings, the formula and constants, a worked example) plus a
+      models page with `free`/`tiers`/`decision` tabs sorted by
+      score, each row expanding to its full arithmetic. Popularity
+      is fetched before processing so the score can read it. Test:
+      score units (curve, basis chain, clamps, tie-breaks) +
+      processing (score, free, unpriced, no-index, speed,
+      popularity) + ranking `score` ordering + UI overview/tabs;
+      full workspace green (39 suites), clippy/fmt clean.
+      Proposal: `docs/proposals/2026-11-12-catalog-ui-value-score.md`.
+- [x] **Iter 35 — Catalog UI force re-sync.** Overview `Force re-sync`
+      button (`POST /resync`) drops a `.resync-requested` trigger the
+      sync loop polls every 10s and starts the next cycle early; the
+      loop stays the single writer. Test: `resync_button_…` UI test +
+      live entrypoint probes (one-shot/early/short-interval).
+- [x] **Iter 36 — Exact quantization pin.** Schema v8→v9 stores the
+      raw quantization verbatim beside the grouping class; the
+      gateway pins the raw value on the wire (fp4 pins `fp4`, never
+      `int4`; unknown/missing pins nothing; caller still wins) and
+      the inspector shows it. Deploy with/after the first v9
+      publish. Test: extraction + processing + migrate + wire-pin
+      suite + preview carry; full workspace green (40 suites).
+- [x] **Iter 38 — OpenRouter Batch API.** Dedicated `POST
+      /api/v1/batches` (submit, 202) and `GET /api/v1/batches/{id}`
+      (poll) handlers with the standard shedding/cap/error mapping;
+      upstream path rewritten to `/v1/batches…` (Iter 25, no `/api`
+      doubling); own `batch_submit` / `batch_status` metrics slots.
+      Test: `tests/batch_api.rs` (submit/poll byte-equality, query
+      kept, suffixed-base no-doubling, labels in `/metrics`).

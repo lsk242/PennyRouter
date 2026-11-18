@@ -1,15 +1,16 @@
 # Pricing
 
 Price is not a single number: input, output, and cache tokens price
-differently, and the mix varies per request. Accurate cheapest-provider
-selection really wants a classifier — which we are not building yet.
+differently, and the mix varies per request. The smart-leg classifier
+(Iter 26) picks tiers, never dollars — see
+[Smart classifier](routing.md#smart-classifier-iter-26).
 (Iter 7.)
 
-## Abstraction (no classifier)
+## Abstraction (workload profiles)
 
-Until a classifier exists, collapse the input/output/cache relationship
-into a small set of workload profiles (e.g. cache-heavy session,
-balanced chat, output-heavy generation) and rank providers per profile.
+Collapse the input/output/cache relationship into a small set of
+workload profiles (e.g. cache-heavy session, balanced chat,
+output-heavy generation) and rank providers per profile.
 The default profile should match the common case; suffix tags may select
 one explicitly later.
 
@@ -35,8 +36,11 @@ quality at a lower price.
 - Profiles: `balanced` (50/40/5/5 input/output/cache-read/cache-write,
   the default behind every cost comparison), `cache_heavy`
   (20/10/60/10), `output_heavy` (20/70/5/5). No per-request profile
-  selection yet — no classifier, no profile tags; the profiles exist
-  so cost math is explicit and testable.
+  selection yet — the smart leg picks tiers, not profiles, and there
+  are no profile tags; the profiles exist so cost math is explicit
+  and testable. Every comparison is a blended approximation under the
+  fixed default profile, not a per-token optimum — exact per-request
+  pricing (predicting the real input/output/cache mix) is deferred.
 - Effective cost: shares blended after discount; missing
   prompt/completion prices are unpriceable (sort last); missing cache
   prices bill as input; discounts clamp to [0, 1].
@@ -67,6 +71,18 @@ quality at a lower price.
 - Modality/context/ZDR constraints stay out: price compares within
   precision class (the constraint the index carries); richer
   eligibility waits for the signals.
+- Long-context hardcap (Q13-C): some endpoints bill an override
+  price past a prompt-token threshold (`pricing.overrides[]`, e.g.
+  2× past 272k). The sync indexes the smallest
+  `min_prompt_tokens` per endpoint (`price_override_tokens`); the
+  gateway estimates each request's input tokens (message chars/4
+  heuristic, documented inexact) and skips offerings at/above their
+  tier, re-routing to the next fitting pick — sticky pins included
+  (an over-threshold pin re-pins fresh). Nothing fitting fails
+  closed with `context_exceeded` (400): shorten the input or pin a
+  model directly. No threshold (or no measurable messages, e.g.
+  decisions bodies) means no cap — fail open, never guess. No
+  truncation, ever: the gateway refuses rather than rewriting content.
 - Caller budget caps (Iter 14): `provider.max_price: {prompt,
   completion}` in the request body sets a hard ceiling compared
   against the raw per-token `price_prompt`/`price_completion`

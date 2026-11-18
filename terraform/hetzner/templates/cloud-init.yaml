@@ -19,9 +19,9 @@ write_files:
           image: ${gateway_image}
           restart: unless-stopped
           ports:
-            - "%{ if domain != "" }127.0.0.1:${host_port}:3000%{ else }${host_port}:3000%{ endif }"
+            - "%{ if domain != "" }127.0.0.1:${host_port}:8080%{ else }${host_port}:8080%{ endif }"
           environment:
-            PORT: "3000"
+            PORT: "8080"
             OPENROUTER_BASE_URL: ${openrouter_base_url}
       %{ if domain != "" }
         caddy:
@@ -40,7 +40,7 @@ write_files:
     permissions: "0644"
     content: |
       ${domain} {
-              reverse_proxy gateway:3000
+              reverse_proxy gateway:8080
       %{ if acme_email != "" }       tls ${acme_email}
       %{ endif }}
 

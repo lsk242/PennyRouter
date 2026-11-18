@@ -1,26 +1,35 @@
-# Dev deployment: both services, pull-only, never builds. Deployed by
-# scripts/deploy.sh like prod but with this file, its own directory,
-# and its own host port (defaults: prod 3000, dev 8003):
-#   COMPOSE_FILE=compose.dev.yaml DEPLOY_DIR=/opt/stacks/pennyrouter-dev \
-#     HOST_PORT=8003 ./scripts/deploy.sh
-# Both images come from GitHub Packages (ghcr.io), pushed by CI on every
-# merge to main. No `build:` section on purpose (CI-guarded). The
-# catalog-sync image carries its fixture input baked in, so no checkout
-# is needed on the server; it writes versioned DB artifacts to the
-# shared catalog-data volume, which the gateway mounts read-only.
+# Server stack: gateway + catalog-sync + catalog-ui, pull-only, never
+# builds. Served behind a reverse proxy (Nginx Proxy Manager): no
+# published ports anywhere — gateway and catalog-ui join the
+# front-proxy network and expose 8080 there (proxy hosts reach
+# gateway:8080 and catalog-ui:8080; stable container names). The
+# network must already exist on the host (it belongs to the proxy
+# stack). Deployed by scripts/deploy.sh (scp + pull) or as a git
+# stack (compose file path = compose.dev.yaml).
+# Config splits two ways: generic values load from the repo's
+# `.env.dev` via `env_file:` (shipped beside compose.yaml by the scp
+# deploy, present from git on git-stack hosts); secrets + custom URLs
+# come from `environment:` interpolation (shipped merged `.env` on
+# scp, stack environment on git-stack hosts — `environment:` wins
+# over `env_file:` on conflicts).
+# Container port is 8080 everywhere (`expose` is static): PORT in
+# .env.dev must stay 8080 — the gateway listens on $PORT.
 services:
   gateway:
     image: ${IMAGE:-ghcr.io/lsk242/pennyrouter:latest}
     container_name: gateway
-    ports:
-      - "${HOST_PORT:-8003}:${PORT:-3000}"
+    expose:
+      - "8080"
+    env_file:
+      - .env.dev
     environment:
-      PORT: ${PORT:-3000}
-      OPENROUTER_BASE_URL: ${OPENROUTER_BASE_URL:-https://openrouter.ai/api}
+      # Secrets + custom URLs only (generic config arrives via
+      # env_file above). Interpolated from the project env: the
+      # shipped merged .env on scp deploys, the stack-manager
+      # environment on git deploys.
       MODAL_BASE_URL: ${MODAL_BASE_URL:-}
-      BASETEN_BASE_URL: ${BASETEN_BASE_URL:-https://inference.baseten.co/v1}
-      GATEWAY_UI: ${GATEWAY_UI:-}
-      CATALOG_DB: /catalog
+      MODAL_MODELS: ${MODAL_MODELS:-}
+      BASETEN_MODELS: ${BASETEN_MODELS:-}
     volumes:
       - catalog-data:/catalog:ro
     restart: unless-stopped
@@ -28,9 +37,34 @@ services:
     image: ${CATALOG_IMAGE:-ghcr.io/lsk242/pennyrouter-catalog:latest}
     volumes:
       - catalog-data:/catalog
+    env_file:
+      - .env.dev
     environment:
-      SYNC_INTERVAL: ${SYNC_INTERVAL:-3600}
-      FETCH_OPENROUTER: ${FETCH_OPENROUTER:-0}
+      # Secrets only (generic config arrives via env_file above):
+      # score backends + popularity-pins Data API key.
+      BASETEN_API_KEY: ${BASETEN_API_KEY:-}
+      MODAL_KEY_ID: ${MODAL_KEY_ID:-}
+      MODAL_KEY_SECRET: ${MODAL_KEY_SECRET:-}
+      MODAL_SCORE_URL: ${MODAL_SCORE_URL:-}
+      RANKINGS_API_KEY: ${RANKINGS_API_KEY:-}
+    restart: unless-stopped
+  # Artifact browser: no published ports — it joins the
+  # front-proxy network so Nginx Proxy Manager reaches it at
+  # catalog-ui:8080. Create that proxy host in the NPM UI (port 81),
+  # plus one for the gateway at gateway:8080. Read-write mount for the
+  # force re-sync trigger file only (POST /resync writes
+  # .resync-requested; the UI never touches the DB).
+  catalog-ui:
+    image: ${CATALOG_IMAGE:-ghcr.io/lsk242/pennyrouter-catalog:latest}
+    container_name: catalog-ui
+    command: ["catalog-ui", "--dir", "/catalog", "--bind", "0.0.0.0"]
+    expose:
+      - "8080"
+    volumes:
+      - catalog-data:/catalog
+    environment:
+      CATALOG_UI: "1"
+      PORT: "8080"
     restart: unless-stopped
 
 volumes:

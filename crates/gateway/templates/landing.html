@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="/favicon.ico" type="image/svg+xml">
+<title>PennyRouter gateway</title>
+<style>
+  /* 8-bit arcade theme (shared palette with ui.html): dark CRT, chunky
+     borders, hard pixel shadows, sharp corners. CSS only, no assets. */
+  :root {
+    color-scheme: dark;
+    --bg: #0d0f1e;
+    --panel: #151a33;
+    --panel-2: #1c2342;
+    --ink: #e9ecff;
+    --muted: #a3acc9;
+    --line: #2c3560;
+    --link: #00e5ff;
+    --cyan: #00e5ff;
+    --magenta: #ff2e88;
+    --yellow: #ffd23f;
+    --green: #39ff6a;
+    --orange: #ff9f1c;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  }
+  * { box-sizing: border-box; border-radius: 0 !important; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--mono);
+    font-size: 0.95rem;
+    line-height: 1.55;
+  }
+  /* CRT scanlines: subtle texture overlay, no pointer interference. */
+  body::after {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: 9999;
+    pointer-events: none;
+    background: repeating-linear-gradient(0deg, rgba(0, 0, 0, 0.14) 0 1px, transparent 1px 3px);
+  }
+  a { color: var(--link); }
+  a:hover { color: var(--yellow); }
+  :focus-visible { outline: 2px solid var(--yellow); outline-offset: 2px; }
+  code, .mono { font-family: var(--mono); font-size: 0.875em; }
+  header.top { background: var(--panel); border-bottom: 3px solid var(--magenta); box-shadow: 0 3px 0 #000; }
+  .wrap { max-width: 56rem; margin: 0 auto; padding: 0 1.5rem; }
+  .brand { display: flex; align-items: baseline; gap: 0.75rem; flex-wrap: wrap; padding: 1.4rem 0; }
+  .brand h1 {
+    font-size: 1.4rem; margin: 0; font-weight: 700; letter-spacing: 0.06em;
+    color: var(--yellow); text-shadow: 3px 3px 0 #000;
+  }
+  .brand h1 span { color: var(--cyan); font-weight: 700; }
+  .brand .spacer { flex: 1; }
+  .badge {
+    font-size: 0.75rem; font-weight: 700; white-space: nowrap; letter-spacing: 0.06em;
+    background: var(--yellow); color: #1a1400; padding: 0.25rem 0.7rem;
+    clip-path: polygon(8px 0, 100% 0, 100% calc(100% - 8px), calc(100% - 8px) 100%, 0 100%, 0 8px);
+  }
+  main .wrap { padding-top: 1.75rem; padding-bottom: 3rem; display: grid; gap: 2rem; }
+  section h2 {
+    font-size: 1rem; margin: 0 0 0.6rem; font-weight: 700; letter-spacing: 0.08em;
+    color: var(--cyan); text-shadow: 2px 2px 0 #000;
+  }
+  section p.sub { margin: 0 0 0.6rem; color: var(--muted); font-size: 0.9rem; }
+  .panel { border: 3px solid var(--line); background: var(--panel); box-shadow: 6px 6px 0 #000; }
+  dl.status { margin: 0; }
+  dl.status > div { display: flex; gap: 1rem; align-items: baseline; padding: 0.65rem 1rem; }
+  dl.status > div + div { border-top: 2px solid var(--line); }
+  dl.status dt { flex: 0 0 9.5rem; color: var(--muted); font-size: 0.9rem; }
+  dl.status dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+  .pill {
+    display: inline-block; font-size: 0.72rem; font-weight: 700; line-height: 1;
+    letter-spacing: 0.06em; padding: 0.32rem 0.6rem; margin-right: 0.5rem; vertical-align: 0.08em;
+    clip-path: polygon(6px 0, 100% 0, 100% calc(100% - 6px), calc(100% - 6px) 100%, 0 100%, 0 6px);
+  }
+  .pill.ok { background: var(--green); color: #06130a; }
+  .pill.warn { background: var(--yellow); color: #1a1400; }
+  .table-scroll { overflow-x: auto; border: 3px solid var(--line); background: var(--panel); box-shadow: 6px 6px 0 #000; }
+  table.endpoints { border-collapse: collapse; width: 100%; font-size: 0.9rem; }
+  table.endpoints th, table.endpoints td { text-align: left; padding: 0.55rem 0.8rem; vertical-align: top; }
+  table.endpoints thead th {
+    background: var(--panel-2); color: var(--yellow); font-weight: 700; font-size: 0.78rem;
+    letter-spacing: 0.08em; border-bottom: 3px solid var(--magenta); white-space: nowrap;
+  }
+  table.endpoints tbody tr + tr td { border-top: 2px solid var(--line); }
+  table.endpoints tbody tr:nth-child(even) td { background: rgba(255, 255, 255, 0.025); }
+  table.endpoints td.path { white-space: nowrap; }
+  table.endpoints td.desc { color: var(--muted); }
+  .method {
+    display: inline-block; font-size: 0.7rem; font-weight: 700; line-height: 1;
+    padding: 0.32rem 0.5rem; letter-spacing: 0.06em;
+    clip-path: polygon(5px 0, 100% 0, 100% calc(100% - 5px), calc(100% - 5px) 100%, 0 100%, 0 5px);
+  }
+  .method.get { background: var(--green); color: #06130a; }
+  .method.post { background: var(--cyan); color: #00222a; }
+  footer { border-top: 3px solid var(--line); }
+  footer .wrap { padding-top: 1rem; padding-bottom: 1.5rem; color: var(--muted); font-size: 0.82rem; }
+  footer .wrap p { margin: 0.15rem 0; }
+  @media (max-width: 40rem) {
+    dl.status > div { flex-direction: column; gap: 0.15rem; }
+    dl.status dt { flex: none; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    body::after { display: none; }
+  }
+</style>
+</head>
+<body>
+<header class="top">
+  <div class="wrap brand">
+    <h1>PennyRouter <span>gateway</span></h1>
+    <div class="spacer"></div>
+    <span class="badge">v{{version}}</span>
+  </div>
+</header>
+<main>
+  <div class="wrap">
+    <section aria-label="Status">
+      <h2>Status</h2>
+      <div class="panel">
+        <dl class="status">
+          <div>
+            <dt>Routing</dt>
+            <dd><span class="pill {{routing_pill_class}}">{{routing_pill_text}}</span><span class="mono">{{routing_text}}</span></dd>
+          </div>
+          <div>
+            <dt>Debug UI</dt>
+            <dd><span class="pill {{ui_pill_class}}">{{ui_pill_text}}</span>{{ui_detail}}</dd>
+          </div>
+          <div>
+            <dt>Default upstream</dt>
+            <dd><span class="mono">{{upstream}}</span></dd>
+          </div>
+          <div>
+            <dt>Pinned upstreams</dt>
+            <dd><span class="mono">{{pinned}}</span></dd>
+          </div>
+        </dl>
+      </div>
+    </section>
+    <section aria-label="Endpoints">
+      <h2>Endpoints</h2>
+      <p class="sub">Routed chat, completions, and decisions go through the virtual menu — see <a href="/v1/models">/v1/models</a>.</p>
+      <div class="table-scroll">
+        <table class="endpoints">
+          <thead>
+            <tr><th>Method</th><th>Path</th><th>Description</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><span class="method post">POST</span></td>
+              <td class="path mono">/v1/chat/completions</td>
+              <td class="desc">Routed chat completions (virtual ids, pinned providers, passthrough)</td>
+            </tr>
+            <tr>
+              <td><span class="method post">POST</span></td>
+              <td class="path mono">/v1/responses</td>
+              <td class="desc">Same routing policy for the Responses API</td>
+            </tr>
+            <tr>
+              <td><span class="method post">POST</span></td>
+              <td class="path mono">/v1/decisions</td>
+              <td class="desc">Decision-model requests over decisions-capable offerings</td>
+            </tr>
+            <tr>
+              <td><span class="method get">GET</span></td>
+              <td class="path mono"><a href="/v1/models">/v1/models</a></td>
+              <td class="desc">Curated virtual-model menu served locally</td>
+            </tr>
+            <tr>
+              <td><span class="method get">GET</span></td>
+              <td class="path mono"><a href="/ui">/ui</a></td>
+              <td class="desc">Debug UI: ranking, routing inspector, metrics ({{ui_endpoint_note}})</td>
+            </tr>
+            <tr>
+              <td><span class="method get">GET</span></td>
+              <td class="path mono"><a href="/metrics">/metrics</a></td>
+              <td class="desc">Prometheus counters and latency histogram</td>
+            </tr>
+            <tr>
+              <td><span class="method get">GET</span></td>
+              <td class="path mono"><a href="/health">/health</a> · <a href="/ready">/ready</a></td>
+              <td class="desc">Liveness (always) and readiness (catalog loaded)</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+</main>
+<footer>
+  <div class="wrap">
+    <p>PennyRouter gateway <span class="mono">v{{version}}</span> (build <span class="mono">{{build}}</span>)</p>
+    <p>OpenRouter-compatible routing proxy: one fast local lookup, single backend forward.</p>
+  </div>
+</footer>
+</body>
+</html>

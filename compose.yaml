@@ -1,7 +1,12 @@
 # Local development: builds the image from source and runs it.
 # Usage (from the repo root):
-#   cp -n .env.example .env   # once; optional, defaults work without it
-#   docker compose up --build
+#   make dev   # = docker compose --env-file .env.dev [--env-file .env] up --build
+# Same config split as compose.dev.yaml: generic values from the
+# committed .env.dev via `env_file:`, secrets + custom URLs from the
+# gitignored .env overlay via `environment:` (optional — fail-closed
+# defaults apply without it). Local differences: images build from
+# source, ports publish to the host (no reverse proxy on a laptop),
+# and catalog-sync mounts the fixture input dir.
 # The catalog-sync service writes versioned DB artifacts to the shared
 # catalog-data volume, which the gateway mounts read-only.
 services:
@@ -12,18 +17,19 @@ services:
     image: ${IMAGE:-pennyrouter:dev}
     container_name: gateway
     ports:
-      - "${HOST_PORT:-3000}:${PORT:-3000}"
+      - "${HOST_PORT:-3000}:${PORT:-8080}"
     # Lets the container reach host-run mocks (perf comparison) via
     # http://host.docker.internal:<port>. Harmless for normal dev.
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    env_file:
+      - .env.dev
     environment:
-      PORT: ${PORT:-3000}
-      OPENROUTER_BASE_URL: ${OPENROUTER_BASE_URL:-https://openrouter.ai/api}
+      # Secrets + custom URLs only (generic config arrives via
+      # env_file above), interpolated from .env.dev + .env.
       MODAL_BASE_URL: ${MODAL_BASE_URL:-}
-      BASETEN_BASE_URL: ${BASETEN_BASE_URL:-https://inference.baseten.co/v1}
-      GATEWAY_UI: ${GATEWAY_UI:-}
-      CATALOG_DB: ${CATALOG_DB:-/catalog}
+      MODAL_MODELS: ${MODAL_MODELS:-}
+      BASETEN_MODELS: ${BASETEN_MODELS:-}
     volumes:
       - catalog-data:/catalog:ro
   catalog-sync:
@@ -35,9 +41,16 @@ services:
       - catalog-data:/catalog
       # Fixture input until live fetching lands.
       - ./crates/catalog/tests/fixtures:/input:ro
+    env_file:
+      - .env.dev
     environment:
-      SYNC_INTERVAL: ${SYNC_INTERVAL:-3600}
-      FETCH_OPENROUTER: ${FETCH_OPENROUTER:-0}
+      # Secrets only (generic config arrives via env_file above):
+      # score backends + popularity-pins Data API key.
+      BASETEN_API_KEY: ${BASETEN_API_KEY:-}
+      MODAL_KEY_ID: ${MODAL_KEY_ID:-}
+      MODAL_KEY_SECRET: ${MODAL_KEY_SECRET:-}
+      MODAL_SCORE_URL: ${MODAL_SCORE_URL:-}
+      RANKINGS_API_KEY: ${RANKINGS_API_KEY:-}
     restart: unless-stopped
   # Opt-in catalog browser (Iter 17): only starts with
   #   docker compose --profile ui up catalog-ui
@@ -48,11 +61,13 @@ services:
       context: .
       dockerfile: docker/Dockerfile.catalog
     image: ${CATALOG_IMAGE:-pennyrouter-catalog:dev}
-    command: ["catalog-ui", "--dir", "/catalog"]
+    command: ["catalog-ui", "--dir", "/catalog", "--bind", "0.0.0.0"]
     ports:
       - "${CATALOG_UI_PORT:-8080}:8080"
     volumes:
-      - catalog-data:/catalog:ro
+      # Read-write for the force re-sync trigger file only
+      # (POST /resync writes .resync-requested; the UI never touches the DB).
+      - catalog-data:/catalog
     environment:
       CATALOG_UI: "1"
       PORT: "8080"

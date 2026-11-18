@@ -44,7 +44,7 @@ fn tier_rank(tier: Option<&str>) -> u8 {
     }
 }
 
-fn asc_nulls_last(a: Option<f64>, b: Option<f64>) -> std::cmp::Ordering {
+pub(crate) fn asc_nulls_last(a: Option<f64>, b: Option<f64>) -> std::cmp::Ordering {
     match (a, b) {
         (Some(x), Some(y)) => x.total_cmp(&y),
         (Some(_), None) => std::cmp::Ordering::Less,
@@ -56,7 +56,7 @@ fn asc_nulls_last(a: Option<f64>, b: Option<f64>) -> std::cmp::Ordering {
 /// Descending numbers with unknowns still last (Iter 11, F10):
 /// reversing the operands of `asc_nulls_last` would also reverse the
 /// null policy and promote missing scores ahead of known ones.
-fn desc_nulls_last(a: Option<f64>, b: Option<f64>) -> std::cmp::Ordering {
+pub(crate) fn desc_nulls_last(a: Option<f64>, b: Option<f64>) -> std::cmp::Ordering {
     match (a, b) {
         (Some(x), Some(y)) => y.total_cmp(&x),
         (Some(_), None) => std::cmp::Ordering::Less,
@@ -65,17 +65,13 @@ fn desc_nulls_last(a: Option<f64>, b: Option<f64>) -> std::cmp::Ordering {
     }
 }
 
-/// Orientation ordering over signals. Unknown error rates count as zero
-/// (no evidence of failures); unknown latencies sort after known ones.
-/// Provider and tag break all remaining ties, so rebuilds are stable.
+/// Orientation ordering over signals. Unknown error rates sort last
+/// (Q02-A: no evidence is not evidence of perfection), like unknown
+/// costs, scores, and latencies. Provider and tag break all remaining
+/// ties, so rebuilds are stable.
 pub fn compare(a: &Signals, b: &Signals, orientation: RankOrientation) -> std::cmp::Ordering {
     let price = || asc_nulls_last(a.cost, b.cost);
-    let errors = || {
-        asc_nulls_last(
-            Some(a.error_rate.unwrap_or(0.0)),
-            Some(b.error_rate.unwrap_or(0.0)),
-        )
-    };
+    let errors = || asc_nulls_last(a.error_rate, b.error_rate);
     let latency = || asc_nulls_last(a.latency_ms, b.latency_ms);
     let tier = || tier_rank(b.tier).cmp(&tier_rank(a.tier));
     let score = || desc_nulls_last(a.score, b.score);
@@ -95,6 +91,7 @@ pub fn compare(a: &Signals, b: &Signals, orientation: RankOrientation) -> std::c
             .then_with(score)
             .then_with(errors)
             .then_with(price)
+            .then_with(latency)
             .then_with(identity),
     }
 }
@@ -288,12 +285,17 @@ pub struct ClassRanking {
     pub default: Vec<RankEntry>,
     pub price: Vec<RankEntry>,
     pub quality: Vec<RankEntry>,
+    /// Value-score ordering (Iter 34). Empty when the catalog was
+    /// never processed, so a v7-era document still parses and the
+    /// gateway can ignore the field until it adopts the score.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub score: Vec<RankEntry>,
 }
 
 /// One free offering (Iter 11, F11): free only through
 /// `valid_until_unix` (unix seconds, half-open like promo windows);
 /// `None` means free by permanent catalog zeros with no expiry.
-/// Published so the gateway judges eligibility without the promo file —
+/// Published so the gateway scorers eligibility without the promo file —
 /// an expired or missing fact is never a permanent zero.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FreeOffer {
@@ -346,6 +348,10 @@ pub fn rank_catalog(
     let mut seen_models: Vec<String> = Vec::new();
     let mut endpoints_by_model: HashMap<String, Vec<usize>> = HashMap::new();
     let endpoints = catalog.all_endpoints()?;
+    // Value-score components (Iter 34): stored per endpoint by
+    // processing, read here so the published ordering matches the UI.
+    let ranks = catalog.endpoint_ranks()?;
+    let speeds = catalog.endpoint_speeds()?;
     // Parsed payloads alongside the rows: tag identity for ordering
     // borrows these instead of re-parsing per comparison (Iter 11, A03,
     // and cheaper than the old per-compare parse).
@@ -398,11 +404,39 @@ pub fn rank_catalog(
                     })
                     .collect()
             };
+            // Only publish the score ordering when the catalog was
+            // processed: an unprocessed DB has no scores, and an
+            // all-NULL ordering would be a meaningless identity list.
+            let scored = members.iter().any(|i| {
+                ranks
+                    .get(&endpoints[*i].id)
+                    .and_then(|rank| rank.rank_score)
+                    .is_some()
+            });
+            let score = if scored {
+                let mut sorted = members.clone();
+                sorted.sort_by(|a, b| {
+                    crate::rank_score::compare(
+                        &rank_key(&endpoints[*a], &payloads[*a], &ranks, &speeds),
+                        &rank_key(&endpoints[*b], &payloads[*b], &ranks, &speeds),
+                    )
+                });
+                apply_assist(model_id, &sorted, &endpoints, assist)
+                    .into_iter()
+                    .map(|i| RankEntry {
+                        provider: endpoints[i].provider_name.clone(),
+                        tag: endpoint_tag_of(&endpoints[i]),
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
             rankings.push(ClassRanking {
                 class,
                 default: order(RankOrientation::Default),
                 price: order(RankOrientation::Price),
                 quality: order(RankOrientation::Quality),
+                score,
             });
         }
         by_model.insert(model_id.clone(), rankings);
@@ -415,18 +449,10 @@ pub fn rank_catalog(
         let Some(indices) = endpoints_by_model.get(model_id) else {
             continue;
         };
-        let mut offers = Vec::new();
+        let mut offers: Vec<FreeOffer> = Vec::new();
         for i in indices {
             let ep = &endpoints[*i];
             let tag = endpoint_tag_of(ep);
-            let seen = |offers: &[FreeOffer]| {
-                offers
-                    .iter()
-                    .any(|o| o.provider == ep.provider_name && o.tag == tag)
-            };
-            if seen(&offers) {
-                continue;
-            }
             let profile = crate::price::balanced_profile();
             let static_cost = crate::price::effective_cost(
                 ep.price_prompt,
@@ -436,26 +462,45 @@ pub fn rank_catalog(
                 &profile,
                 ep.promo_discount.unwrap_or(0.0),
             );
-            if static_cost == Some(0.0) {
-                offers.push(FreeOffer {
-                    provider: ep.provider_name.clone(),
-                    tag,
-                    valid_until_unix: None,
-                });
-            } else if let Some(ends_at) =
-                promos.free_until(&ep.model_id, &ep.provider_name, tag.as_deref(), now)
+            let candidate: Option<Option<u64>> = if static_cost == Some(0.0) {
+                Some(None)
+            } else {
+                promos
+                    .free_until(&ep.model_id, &ep.provider_name, tag.as_deref(), now)
+                    .map(|ends_at| {
+                        time::OffsetDateTime::parse(
+                            &ends_at,
+                            &time::format_description::well_known::Rfc3339,
+                        )
+                        .map(|t| t.unix_timestamp().max(0) as u64)
+                        .ok()
+                    })
+            };
+            let Some(valid_until) = candidate else {
+                continue;
+            };
+            // Best offer wins per provider+tag: a permanent zero (`None`)
+            // beats any expiry, and the latest expiry beats earlier ones —
+            // row order must never decide.
+            match offers
+                .iter_mut()
+                .find(|o| o.provider == ep.provider_name && o.tag == tag)
             {
-                let valid_until_unix = time::OffsetDateTime::parse(
-                    &ends_at,
-                    &time::format_description::well_known::Rfc3339,
-                )
-                .map(|t| t.unix_timestamp().max(0) as u64)
-                .ok();
-                offers.push(FreeOffer {
+                None => offers.push(FreeOffer {
                     provider: ep.provider_name.clone(),
                     tag,
-                    valid_until_unix,
-                });
+                    valid_until_unix: valid_until,
+                }),
+                Some(existing) => {
+                    let better = match (existing.valid_until_unix, valid_until) {
+                        (None, _) => false,
+                        (Some(_), None) => true,
+                        (Some(have), Some(want)) => want > have,
+                    };
+                    if better {
+                        existing.valid_until_unix = valid_until;
+                    }
+                }
             }
         }
         if !offers.is_empty() {
@@ -480,7 +525,7 @@ fn signals<'a>(
     let trend = trends.get(&ep.model_id, &ep.provider_name);
     // Real tag identity (Iter 11, A03): the same tag the entry build
     // and the gateway inline sort use, so all three agree on ties.
-    let tag = crate::judge::endpoint_tag(payload);
+    let tag = crate::score::endpoint_tag(payload);
     let discount = crate::price::resolve_discount(
         promos,
         &ep.model_id,
@@ -507,10 +552,30 @@ fn signals<'a>(
     }
 }
 
+/// Ordering key for the value-score ordering (Iter 34): the stored
+/// score plus the tie-breakers, borrowed from the row and payload.
+fn rank_key<'a>(
+    ep: &'a crate::store::EndpointRow,
+    payload: &'a serde_json::Value,
+    ranks: &'a HashMap<i64, crate::store::EndpointRank>,
+    speeds: &'a HashMap<i64, crate::store::EndpointSpeed>,
+) -> crate::rank_score::RankKey<'a> {
+    let rank = ranks.get(&ep.id);
+    let speed = speeds.get(&ep.id);
+    crate::rank_score::RankKey {
+        score: rank.and_then(|rank| rank.rank_score),
+        throughput_tps: speed.and_then(|speed| speed.throughput_tps),
+        latency_ms: speed.and_then(|speed| speed.latency_ms),
+        uptime_pct: speed.and_then(|speed| speed.uptime_pct),
+        provider: &ep.provider_name,
+        tag: crate::score::endpoint_tag(payload),
+    }
+}
+
 fn endpoint_tag_of(ep: &crate::store::EndpointRow) -> Option<String> {
     serde_json::from_str(&ep.payload)
         .ok()
-        .and_then(|v: serde_json::Value| crate::judge::endpoint_tag(&v).map(str::to_string))
+        .and_then(|v: serde_json::Value| crate::score::endpoint_tag(&v).map(str::to_string))
 }
 
 /// Stable partition: preferred providers first, avoided last, relative
@@ -537,8 +602,10 @@ fn apply_assist(
 }
 
 /// Publish a ranking document as `ranking-<version>.json` plus a
-/// `ranking-<version>.manifest.json` sidecar. The version is the content
-/// hash prefix, so identical rebuilds are idempotent.
+/// `ranking-<version>.manifest.json` sidecar. The version is the
+/// content hash prefix with `created_at` zeroed, so identical rebuilds
+/// mint the identical version (the stored doc keeps its real stamp;
+/// integrity still covers the stored bytes via `sha256`).
 pub fn publish_ranking(
     doc: &RankingDocument,
     out_dir: &Path,
@@ -546,7 +613,10 @@ pub fn publish_ranking(
     std::fs::create_dir_all(out_dir)?;
     let bytes = serde_json::to_string(doc)?.into_bytes();
     let sha256 = crate::artifact::sha256_hex(&bytes);
-    let version = sha256[..16].to_string();
+    let mut versioned = doc.clone();
+    versioned.created_at = String::new();
+    let version_bytes = serde_json::to_string(&versioned)?.into_bytes();
+    let version = crate::artifact::sha256_hex(&version_bytes)[..16].to_string();
     let file_name = format!("ranking-{version}.json");
     let manifest_name = format!("ranking-{version}.manifest.json");
     let file_path = out_dir.join(&file_name);
@@ -613,16 +683,62 @@ mod tests {
     }
 
     #[test]
-    fn unknown_trends_are_neutral_and_ties_break_by_identity() {
+    fn measured_error_beats_unknown_and_ties_break_by_identity() {
+        // Q02-A overturns the old neutral-unknown rule: a measured
+        // 50%-error endpoint still beats an unmeasured one.
         use RankOrientation::*;
         let flaky = Signals {
             error_rate: Some(0.5),
             ..sig("b", Some(1.0), Some("high"))
         };
         let fresh = sig("a", Some(1.0), Some("high"));
-        assert_eq!(compare(&fresh, &flaky, Default), std::cmp::Ordering::Less);
+        assert_eq!(compare(&flaky, &fresh, Default), std::cmp::Ordering::Less);
         let twin_b = sig("b", Some(1.0), Some("high"));
         assert_eq!(compare(&fresh, &twin_b, Price), std::cmp::Ordering::Less);
+    }
+
+    #[test]
+    fn unknown_error_sorts_after_measured() {
+        // P12/Q02-A: an unmeasured endpoint never beats a measured
+        // 0.1%-error one — unknowns sort last, like cost/score/latency.
+        use RankOrientation::*;
+        let measured = Signals {
+            error_rate: Some(0.001),
+            ..sig("a", Some(1.0), Some("high"))
+        };
+        let unknown = Signals {
+            error_rate: None,
+            ..sig("b", Some(1.0), Some("high"))
+        };
+        assert_eq!(
+            compare(&measured, &unknown, Default),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            compare(&measured, &unknown, Price),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            compare(&unknown, &measured, Quality),
+            std::cmp::Ordering::Greater
+        );
+    }
+
+    #[test]
+    fn quality_breaks_price_ties_by_latency() {
+        // P12/Q02-A: equal tier/score/price falls to latency before
+        // identity. Provider names deliberately disagree with latency
+        // so identity alone would order them the other way.
+        use RankOrientation::*;
+        let fast = Signals {
+            latency_ms: Some(10.0),
+            ..sig("b", Some(1.0), Some("high"))
+        };
+        let slow = Signals {
+            latency_ms: Some(200.0),
+            ..sig("a", Some(1.0), Some("high"))
+        };
+        assert_eq!(compare(&fast, &slow, Quality), std::cmp::Ordering::Less);
     }
 
     #[test]

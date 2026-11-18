@@ -10,9 +10,9 @@ extra cost worth it, and who decides.
 
 ## Judge / decision model
 
-Use a model to review or score AI responses — realtime or in batch, with
-batch output feeding the ranking index. Open question: how to avoid a cost
-spiral of AI reviewing AI.
+Shipped since: offline batch judging feeds the ranking index (Iter 15).
+Still deferred: a realtime per-request judge. Open question: how to avoid
+a cost spiral of AI reviewing AI.
 
 ## Cheap local review loop
 
@@ -23,9 +23,10 @@ realtime scoring or offline index improvement.
 
 ## More backends and classifier routing
 
-Additional upstream targets beyond OpenRouter, and a real request
-classifier for content-aware routing and exact price prediction. The
-classifier still waits until lookup-based routing and the price
-abstraction prove out; provider-pinned direct routes (`modal/…`,
-`baseten/…`, Iter 16) already cover the multi-upstream case that
-needs no catalog.
+Additional upstream targets beyond OpenRouter, plus exact price
+prediction per request. Scoped per-request classification already
+ships (`openrouter/pair/smart[/max]`, Iter 26: one decision-model leg
+picking a tier, then the normal lookup dispatch); what still waits is
+a classifier that predicts dollars rather than tiers.
+Provider-pinned direct routes (`modal/…`, `baseten/…`, Iter 16)
+already cover the multi-upstream case that needs no catalog.

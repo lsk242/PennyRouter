@@ -5,14 +5,20 @@ async fn main() {
     let port: u16 = std::env::var("PORT")
         .ok()
         .and_then(|p| p.parse().ok())
-        .unwrap_or(3000);
+        .unwrap_or(8080);
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .expect("bind listener");
     let state = pennyrouter_gateway::AppState::from_env();
-    // Catalog freshness (Iter 10): reload the snapshot periodically when
-    // routing is configured. The task dies with the process at shutdown.
+    if pennyrouter_gateway::ui_enabled() {
+        eprintln!("gateway: debug UI enabled (GET /ui)");
+    }
+    // Catalog freshness (Iter 10; standby recovery Iter 23): reload
+    // the snapshot periodically when routing is configured. The task
+    // also heals a standby router once a good artifact lands, so a
+    // bad catalog at boot no longer needs a restart. The task dies
+    // with the process at shutdown.
     if let Some(router) = state.router_handle() {
         let interval = pennyrouter_gateway::reload_interval_from_env();
         if !interval.is_zero() {

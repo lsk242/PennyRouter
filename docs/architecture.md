@@ -1,7 +1,7 @@
 # Architecture
 
 Long-term direction. Each layer arrives in its own small iteration per
-[roadmap.md](roadmap.md); nothing here is built yet.
+[roadmap.md](roadmap.md); per-layer build status lives there.
 
 ## Data flow
 
@@ -50,17 +50,31 @@ usage trends (per app/key) ──► ranker input
 - **Ranker**: periodic job that rebuilds the ranked index with AI assistance,
   blending live metrics with usage trends. Publishes versioned snapshots
   atomically. Never on the realtime path.
-- **Backend adapters**: one per upstream (OpenRouter first). Forwarding,
-  auth passthrough, response normalization. Preserve SSE bytes/order and
-  enforce connect, first-byte, idle, and total timeouts.
+- **Backend adapters**: one per upstream (OpenRouter first, plus
+  provider-pinned direct routes). Forwarding, auth passthrough,
+  response normalization. Preserve SSE bytes/order and enforce
+  connect, first-byte, idle, and total timeouts.
 
 ## Key design decisions
 
 - **Realtime path is dumb and fast.** All intelligence (ranking, trends,
-  price modeling) is precomputed; a request does one index read.
+  price modeling) is precomputed; a request does one index read. The
+  one scoped exception is the `openrouter/pair/smart[/max]` family
+  (Iter 26): those callers explicitly opt into one extra classifier
+  leg before the same single-lookup dispatch — see
+  [routing.md](routing.md). Every other id keeps the no-network
+  routing contract.
 - **Immutable routing snapshots.** Background jobs build complete snapshots
   and publish them atomically; requests keep using the last good snapshot
   if a rebuild fails.
+- **One lock order, no nesting on reload.** Requests hold
+  `snapshot`/`ranking` read guards while separately taking
+  `sessions` or `throttled` (those two never nest inside each
+  other); reload takes `snapshot` and `ranking` write locks
+  sequentially, never nested, and never touches
+  `sessions`/`throttled` — so no lock cycle exists by inspection
+  (lock-held scans can still starve reload *writers*, which is a
+  latency risk, not a deadlock).
 - **Bounded realtime resources.** Queue depth and upstream concurrency are
   explicit; overload sheds load instead of growing memory without limit.
 - **Durable writes publish after commit.** Catalog updates become visible
@@ -89,25 +103,30 @@ Deployment evolves in parallel to development (see
 from platform. Docker first; cloud providers later, all Terraform-managed.
 The gateway stays provider-agnostic — no cloud SDKs on the request path.
 
-## Repo layout (target)
+## Repo layout
 
 ```text
 PennyRouter/
-  README.md  TODO.md  LICENSE  AGENTS.md
-  Cargo.toml + Cargo.lock  # workspace root
+  README.md  TODO.md  LICENSE  AGENTS.md  Makefile
+  Cargo.toml + Cargo.lock  # workspace root (Rust: Axum + reqwest + rusqlite)
   .github/                # CI workflows, Dependabot
+  .agents/skills/         # project skills (live validation runbook)
   crates/
-    gateway/              # HTTP server, OpenAI compat
-    router/               # routing decisions
-    catalog/              # DB schema/queries + catalog-sync process
-    ranker/               # periodic ranking job
-    common/               # shared types, config, errors
-  tests/                  # integration + load tests
+    gateway/              # HTTP server, OpenAI compat, routing decisions
+    catalog/              # DB schema/queries + catalog-sync/rank processes
+    catalog-ui/           # artifact browser
+  tests/
+    integration/ load/    # integration + load harnesses
+    live/                 # live agent validation (hosts-only config + scripts)
   docs/                   # this folder
-  compose.yaml            # local dev (builds from source)
-  compose.prod.yaml       # server deploy (pulls GHCR image, no build)
-  .env.example            # settings template (copy to .env)
-  docker/                 # Dockerfile
+  docker/                 # Dockerfiles + entrypoints
+  scripts/                # deploy.sh deploy-webhook.sh
+  terraform/              # Hetzner deployment
+  compose.yaml            # local dev (builds from source, publishes ports)
+  compose.dev.yaml        # server stack (pulls GHCR images; proxy net, no ports)
+  compose.perf.yaml       # resource-capped perf profile
+  .env.example            # canonical settings template (documents all vars)
+  .env.dev                # committed dev values (generic only)
+  .env                    # gitignored overlay: secrets + custom URLs
+  .env.deploy.sample      # deploy script settings template
 ```
-
-Toolchain and crate choices are deferred to Iter 1, not locked here.

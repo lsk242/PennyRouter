@@ -50,8 +50,10 @@ mkdir -p "$RESULTS_DIR"
 HOST_PORT="${HOST_PORT:-3000}"
 COMPOSE=(docker compose -f "$BASE_COMPOSE" -f "$PERF_COMPOSE")
 MOCK_PID=""
+SAMPLER_PID=""
 
 cleanup() {
+  if [[ -n "$SAMPLER_PID" ]]; then kill "$SAMPLER_PID" 2>/dev/null || true; fi
   if [[ -n "$MOCK_PID" ]]; then kill "$MOCK_PID" 2>/dev/null || true; fi
   "${COMPOSE[@]}" down --remove-orphans >/dev/null 2>&1 || true
 }
@@ -106,6 +108,14 @@ echo
 
 CID="$("${COMPOSE[@]}" ps -q gateway)"
 docker inspect "$CID" --format '{{.Image}} {{.Config.Image}}' > "$RESULTS_DIR/image.txt"
+
+echo "--- sampling gateway RSS to stats.jsonl (Q15) ---"
+(
+  while docker stats --no-stream --format '{{json .}}' "$CID" 2>/dev/null; do
+    sleep 2
+  done > "$RESULTS_DIR/stats.jsonl"
+) &
+SAMPLER_PID=$!
 {
   echo "git: $(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
   docker --version
@@ -125,6 +135,8 @@ for mode in $MODES; do
 done
 curl -fsS "http://localhost:${HOST_PORT}/metrics" > "$RESULTS_DIR/metrics.txt"
 
+kill "$SAMPLER_PID" 2>/dev/null || true
+SAMPLER_PID=""
 "${COMPOSE[@]}" down --remove-orphans
 kill "$MOCK_PID" 2>/dev/null || true
 MOCK_PID=""

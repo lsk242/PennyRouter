@@ -16,10 +16,11 @@ local lookup) but the continuously re-ranked provider index behind it, which
 tracks real price, latency, throughput, and availability fluctuations that
 static sort orders miss.
 
-Status: gateway complete through Iter 8 — OpenAI-compatible
-passthrough (JSON + SSE streaming), provider routing, ranking index,
-price model, and a drop-in fallback proxy for every other endpoint,
-with Docker and Terraform (Hetzner) deploys. See
+Status: gateway complete through Iter 18 — OpenAI-compatible
+passthrough (JSON + SSE streaming), provider routing with virtual
+free/low/think tiers, live-fetched catalog + ranking index, price
+model, Modal/Baseten pinned routes, resilience bounds, and debug
+UIs, with Docker and Terraform (Hetzner) deploys. See
 [TODO.md](TODO.md) for the iteration plan and
 [Operations](docs/operations.md) to run it.
 
@@ -28,9 +29,11 @@ with Docker and Terraform (Hetzner) deploys. See
 - Rust implementation, built from scratch for performance.
 - Docker support for local development.
 - Ballpark target: ~1 CPU, ~1 GB RAM under high volume.
-- Minimal added latency; support requests up to 1M tokens.
+- Minimal added latency; support requests up to ~1M tokens (bytes/4 estimate, 4 MiB cap).
 - OpenAI-compatible input; OpenRouter is the first backend target.
-- The incoming request carries the backend key; no local key config for now.
+- The incoming request carries the backend serving key (pure BYOK);
+  config keys (catalog score keys, provider URLs) live in the
+  gitignored root `.env` overlay over the committed `.env.dev`.
 
 ## Docs
 
@@ -48,6 +51,8 @@ All documentation lives in [`docs/`](docs/README.md) (Markdown only):
 - [Platform](docs/platform.md) — deployment track and delivery pipelines.
 - [Cloud providers](docs/cloud-providers.md) — price/feature comparison.
 - [Future](docs/future.md) — explicitly deferred ideas.
+- [Catalog sync](docs/catalog-sync-architecture.md) — sync process design and DB contract.
+- [Reviews](docs/README.md) — dated review reports under `docs/review/`.
 
 ## Releases
 

@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="/favicon.ico" type="image/svg+xml">
+<title>PennyRouter gateway · debug UI</title>
+<script>document.documentElement.classList.add('js');</script>
+<style>
+  /* 8-bit arcade theme (shared palette with landing.html): dark CRT,
+     chunky borders, hard pixel shadows, sharp corners. CSS only. */
+  :root {
+    color-scheme: dark;
+    --bg: #0d0f1e;
+    --panel: #151a33;
+    --panel-2: #1c2342;
+    --ink: #e9ecff;
+    --muted: #a3acc9;
+    --line: #2c3560;
+    --link: #00e5ff;
+    --cyan: #00e5ff;
+    --magenta: #ff2e88;
+    --yellow: #ffd23f;
+    --green: #39ff6a;
+    --orange: #ff9f1c;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  }
+  * { box-sizing: border-box; border-radius: 0 !important; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--mono);
+    font-size: 0.95rem;
+    line-height: 1.55;
+  }
+  /* CRT scanlines: subtle texture overlay, no pointer interference. */
+  body::after {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: 9999;
+    pointer-events: none;
+    background: repeating-linear-gradient(0deg, rgba(0, 0, 0, 0.14) 0 1px, transparent 1px 3px);
+  }
+  a { color: var(--link); }
+  a:hover { color: var(--yellow); }
+  :focus-visible { outline: 2px solid var(--yellow); outline-offset: 2px; }
+  code, .mono { font-family: var(--mono); font-size: 0.875em; }
+  header.top { background: var(--panel); border-bottom: 3px solid var(--magenta); box-shadow: 0 3px 0 #000; }
+  .wrap { max-width: 88rem; margin: 0 auto; padding: 0 1.5rem; }
+  .brand { display: flex; align-items: baseline; gap: 0.75rem; flex-wrap: wrap; padding: 1.2rem 0 0.8rem; }
+  .brand h1 {
+    font-size: 1.4rem; margin: 0; font-weight: 700; letter-spacing: 0.06em;
+    color: var(--yellow); text-shadow: 3px 3px 0 #000;
+  }
+  .brand h1 span { color: var(--cyan); font-weight: 700; }
+  .brand .spacer { flex: 1; }
+  .brand .home { font-size: 0.9rem; font-weight: 700; letter-spacing: 0.06em; }
+  nav.tabs { display: flex; gap: 0.5rem; flex-wrap: wrap; padding-bottom: 0.8rem; }
+  nav.tabs button {
+    appearance: none; cursor: pointer; font: inherit;
+    font-size: 0.85rem; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase;
+    color: var(--muted); background: var(--bg);
+    border: 2px solid var(--line); box-shadow: 3px 3px 0 #000;
+    padding: 0.5rem 0.9rem;
+  }
+  nav.tabs button:hover { color: var(--ink); border-color: var(--cyan); }
+  nav.tabs button[aria-selected="true"] {
+    color: #1a1400; background: var(--yellow); border-color: var(--yellow);
+  }
+  main .wrap { padding-top: 1.5rem; padding-bottom: 3rem; }
+  html.js .tab-panel { display: none; }
+  html.js .tab-panel.active { display: block; }
+  .tab-panel h2 {
+    font-size: 1.05rem; margin: 0 0 0.6rem; font-weight: 700; letter-spacing: 0.08em;
+    color: var(--cyan); text-shadow: 2px 2px 0 #000;
+  }
+  .tab-panel h3 {
+    font-size: 0.95rem; margin: 1.4rem 0 0.4rem; font-weight: 700; letter-spacing: 0.06em;
+    color: var(--yellow); text-shadow: 2px 2px 0 #000;
+  }
+  .tab-panel h4 { font-size: 0.9rem; margin: 1.1rem 0 0.3rem; font-weight: 700; color: var(--ink); }
+  .tab-panel p { max-width: 70rem; }
+  .tab-panel ul { padding-left: 1.4rem; }
+  .table-scroll { overflow-x: auto; border: 3px solid var(--line); background: var(--panel); box-shadow: 6px 6px 0 #000; margin: 0.6rem 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.85rem; }
+  th, td { text-align: left; padding: 0.4rem 0.6rem; vertical-align: top; white-space: nowrap; }
+  thead th, tbody tr:first-child th {
+    background: var(--panel-2); color: var(--yellow); font-weight: 700; font-size: 0.76rem;
+    letter-spacing: 0.08em; border-bottom: 3px solid var(--magenta);
+  }
+  tbody tr + tr td, tbody tr + tr th { border-top: 2px solid var(--line); }
+  tbody tr:nth-child(even) td { background: rgba(255, 255, 255, 0.025); }
+  .bare-table { border: 3px solid var(--line); background: var(--panel); box-shadow: 6px 6px 0 #000; overflow: auto; margin: 0.6rem 0; width: fit-content; max-width: 100%; }
+  pre {
+    background: #0a0d1c; border: 3px solid var(--line); box-shadow: 6px 6px 0 #000;
+    padding: 1rem; overflow: auto; font-size: 0.8rem; max-width: 70rem; color: var(--ink);
+  }
+  input[type="text"], input[type="password"], input:not([type]) {
+    font: inherit; font-size: 0.9rem; padding: 0.45rem 0.6rem;
+    border: 2px solid var(--cyan); background: #0a0d1c; color: var(--ink);
+  }
+  button.action {
+    font: inherit; font-size: 0.85rem; font-weight: 700; letter-spacing: 0.06em; cursor: pointer;
+    padding: 0.45rem 0.9rem; border: 2px solid var(--green); box-shadow: 3px 3px 0 #000;
+    background: var(--green); color: #06130a;
+  }
+  button.action:hover { background: var(--yellow); border-color: var(--yellow); }
+  button.action:active { transform: translate(2px, 2px); box-shadow: 1px 1px 0 #000; }
+  label { white-space: nowrap; color: var(--muted); }
+  #inspector-hash { color: var(--muted); font-size: 0.85rem; }
+  @media (prefers-reduced-motion: reduce) {
+    body::after { display: none; }
+    button.action:active { transform: none; }
+  }
+</style>
+</head>
+<body>
+<header class="top">
+  <div class="wrap brand">
+    <h1>PennyRouter <span>gateway · debug UI</span></h1>
+    <div class="spacer"></div>
+    <a class="home" href="/">Home</a>
+  </div>
+  <nav class="wrap tabs" role="tablist" aria-label="Debug UI sections">
+    <button role="tab" id="tabbtn-overview" aria-controls="tab-overview" aria-selected="true" data-tab="overview">Overview</button>
+    <button role="tab" id="tabbtn-models" aria-controls="tab-models" aria-selected="false" data-tab="models">Models</button>
+    <button role="tab" id="tabbtn-inspector" aria-controls="tab-inspector" aria-selected="false" data-tab="inspector">Inspector</button>
+    <button role="tab" id="tabbtn-classifier" aria-controls="tab-classifier" aria-selected="false" data-tab="classifier">Classifier</button>
+    <button role="tab" id="tabbtn-metrics" aria-controls="tab-metrics" aria-selected="false" data-tab="metrics">Metrics</button>
+  </nav>
+</header>
+<main>
+  <div class="wrap">
+    <section class="tab-panel active" id="tab-overview" role="tabpanel" aria-labelledby="tabbtn-overview" tabindex="0">
+      <h2>Overview</h2>
+{{overview}}
+    </section>
+    <section class="tab-panel" id="tab-models" role="tabpanel" aria-labelledby="tabbtn-models" tabindex="0">
+      <h2>Models</h2>
+{{models}}
+    </section>
+    <section class="tab-panel" id="tab-inspector" role="tabpanel" aria-labelledby="tabbtn-inspector" tabindex="0">
+      <h2>Routing inspector</h2>
+{{inspector}}
+    </section>
+    <section class="tab-panel" id="tab-classifier" role="tabpanel" aria-labelledby="tabbtn-classifier" tabindex="0">
+      <h2>Smart classifier</h2>
+{{classifier}}
+    </section>
+    <section class="tab-panel" id="tab-metrics" role="tabpanel" aria-labelledby="tabbtn-metrics" tabindex="0">
+      <h2>Metrics</h2>
+{{metrics}}
+    </section>
+  </div>
+</main>
+<script>
+(function(){
+function activate(name){
+var btns=document.querySelectorAll('[role="tab"]');
+for(var i=0;i<btns.length;i++){
+var on=btns[i].getAttribute('data-tab')===name;
+btns[i].setAttribute('aria-selected',on?'true':'false');
+var panel=document.getElementById('tab-'+btns[i].getAttribute('data-tab'));
+if(panel){if(on){panel.classList.add('active');}else{panel.classList.remove('active');}}
+}
+try{history.replaceState(null,'','#'+name);}catch(e){/* hash stays stale; tab still switched */}
+}
+var btns=document.querySelectorAll('[role="tab"]');
+for(var i=0;i<btns.length;i++){(function(b){
+b.addEventListener('click',function(){activate(b.getAttribute('data-tab'));});
+})(btns[i]);}
+var start=location.hash.replace('#','');
+if(start&&document.getElementById('tab-'+start)){activate(start);}
+})();
+</script>
+</body>
+</html>

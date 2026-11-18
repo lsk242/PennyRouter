@@ -1,38 +1,41 @@
-//! Catalog DB: schema, store, sync, processing, judging, ranking,
+//! Catalog DB: schema, store, sync, processing, scoring, ranking,
 //! pricing, and artifact publishing.
 //!
 //! The catalog sync is a separate process from the gateway; this crate owns
 //! the DB format both sides share. See `docs/catalog-sync-architecture.md`.
 
 mod artifact;
+mod benchmarks;
 mod fetch;
-mod judge;
-mod judge_baseten;
-mod judge_catalog;
-mod judge_modal;
-mod judge_openai;
+mod popular;
 mod price;
 mod process;
 mod rank;
+mod rank_score;
 mod schema;
+mod score;
+mod score_baseten;
+mod score_catalog;
+mod score_modal;
+mod score_offline;
+mod score_openai;
+mod score_openrouter;
 mod store;
 mod sync;
 
 pub use artifact::{now_rfc3339, publish, sha256_hex, verify, Manifest};
-pub use fetch::{fetch_openrouter, Fetched};
-pub use judge::{
-    endpoint_tag, run_judging, run_judging_selected, Judge, JudgeIdentity, JudgeSummary, NullJudge,
-    RecordedJudge,
+pub use benchmarks::{
+    aggregate_intelligence, fetch_benchmarks, read_benchmark_intel, store_benchmarks, Benchmarks,
 };
-pub use judge_baseten::BasetenJudge;
-pub use judge_catalog::{
-    build_judge, plan_live_calls, select_endpoints, spend_line, JudgeCatalog, JudgeEntry,
-    JudgePlan, JudgePolicy, KNOWN_BACKENDS,
+pub use fetch::{fetch_openrouter, fetch_openrouter_extra, Fetched};
+pub use popular::{
+    aggregate_apps, aggregate_models, aggregate_models_all, fetch_popularity, read_popular_tokens,
+    read_popularity, store_popularity, Popularity, POPULAR_APPS_TOP_N, POPULAR_MODELS_TOP_N,
+    RANKINGS_WINDOW_DAYS,
 };
-pub use judge_modal::ModalJudge;
-pub use judge_openai::PROMPT_VERSION;
 pub use price::{
-    balanced_profile, builtin_profiles, effective_cost, resolve_discount, Promos, WorkloadProfile,
+    balanced_profile, builtin_profiles, effective_cost, fmt_price_per_m, resolve_discount, Promos,
+    WorkloadProfile,
 };
 pub use process::{run_processing, ProcessSummary};
 pub use rank::{
@@ -40,14 +43,35 @@ pub use rank::{
     Assist, ClassRanking, FreeOffer, RankEntry, RankOrientation, RankingDocument, RankingManifest,
     Signals, TrendStats, Trends,
 };
+pub use rank_score::{
+    compare as compare_rank, cost_per_task, efficiency, popularity_factor, precision_factor,
+    RankInputs, RankKey, RankScore, COST_HALF_CREDIT, POP_WEIGHT,
+    RULESET_VERSION as RANK_RULESET_VERSION, TASK_TOKENS,
+};
 pub use schema::{SCHEMA_VERSION, V1_DDL};
-pub use store::{Catalog, EndpointIndex, EndpointJudgment, EndpointRow, ModelRow};
+pub use score::{
+    endpoint_tag, run_scoring, run_scoring_selected, NullScorer, RecordedScorer, Scorer,
+    ScorerIdentity, ScorerSummary,
+};
+pub use score_baseten::BasetenScorer;
+pub use score_catalog::{
+    build_score, plan_live_calls, select_endpoints, spend_line, ScorerCatalog, ScorerEntry,
+    ScorerPlan, ScorerPolicy, KNOWN_BACKENDS,
+};
+pub use score_modal::ModalScorer;
+pub use score_offline::{OfflineScorer, RULESET_VERSION};
+pub use score_openai::PROMPT_VERSION;
+pub use score_openrouter::OpenRouterScorer;
+pub use store::{
+    Catalog, EndpointIndex, EndpointRank, EndpointRow, EndpointScore, EndpointSpeed, ModelIndex,
+    ModelPayload, ModelPopularity, ModelRow, ModelSignals,
+};
 pub use sync::{load_endpoints_dir, run_fixture_sync, Summary};
 
 use std::fmt;
 
 /// Catalog error: sqlite, IO, JSON, time, schema, malformed input,
-/// live-gather or live-judge failures (transport vs. backend behavior).
+/// live-gather or live-score failures (transport vs. backend behavior).
 #[derive(Debug)]
 pub enum Error {
     Sqlite(rusqlite::Error),
@@ -58,7 +82,7 @@ pub enum Error {
     InvalidFixture(String),
     Http(reqwest::Error),
     Fetch(String),
-    Judge(String),
+    Scorer(String),
 }
 
 impl fmt::Display for Error {
@@ -72,7 +96,7 @@ impl fmt::Display for Error {
             Error::InvalidFixture(e) => write!(f, "invalid fixture: {e}"),
             Error::Http(e) => write!(f, "http: {e}"),
             Error::Fetch(e) => write!(f, "fetch: {e}"),
-            Error::Judge(e) => write!(f, "judge: {e}"),
+            Error::Scorer(e) => write!(f, "score: {e}"),
         }
     }
 }
@@ -88,7 +112,7 @@ impl std::error::Error for Error {
             Error::InvalidFixture(_) => None,
             Error::Http(e) => Some(e),
             Error::Fetch(_) => None,
-            Error::Judge(_) => None,
+            Error::Scorer(_) => None,
         }
     }
 }
@@ -122,3 +146,8 @@ impl From<reqwest::Error> for Error {
         Error::Http(e)
     }
 }
+
+/// Shared brand mark for the gateway and catalog UIs: a copper penny
+/// `P` on the arcade-theme background, one inline SVG so both
+/// binaries serve the identical bytes with no asset files.
+pub const FAVICON_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" fill="#0d0f1e"/><circle cx="32" cy="32" r="24" fill="#c87533"/><circle cx="32" cy="32" r="24" fill="none" stroke="#7a4a1f" stroke-width="4"/><circle cx="32" cy="32" r="16" fill="none" stroke="#7a4a1f" stroke-width="2"/><text x="32" y="43" font-family="monospace" font-size="30" font-weight="bold" text-anchor="middle" fill="#0d0f1e">P</text></svg>"##;

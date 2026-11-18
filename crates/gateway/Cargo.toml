@@ -20,9 +20,18 @@ futures-util = "0.3"
 # Upstream forwarder. rustls (bundled roots) keeps the Docker image free of
 # OpenSSL build deps and system CA installs.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+# Decode gzipped upstream error bodies (Iter 20). Pure-Rust backend,
+# like rustls — no C deps in the image.
+flate2 = "1"
 # Routing snapshot format (Iter 5): the gateway reads the catalog DB
 # artifact the sync process publishes.
 pennyrouter-catalog = { path = "../catalog" }
+# RFC 3339 timestamps for the B18 ranking-staleness gate (same version
+# as the catalog crate; parsing only).
+time = { version = "0.3", features = ["parsing"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
+# Fresh `created_at` stamps for ranking fixtures (B18 staleness gate);
+# formatting stays test-only so the shipped binary keeps parsing-only.
+time = { version = "0.3", features = ["formatting"] }

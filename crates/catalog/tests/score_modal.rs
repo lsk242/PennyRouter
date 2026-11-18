@@ -1,11 +1,12 @@
-//! Phase 4: the Baseten live judge posts OpenAI-shaped chat requests and
-//! reads judgments back. A std-only stub server stands in for Baseten, so
-//! no test calls the network; the recorded fixture pins the output shape.
+//! Phase 4: the Modal live scorer posts OpenAI-shaped chat requests to
+//! the deployed endpoint, authenticated by the Modal proxy-token pair. A
+//! std-only stub server stands in, so no test calls the network; the
+//! recorded fixture pins the output shape.
 
 mod common;
 
 use common::{fixtures_dir, synced_db};
-use pennyrouter_catalog::{run_judging, BasetenJudge, Judge, RecordedJudge};
+use pennyrouter_catalog::{run_scoring, ModalScorer, RecordedScorer, Scorer};
 use serde_json::{json, Value};
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -13,7 +14,7 @@ use std::thread;
 
 const STAMP: &str = "2026-10-28T00:00:00Z";
 
-/// Canned `POST /chat/completions` response carrying one judgment.
+/// Canned `POST /chat/completions` response carrying one score.
 fn chat_response(content: &str) -> String {
     let content = serde_json::to_string(content).unwrap();
     format!(
@@ -84,22 +85,23 @@ fn request_body(request: &str) -> Value {
 }
 
 #[test]
-fn live_round_trip_posts_chat_request_and_reads_judgment() {
+fn live_round_trip_posts_chat_request_with_proxy_auth() {
     let (base_url, server) = stub_server(vec![chat_response(
-        r#"{"quality_tier": "high", "quality_score": 0.9}"#,
+        r#"{"quality_tier": "standard", "quality_score": 0.77}"#,
     )]);
-    let judge = BasetenJudge::new(&base_url, "test-key", "test-model").unwrap();
-    let out = judge
-        .judge("m", "p", &json!({"tag": "t", "price": 1}))
+    let score = ModalScorer::new(&base_url, "test-id", "test-secret", "test-model").unwrap();
+    let out = score
+        .score("m", "p", &json!({"tag": "t", "price": 1}))
         .unwrap();
-    assert_eq!(out.quality_tier.as_deref(), Some("high"));
-    assert_eq!(out.quality_score, Some(0.9));
+    assert_eq!(out.quality_tier.as_deref(), Some("standard"));
+    assert_eq!(out.quality_score, Some(0.77));
 
     let requests = server.join().unwrap();
     assert_eq!(requests.len(), 1);
     let request = &requests[0];
     assert!(request.starts_with("POST /chat/completions HTTP/1.1\r\n"));
-    assert!(request.contains("\r\nauthorization: Bearer test-key\r\n"));
+    assert!(request.contains("\r\nmodal-key: test-id\r\n"));
+    assert!(request.contains("\r\nmodal-secret: test-secret\r\n"));
     let body: Value = request_body(request);
     assert_eq!(body["model"], json!("test-model"));
     assert_eq!(body["temperature"], json!(0));
@@ -121,10 +123,10 @@ fn invalid_model_output_is_an_error() {
     ];
     let responses = bad.iter().map(|c| chat_response(c)).collect();
     let (base_url, server) = stub_server(responses);
-    let judge = BasetenJudge::new(&base_url, "test-key", "test-model").unwrap();
+    let score = ModalScorer::new(&base_url, "test-id", "test-secret", "test-model").unwrap();
     for content in bad {
         assert!(
-            judge.judge("m", "p", &json!({})).is_err(),
+            score.score("m", "p", &json!({})).is_err(),
             "should reject model output: {content}"
         );
     }
@@ -132,24 +134,24 @@ fn invalid_model_output_is_an_error() {
 }
 
 #[test]
-fn baseten_recorded_fixture_yields_expected_values() {
-    let (_dir, db) = synced_db("baseten-recorded");
+fn modal_recorded_fixture_yields_expected_values() {
+    let (_dir, db) = synced_db("modal-recorded");
     let catalog = pennyrouter_catalog::Catalog::open(&db).unwrap();
-    let judge = RecordedJudge::load(&fixtures_dir().join("judge-baseten.json")).unwrap();
-    let summary = run_judging(&catalog, &judge, STAMP).unwrap();
-    assert_eq!(summary.judged, 4);
+    let score = RecordedScorer::load(&fixtures_dir().join("scores-modal.json")).unwrap();
+    let summary = run_scoring(&catalog, &score, STAMP).unwrap();
+    assert_eq!(summary.scored, 4);
     assert_eq!(summary.matched, 2);
 
     let eps = catalog.endpoints_for("openai/gpt-6.1-terra-pro").unwrap();
     assert_eq!(eps.len(), 3);
-    // Only the untagged "openai" offering matches (ORDER BY id: flex, standard, fast).
+    // Only the "openai/fast" offering matches (ORDER BY id: flex, standard, fast).
     assert_eq!(eps[0].quality_tier, None);
-    assert_eq!(eps[1].quality_tier.as_deref(), Some("high"));
-    assert_eq!(eps[1].quality_score, Some(0.91));
-    assert_eq!(eps[1].judged_at.as_deref(), Some(STAMP));
-    assert_eq!(eps[2].quality_tier, None);
+    assert_eq!(eps[1].quality_tier, None);
+    assert_eq!(eps[2].quality_tier.as_deref(), Some("standard"));
+    assert_eq!(eps[2].quality_score, Some(0.77));
+    assert_eq!(eps[2].scored_at.as_deref(), Some(STAMP));
 
     let tencent = &catalog.endpoints_for("tencent/hy-mt2-1.8b").unwrap()[0];
-    assert_eq!(tencent.quality_tier.as_deref(), Some("standard"));
-    assert_eq!(tencent.quality_score, Some(0.68));
+    assert_eq!(tencent.quality_tier.as_deref(), Some("high"));
+    assert_eq!(tencent.quality_score, Some(0.88));
 }

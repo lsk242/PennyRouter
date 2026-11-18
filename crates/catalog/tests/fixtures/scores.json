@@ -1,4 +1,4 @@
-{"judgments": [
+{"scores": [
   {"model_id": "openai/gpt-6.1-terra-pro", "provider_name": "OpenAI",
    "tag": "openai/flex", "quality_tier": "standard", "quality_score": 0.72},
   {"model_id": "openai/gpt-6.1-terra-pro", "provider_name": "OpenAI",

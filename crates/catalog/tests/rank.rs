@@ -4,20 +4,20 @@ mod common;
 
 use common::{fixtures_dir, synced_db};
 use pennyrouter_catalog::{
-    load_ranking_doc, publish_ranking, rank_catalog, run_judging, run_processing, verify_ranking,
-    Assist, Catalog, EndpointIndex, EndpointJudgment, EndpointRow, ModelRow, Promos, RecordedJudge,
+    load_ranking_doc, publish_ranking, rank_catalog, run_processing, run_scoring, verify_ranking,
+    Assist, Catalog, EndpointIndex, EndpointRow, EndpointScore, ModelRow, Promos, RecordedScorer,
     Trends,
 };
 
 const STAMP: &str = "2026-03-04T05:06:07Z";
 
-/// Fixture DB with deterministic + judged columns filled.
+/// Fixture DB with deterministic + scored columns filled.
 fn ranked_inputs(test: &str) -> (std::path::PathBuf, std::path::PathBuf) {
     let (dir, db) = synced_db(test);
     let catalog = Catalog::open(&db).unwrap();
     run_processing(&catalog, STAMP).unwrap();
-    let judge = RecordedJudge::load(&fixtures_dir().join("judgments.json")).unwrap();
-    run_judging(&catalog, &judge, STAMP).unwrap();
+    let score = RecordedScorer::load(&fixtures_dir().join("scores.json")).unwrap();
+    run_scoring(&catalog, &score, STAMP).unwrap();
     drop(catalog);
     (dir, db)
 }
@@ -114,6 +114,36 @@ fn rebuild_is_deterministic_and_publish_idempotent() {
     assert_eq!(loaded, doc1);
 }
 
+#[test]
+fn ranking_version_ignores_build_time() {
+    // I09: identical rebuilds mint the identical version (only the
+    // stored `created_at` differs); changed content mints a new one.
+    let (_dir, db) = ranked_inputs("version-stable");
+    let catalog = Catalog::open(&db).unwrap();
+    let trends = Trends::load(&fixtures_dir().join("trends.json")).unwrap();
+    let build = |at: &str| {
+        rank_catalog(
+            &catalog,
+            &trends,
+            &Assist::empty(),
+            &Promos::empty(),
+            STAMP,
+            at,
+            None,
+        )
+        .unwrap()
+    };
+    let out = common::scratch("rank-version");
+    let (_, _, m1) = publish_ranking(&build("2026-01-01T00:00:00Z"), &out).unwrap();
+    let (_, mpath2, m2) = publish_ranking(&build("2026-06-01T00:00:00Z"), &out).unwrap();
+    assert_eq!(m1.version, m2.version);
+    let mut changed = build("2026-06-01T00:00:00Z");
+    changed.models.pop_first();
+    let (_, _, m3) = publish_ranking(&changed, &out).unwrap();
+    assert_ne!(m1.version, m3.version);
+    assert!(verify_ranking(&mpath2).unwrap());
+}
+
 /// Synthetic two-provider model; trends/assist drive the ordering.
 fn tie_db(path: &std::path::Path) {
     let _ = std::fs::remove_file(path);
@@ -141,13 +171,17 @@ fn tie_db(path: &std::path::Path) {
                 price_cache_read: None,
                 price_cache_write: None,
                 precision_class: None,
+                quantization: None,
                 promo_discount: None,
                 processed_at: None,
+                supports_tools: None,
+                supports_decisions: None,
                 quality_tier: None,
                 quality_score: None,
-                judged_at: None,
-                judge_model: None,
-                judge_prompt: None,
+                scored_at: None,
+                score_model: None,
+                score_prompt: None,
+                price_override_tokens: None,
             })
             .unwrap();
     }
@@ -157,19 +191,23 @@ fn tie_db(path: &std::path::Path) {
         price_cache_read: None,
         price_cache_write: None,
         precision_class: None,
+        quantization: None,
         promo_discount: None,
         processed_at: "t".to_string(),
+        supports_tools: None,
+        supports_decisions: None,
+        price_override_tokens: None,
     };
-    let judgment = EndpointJudgment {
+    let score = EndpointScore {
         quality_tier: Some("standard".to_string()),
         quality_score: None,
-        judged_at: "t".to_string(),
-        judge_model: None,
-        judge_prompt: None,
+        scored_at: "t".to_string(),
+        score_model: None,
+        score_prompt: None,
     };
     for ep in catalog.endpoints_for("syn/tie").unwrap() {
         catalog.update_endpoint_index(ep.id, &index(1.0)).unwrap();
-        catalog.update_endpoint_judgment(ep.id, &judgment).unwrap();
+        catalog.update_endpoint_score(ep.id, &score).unwrap();
     }
 }
 
@@ -249,13 +287,17 @@ fn unknown_scores_sort_after_known_scores() {
                 price_cache_read: None,
                 price_cache_write: None,
                 precision_class: None,
+                quantization: None,
                 promo_discount: None,
                 processed_at: None,
+                supports_tools: None,
+                supports_decisions: None,
                 quality_tier: None,
                 quality_score: None,
-                judged_at: None,
-                judge_model: None,
-                judge_prompt: None,
+                scored_at: None,
+                score_model: None,
+                score_prompt: None,
+                price_override_tokens: None,
             })
             .unwrap();
         let id = catalog
@@ -265,14 +307,14 @@ fn unknown_scores_sort_after_known_scores() {
             .unwrap()
             .id;
         catalog
-            .update_endpoint_judgment(
+            .update_endpoint_score(
                 id,
-                &EndpointJudgment {
+                &EndpointScore {
                     quality_tier: Some("standard".to_string()),
                     quality_score: score,
-                    judged_at: "t".to_string(),
-                    judge_model: None,
-                    judge_prompt: None,
+                    scored_at: "t".to_string(),
+                    score_model: None,
+                    score_prompt: None,
                 },
             )
             .unwrap();
@@ -327,13 +369,17 @@ fn tag_breaks_same_provider_ties_regardless_of_insertion_order() {
                 price_cache_read: None,
                 price_cache_write: None,
                 precision_class: None,
+                quantization: None,
                 promo_discount: None,
                 processed_at: None,
+                supports_tools: None,
+                supports_decisions: None,
                 quality_tier: None,
                 quality_score: None,
-                judged_at: None,
-                judge_model: None,
-                judge_prompt: None,
+                scored_at: None,
+                score_model: None,
+                score_prompt: None,
+                price_override_tokens: None,
             })
             .unwrap();
     }
@@ -391,13 +437,17 @@ fn promo_free_eligibility_published_with_validity() {
                 price_cache_read: None,
                 price_cache_write: None,
                 precision_class: None,
+                quantization: None,
                 promo_discount: None,
                 processed_at: None,
+                supports_tools: None,
+                supports_decisions: None,
                 quality_tier: None,
                 quality_score: None,
-                judged_at: None,
-                judge_model: None,
-                judge_prompt: None,
+                scored_at: None,
+                score_model: None,
+                score_prompt: None,
+                price_override_tokens: None,
             })
             .unwrap();
         let id = catalog.endpoints_for(model).unwrap()[0].id;
@@ -410,8 +460,12 @@ fn promo_free_eligibility_published_with_validity() {
                     price_cache_read: None,
                     price_cache_write: None,
                     precision_class: Some("fp16".to_string()),
+                    quantization: None,
                     promo_discount: None,
                     processed_at: "t".to_string(),
+                    supports_tools: None,
+                    supports_decisions: None,
+                    price_override_tokens: None,
                 },
             )
             .unwrap();
@@ -460,6 +514,112 @@ fn promo_free_eligibility_published_with_validity() {
 }
 
 #[test]
+fn permanent_free_beats_promo_regardless_of_row_order() {
+    // B07 probe: when one provider+tag has both a promo-free row and a
+    // permanent-zero row, the permanent offer must win either way —
+    // never expire because the promo row happened to come first.
+    let dir = common::scratch("rank-free-dedup");
+    let db = dir.join("free.db");
+    let _ = std::fs::remove_file(&db);
+    let catalog = Catalog::open(&db).unwrap();
+    catalog.init().unwrap();
+    let add_row = |model: &str, price: f64| {
+        catalog
+            .insert_model(&ModelRow {
+                model_id: model.to_string(),
+                name: model.to_string(),
+                source: "test".to_string(),
+                payload: "{}".to_string(),
+                fetched_at: "t".to_string(),
+            })
+            .unwrap();
+        catalog
+            .insert_endpoint(&EndpointRow {
+                id: 0,
+                model_id: model.to_string(),
+                provider_name: "P".to_string(),
+                payload: "{}".to_string(),
+                fetched_at: "t".to_string(),
+                price_prompt: None,
+                price_completion: None,
+                price_cache_read: None,
+                price_cache_write: None,
+                precision_class: None,
+                quantization: None,
+                promo_discount: None,
+                processed_at: None,
+                supports_tools: None,
+                supports_decisions: None,
+                quality_tier: None,
+                quality_score: None,
+                scored_at: None,
+                score_model: None,
+                score_prompt: None,
+                price_override_tokens: None,
+            })
+            .unwrap();
+        let id = catalog.endpoints_for(model).unwrap().last().unwrap().id;
+        catalog
+            .update_endpoint_index(
+                id,
+                &EndpointIndex {
+                    price_prompt: Some(price),
+                    price_completion: Some(price),
+                    price_cache_read: None,
+                    price_cache_write: None,
+                    precision_class: Some("fp16".to_string()),
+                    quantization: None,
+                    promo_discount: None,
+                    processed_at: "t".to_string(),
+                    supports_tools: None,
+                    supports_decisions: None,
+                    price_override_tokens: None,
+                },
+            )
+            .unwrap();
+    };
+    // Promo row first, permanent row second…
+    add_row("syn/promo-first", 1.0);
+    add_row("syn/promo-first", 0.0);
+    // …and the reverse insertion order.
+    add_row("syn/zero-first", 0.0);
+    add_row("syn/zero-first", 1.0);
+    let promos_path = dir.join("promos.json");
+    std::fs::write(
+        &promos_path,
+        r#"{"promos": [
+            {"model_id": "syn/promo-first", "provider_name": "P",
+             "discount": 1.0, "starts_at": "2026-01-01T00:00:00Z",
+             "ends_at": "2027-01-01T00:00:00Z"},
+            {"model_id": "syn/zero-first", "provider_name": "P",
+             "discount": 1.0, "starts_at": "2026-01-01T00:00:00Z",
+             "ends_at": "2027-01-01T00:00:00Z"}
+        ]}"#,
+    )
+    .unwrap();
+    let promos = Promos::load(&promos_path).unwrap();
+    let doc = rank_catalog(
+        &catalog,
+        &Trends::empty(),
+        &Assist::empty(),
+        &promos,
+        STAMP,
+        STAMP,
+        None,
+    )
+    .unwrap();
+
+    for model in ["syn/promo-first", "syn/zero-first"] {
+        let offers = &doc.free_offers[model];
+        assert_eq!(offers.len(), 1, "{model}: {offers:?}");
+        assert_eq!(
+            offers[0].valid_until_unix, None,
+            "{model}: permanent zero must beat the promo row"
+        );
+    }
+}
+
+#[test]
 fn promo_active_leads_and_expired_falls_back() {
     let dir = common::scratch("rank-promos");
     let db = dir.join("promo.db");
@@ -488,13 +648,17 @@ fn promo_active_leads_and_expired_falls_back() {
                 price_cache_read: None,
                 price_cache_write: None,
                 precision_class: None,
+                quantization: None,
                 promo_discount: None,
                 processed_at: None,
+                supports_tools: None,
+                supports_decisions: None,
                 quality_tier: None,
                 quality_score: None,
-                judged_at: None,
-                judge_model: None,
-                judge_prompt: None,
+                scored_at: None,
+                score_model: None,
+                score_prompt: None,
+                price_override_tokens: None,
             })
             .unwrap();
         let ep = catalog.endpoints_for("syn/promo").unwrap().pop().unwrap();
@@ -507,8 +671,12 @@ fn promo_active_leads_and_expired_falls_back() {
                     price_cache_read: None,
                     price_cache_write: None,
                     precision_class: None,
+                    quantization: None,
                     promo_discount: None,
                     processed_at: "t".to_string(),
+                    supports_tools: None,
+                    supports_decisions: None,
+                    price_override_tokens: None,
                 },
             )
             .unwrap();
@@ -562,8 +730,12 @@ fn assist_prefer_and_avoid_override_signals() {
         price_cache_read: None,
         price_cache_write: None,
         precision_class: None,
+        quantization: None,
         promo_discount: None,
         processed_at: "t".to_string(),
+        supports_tools: None,
+        supports_decisions: None,
+        price_override_tokens: None,
     };
     catalog.update_endpoint_index(eps[1].id, &cheap).unwrap();
 
@@ -612,4 +784,61 @@ fn assist_prefer_and_avoid_override_signals() {
         .map(|e| e.provider.as_str())
         .collect();
     assert_eq!(providers, ["Drop", "Keep"]);
+}
+
+/// Iter 34: the ranking document carries a value-score ordering once
+/// the catalog is processed, and omits it (empty, not serialized)
+/// when it is not.
+#[test]
+fn score_ordering_published_only_when_processed() {
+    let (_dir, db) = synced_db("score-order");
+    let catalog = Catalog::open(&db).unwrap();
+    let trends = Trends::load(&fixtures_dir().join("trends.json")).unwrap();
+    let assist = Assist::load(&fixtures_dir().join("rank-assist.json")).unwrap();
+    let promos = Promos::load(&fixtures_dir().join("promos.json")).unwrap();
+    let rebuild = || {
+        rank_catalog(
+            &catalog,
+            &trends,
+            &assist,
+            &promos,
+            STAMP,
+            STAMP,
+            Some("cat-v1".to_string()),
+        )
+        .unwrap()
+    };
+
+    // Unprocessed: no scores, so no score ordering.
+    let doc = rebuild();
+    assert!(doc.models["openai/gpt-6.1-terra-pro"][0].score.is_empty());
+
+    // Give the model an AA coding index, then process: every offering
+    // is scored, cheapest first.
+    let mut payload: serde_json::Value = serde_json::from_str(
+        &catalog
+            .get_model("openai/gpt-6.1-terra-pro")
+            .unwrap()
+            .unwrap()
+            .payload,
+    )
+    .unwrap();
+    payload["benchmarks"] = serde_json::json!({"artificial_analysis": {"coding_index": 70}});
+    catalog
+        .insert_model(&ModelRow {
+            model_id: "openai/gpt-6.1-terra-pro".to_string(),
+            name: "GPT 6.1 Terra Pro".to_string(),
+            source: "openrouter".to_string(),
+            payload: payload.to_string(),
+            fetched_at: "t".to_string(),
+        })
+        .unwrap();
+    run_processing(&catalog, STAMP).unwrap();
+
+    let doc = rebuild();
+    let score = &doc.models["openai/gpt-6.1-terra-pro"][0].score;
+    assert_eq!(tags(score), ["openai/flex", "openai", "openai/fast"]);
+    // The new field is additive: the other orderings still list every
+    // offering.
+    assert_eq!(doc.models["openai/gpt-6.1-terra-pro"][0].default.len(), 3);
 }

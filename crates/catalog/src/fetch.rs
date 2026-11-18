@@ -21,12 +21,23 @@ pub struct Fetched {
 /// models-list fetch aborts (no publish; the last good artifact keeps
 /// serving). A failed endpoints fetch skips just that model.
 pub fn fetch_openrouter(base_url: &str) -> Result<Fetched, Error> {
+    fetch_openrouter_extra(base_url, &[])
+}
+
+/// List fetch plus caller-nominated extras (Iter 24): the models
+/// list omits some servable models (e.g. scoring models with
+/// non-text output modalities), so `extra_ids` names ids to fetch
+/// even when absent from the list. Already-listed ids are not
+/// refetched; failed extras land in `skipped` like the rest. The
+/// endpoints body carries the model object, which joins the models
+/// array (sans its nested endpoints) so sync stores it whole.
+pub fn fetch_openrouter_extra(base_url: &str, extra_ids: &[String]) -> Result<Fetched, Error> {
     let base = base_url.trim_end_matches('/');
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(60))
         .build()?;
     let models = get_bytes(&client, &format!("{base}/v1/models"))?;
-    let root: Value = serde_json::from_slice(&models)?;
+    let mut root: Value = serde_json::from_slice(&models)?;
     let ids: Vec<String> = root
         .get("data")
         .and_then(Value::as_array)
@@ -38,15 +49,74 @@ pub fn fetch_openrouter(base_url: &str) -> Result<Fetched, Error> {
     let mut skipped = Vec::new();
     for id in &ids {
         match get_bytes(&client, &format!("{base}/v1/models/{id}/endpoints")) {
-            Ok(body) => endpoints.push((id.clone(), body)),
+            Ok(body) => match parse_endpoints_body(&body, id, false) {
+                Some(_) => endpoints.push((id.clone(), body)),
+                None => skipped.push(id.clone()),
+            },
             Err(_) => skipped.push(id.clone()),
         }
     }
+    for id in extra_ids {
+        if ids.iter().any(|listed| listed == id) {
+            continue;
+        }
+        match get_bytes(&client, &format!("{base}/v1/models/{id}/endpoints")) {
+            Ok(body) => {
+                // The model row must exist before its endpoints (foreign
+                // key): keep the pair only when the body carries this
+                // model's id plus an endpoints array. Anything else
+                // would abort the whole sync downstream, so it lands
+                // in `skipped` like a failed fetch.
+                match parse_endpoints_body(&body, id, true) {
+                    None => skipped.push(id.clone()),
+                    Some(extra) => {
+                        let mut stored = false;
+                        if let Some(object) = extra.get("data") {
+                            let mut model = object.clone();
+                            if let Some(map) = model.as_object_mut() {
+                                map.remove("endpoints");
+                            }
+                            if let Some(list) = root.get_mut("data").and_then(Value::as_array_mut) {
+                                list.push(model);
+                                stored = true;
+                            }
+                        }
+                        if stored {
+                            endpoints.push((id.clone(), body));
+                        } else {
+                            skipped.push(id.clone());
+                        }
+                    }
+                }
+            }
+            Err(_) => skipped.push(id.clone()),
+        }
+    }
+    let models =
+        serde_json::to_vec(&root).map_err(|e| Error::Fetch(format!("re-serialize models: {e}")))?;
     Ok(Fetched {
         models,
         endpoints,
         skipped,
     })
+}
+
+/// Parse one endpoints body for sync input: it must be JSON with a
+/// `data.endpoints` array (sync aborts the whole cycle otherwise),
+/// and the carried model id — when present — must equal the requested
+/// id, or foreign endpoints would file under this model. Extras
+/// additionally require the id (`require_id`): their model row joins
+/// the models array under that id, so a missing or wrong id breaks
+/// the foreign key downstream.
+fn parse_endpoints_body(body: &[u8], requested_id: &str, require_id: bool) -> Option<Value> {
+    let root: Value = serde_json::from_slice(body).ok()?;
+    let data = root.get("data")?;
+    data.get("endpoints")?.as_array()?;
+    match data.get("id").and_then(Value::as_str) {
+        Some(id) if id == requested_id => Some(root),
+        None if !require_id => Some(root),
+        _ => None,
+    }
 }
 
 fn get_bytes(client: &reqwest::blocking::Client, url: &str) -> Result<Vec<u8>, Error> {

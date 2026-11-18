@@ -7,6 +7,7 @@
 #   ./tests/live/scripts/agent-logs.sh router [--tail N] [--follow|-f]
 #   ./tests/live/scripts/agent-logs.sh hermes [--tail N]
 #   ./tests/live/scripts/agent-logs.sh openclaw [--tail N]
+#   ./tests/live/scripts/agent-logs.sh openhands [--tail N]
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -14,9 +15,10 @@ if [[ -f "$HERE/../.env" ]]; then
   # shellcheck disable=SC1091
   set -a; . "$HERE/../.env"; set +a
 fi
-DEPLOY_HOST="${DEPLOY_HOST:-apps.lan}"
+DEPLOY_HOST="${DEPLOY_HOST:-srv.lan}"
 OPENCLAW_HOST="${OPENCLAW_HOST:-openclaw.lan}"
 HERMES_HOST="${HERMES_HOST:-hermes.lan}"
+OPENHANDS_HOST="${OPENHANDS_HOST:-openhands.lan}"
 
 target="${1:-}"; shift || true
 tail_n=50
@@ -35,7 +37,8 @@ SSH=(ssh ${SSH_OPTS:-})
 
 case "$target" in
   router)
-    # Gateway JSON lines: request_id, method, route, status, outcome.
+    # Gateway JSON lines: request_id, method, route, status, outcome,
+    # key (last-4 suffix), plus error_code/message on failures.
     if [[ "$follow" == 1 ]]; then
       "${SSH[@]}" "$DEPLOY_HOST" docker logs -f gateway
     else
@@ -51,8 +54,14 @@ case "$target" in
     "${SSH[@]}" "$OPENCLAW_HOST" \
       "logs=\$(find ~/.openclaw -maxdepth 2 -name '*.log' 2>/dev/null); if [[ -n \"\$logs\" ]]; then tail -n $tail_n \$logs; else echo '(no openclaw log files yet — foreground session)'; ps aux | grep '[o]penclaw' | grep -v 'maxdepth' | head -3; fi"
     ;;
+  openhands)
+    # Agent errors live in the canvas log file; the tmux pane only
+    # shows server access lines (fallback when the file is missing).
+    "${SSH[@]}" "$OPENHANDS_HOST" \
+      "log=~/.openhands/agent-canvas/logs/agent-canvas.\$(date +%F).log; if [[ -f \"\$log\" ]]; then tail -n $tail_n \"\$log\"; else tmux capture-pane -p -t canvas:0 -S -$tail_n 2>/dev/null || echo '(openhands logs not found)'; fi"
+    ;;
   *)
-    echo "usage: agent-logs.sh (router|hermes|openclaw) [--tail N] [--follow]" >&2
+    echo "usage: agent-logs.sh (router|hermes|openclaw|openhands) [--tail N] [--follow]" >&2
     exit 1
     ;;
 esac

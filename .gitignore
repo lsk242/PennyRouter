@@ -16,11 +16,13 @@ target
 # rustc will dump stack traces when hitting an internal compiler error to PWD
 rustc-ice-*.txt
 
-# Local secrets (keys travel with requests, never in the repo)
+# Local secrets (keys travel with requests, never in the repo).
+# Only `.env` is ignored: `.env.dev` and `.env.example` are committed
+# on purpose (generic values + template, no secrets).
 .env
-.env.*
-# ...except the checked-in settings template.
-!.env.example
+# Local deploy settings (hosts/URLs, may hold tokens). The
+# `.env.deploy.sample` template is committed; the real file is not.
+.env.deploy
 
 # Load-test evidence (keep the harness, not raw outputs)
 tests/load/results/*

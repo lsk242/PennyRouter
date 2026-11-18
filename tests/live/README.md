@@ -16,6 +16,7 @@ tests/live/
     router-smoke.sh          # /health, /v1/models, /ui, optional chat probe
     check-provider-config.sh # compose + deploy.sh carry provider config
     agent-logs.sh            # router / hermes / openclaw logs over ssh
+    validate-keys.sh         # provider keys (repo-root .env) vs free auth checks
 ```
 
 ## Quickstart
@@ -35,9 +36,10 @@ set -a; . tests/live/.env; set +a
   Only `.env.example` (placeholders) is committed.
 - The no-keys rule covers gateway *serving* keys: agents carry their
   own backend keys inside each request (pure BYOK).
-- Config keys (catalog judge keys, provider URLs) live in the
-  repo-root `.env`, which `deploy.sh` ships to the server as the
-  remote `.env` (chmod 600). They are never needed in `tests/live/`.
+- Config keys (catalog score keys, provider URLs) live in the
+  repo-root `.env` overlay, which `deploy.sh` merges with `.env.dev`
+  and ships to the server as the remote `.env` (chmod 600). They
+  are never needed in `tests/live/`.
 
 ## Plan
 
@@ -52,13 +54,14 @@ set -a; . tests/live/.env; set +a
 
 ## Missing info checklist
 
-- [x] Router public URL the agents will use — `http://gateway.apps.lan`
+- [x] Router public URL the agents will use — `http://gateway.srv.lan`
   (`/health` OK, six virtual ids in `/v1/models`, `/ui` 404 as expected)
-- [x] Deploy SSH target — `apps.lan`, stack at `/opt/stacks/pennyrouter`
+- [x] Deploy SSH target — `srv.lan`, stack at `/opt/stacks/pennyrouter`
   (gateway + catalog-sync running, image `ghcr.io/...:latest`)
 - [x] Agent log access — [scripts/agent-logs.sh](scripts/agent-logs.sh):
   `router` (docker logs), `hermes` (`~/.hermes/logs/agent.log`),
-  `openclaw` (no log files yet, foreground session — shows state)
+  `openclaw` (no log files yet, foreground session — shows state),
+  `openhands` (tmux `canvas:0` capture, read-only)
 - [x] Exact model ids — in `.env`: free `openrouter/pair/free`,
   modal `muse-spark-open-816b-a42b`,
   baseten `meta-models/muse-spark-open-1026`
@@ -67,8 +70,8 @@ set -a; . tests/live/.env; set +a
 - [x] Provider-config gap fixed in compose + deploy script
 - [x] Gateway redeployed with provider config (both containers fresh,
   `MODAL/BASETEN_BASE_URL` + `GATEWAY_UI=1` live, `/ui` 200)
-- [x] Smoke: health/models/ui pass; free chat 503 (`no_eligible_offering`,
-  fixture catalog — clears with Iter 18 image + `FETCH_OPENROUTER=1`)
+- [x] Smoke: 4/4 green against the deployed router (health, models,
+  `/ui` off as configured, free chat probe 200 via `openrouter/free`)
 - [ ] Live validation: free tier via agent
 - [ ] Live validation: modal route via agent
 - [ ] Live validation: baseten route via agent

@@ -1,91 +1,120 @@
-//! Iter 19: OpenRouter Batch API against a mock backend.
-//!
-//! Tests batch submission (POST /api/v1/batches) returns 202 with batch object,
-//! and batch status polling (GET /api/v1/batches/{id}) returns the batch status.
+//! Batch tier: `openrouter/pair/batch` routes to the cheapest
+//! `:batch`-variant offering (async batch API pricing), ignoring
+//! cheaper interactive offerings. Same chat path as the other tiers —
+//! only the candidate filter differs.
 
-use axum::{
-    body::Bytes,
-    extract::Path,
-    http::{HeaderMap, StatusCode},
-    routing::{get, post},
-    Router,
+use axum::{body::Bytes, http::StatusCode, routing::post, Router};
+use pennyrouter_catalog::{
+    Catalog, EndpointIndex, EndpointRow, EndpointScore, ModelIndex, ModelRow,
 };
 use std::{
+    collections::HashMap,
     net::SocketAddr,
     sync::{Arc, Mutex},
 };
 
-const BATCH_SUBMIT_REQUEST: &str = r#"{"input_file_id":"file-abc123","endpoint":"/v1/chat/completions","completion_window":"24h","metadata":{"description":"test batch"}}"#;
-const API_KEY: &str = "Bearer «redacted:sk-…»";
+const API_KEY: &str = "Bearer [REDACTED]";
 
-const BATCH_SUBMIT_RESPONSE: &[u8] = br#"{"id":"batch_abc123","object":"batch","endpoint":"/v1/chat/completions","status":"validating","input_file_id":"file-abc123","completion_window":"24h","created_at":1699999999,"metadata":{"description":"test batch"}}"#;
-
-const BATCH_STATUS_RESPONSE: &[u8] = br#"{"id":"batch_abc123","object":"batch","endpoint":"/v1/chat/completions","status":"completed","input_file_id":"file-abc123","completion_window":"24h","created_at":1699999999,"completed_at":1700000000,"output_file_id":"file-xyz789","error_file_id":null,"metadata":{"description":"test batch"}}"#;
-
-#[derive(Default)]
-struct Seen {
-    method: Option<String>,
-    path: Option<String>,
-    auth: Option<String>,
-    body: Option<Vec<u8>>,
+/// m/cheap (Cheap 1.0) is cheaper than any batch row but interactive,
+/// so the batch tier must skip it; m/cheap:batch (CheapB 2.0) is the
+/// batch pick; m/dear:batch (DearB 9.0) the expensive alternative.
+fn build_db(path: &std::path::Path) {
+    build_db_with(path, true);
 }
 
-async fn spawn_batch_mock(seen: Arc<Mutex<Seen>>) -> SocketAddr {
-    let seen_post = seen.clone();
-    let seen_get = seen.clone();
-    let app = Router::new()
-        .route(
-            "/api/v1/batches",
-            post(move |headers: HeaderMap, req_body: Bytes| {
-                let seen = seen_post.clone();
-                async move {
-                    *seen.lock().unwrap() = Seen {
-                        method: Some("POST".to_string()),
-                        path: Some("/api/v1/batches".to_string()),
-                        auth: headers
-                            .get("authorization")
-                            .and_then(|v| v.to_str().ok())
-                            .map(str::to_string),
-                        body: Some(req_body.to_vec()),
-                    };
-                    (
-                        StatusCode::ACCEPTED,
-                        [("content-type", "application/json")],
-                        BATCH_SUBMIT_RESPONSE.to_vec(),
-                    )
-                }
-            }),
-        )
-        .route(
-            "/api/v1/batches/{id}",
-            get(move |headers: HeaderMap, Path(id): Path<String>| {
-                let seen = seen_get.clone();
-                async move {
-                    *seen.lock().unwrap() = Seen {
-                        method: Some("GET".to_string()),
-                        path: Some(format!("/api/v1/batches/{id}")),
-                        auth: headers
-                            .get("authorization")
-                            .and_then(|v| v.to_str().ok())
-                            .map(str::to_string),
-                        body: None,
-                    };
-                    (
-                        StatusCode::OK,
-                        [("content-type", "application/json")],
-                        BATCH_STATUS_RESPONSE.to_vec(),
-                    )
-                }
-            }),
-        );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    addr
+fn build_db_without_batch(path: &std::path::Path) {
+    build_db_with(path, false);
 }
 
-async fn spawn_gateway(upstream: SocketAddr) -> SocketAddr {
-    let state = pennyrouter_gateway::AppState::new(format!("http://{upstream}"));
+fn build_db_with(path: &std::path::Path, batch: bool) {
+    let _ = std::fs::remove_file(path);
+    let catalog = Catalog::open(path).unwrap();
+    catalog.init().unwrap();
+    let mut rows = vec![
+        ("m/cheap", "Cheap", 1.0, "low"),
+        ("m/free", "Freebie", 0.0, "standard"),
+    ];
+    if batch {
+        rows.push(("m/dear:batch", "DearB", 9.0, "high"));
+        rows.push(("m/cheap:batch", "CheapB", 2.0, "low"));
+    }
+    for (model, provider, price, tier) in rows {
+        catalog
+            .insert_model(&ModelRow {
+                model_id: model.to_string(),
+                name: model.to_string(),
+                source: "test".to_string(),
+                payload: "{}".to_string(),
+                fetched_at: "t".to_string(),
+            })
+            .unwrap();
+        catalog
+            .insert_endpoint(&EndpointRow {
+                id: 0,
+                model_id: model.to_string(),
+                provider_name: provider.to_string(),
+                payload: "{}".to_string(),
+                fetched_at: "t".to_string(),
+                price_prompt: None,
+                price_completion: None,
+                price_cache_read: None,
+                price_cache_write: None,
+                precision_class: None,
+                quantization: None,
+                promo_discount: None,
+                processed_at: None,
+                supports_tools: None,
+                supports_decisions: None,
+                quality_tier: None,
+                quality_score: None,
+                scored_at: None,
+                score_model: None,
+                score_prompt: None,
+                price_override_tokens: None,
+            })
+            .unwrap();
+        let id = catalog.endpoints_for(model).unwrap()[0].id;
+        catalog
+            .update_endpoint_index(
+                id,
+                &EndpointIndex {
+                    price_prompt: Some(price),
+                    price_completion: Some(price),
+                    price_cache_read: None,
+                    price_cache_write: None,
+                    precision_class: Some("fp16".to_string()),
+                    quantization: None,
+                    promo_discount: None,
+                    processed_at: "t".to_string(),
+                    supports_tools: None,
+                    supports_decisions: None,
+                    price_override_tokens: None,
+                },
+            )
+            .unwrap();
+        catalog
+            .update_endpoint_score(
+                id,
+                &EndpointScore {
+                    quality_tier: Some(tier.to_string()),
+                    quality_score: None,
+                    scored_at: "t".to_string(),
+                    score_model: None,
+                    score_prompt: None,
+                },
+            )
+            .unwrap();
+    }
+}
+
+fn scratch_db(test: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("gateway-batch-{test}-{}.db", std::process::id()))
+}
+
+async fn spawn_gateway(upstream: SocketAddr, db: &std::path::Path) -> SocketAddr {
+    let router = Arc::new(pennyrouter_gateway::routing::Router::load(db).expect("router loads"));
+    let state =
+        pennyrouter_gateway::AppState::new(format!("http://{upstream}")).with_router(router);
     let app = pennyrouter_gateway::app_with_state(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -93,88 +122,197 @@ async fn spawn_gateway(upstream: SocketAddr) -> SocketAddr {
     addr
 }
 
-async fn post_batch(addr: SocketAddr) -> reqwest::Response {
+async fn spawn_mock(app: Router) -> SocketAddr {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    addr
+}
+
+async fn post_chat(gw: SocketAddr, model: &str) -> reqwest::Response {
     reqwest::Client::new()
-        .post(format!("http://{addr}/api/v1/batches"))
+        .post(format!("http://{gw}/v1/chat/completions"))
         .header("authorization", API_KEY)
         .header("content-type", "application/json")
-        .body(BATCH_SUBMIT_REQUEST)
+        .body(format!(r#"{{"model":"{model}","messages":[]}}"#))
         .send()
         .await
         .unwrap()
 }
 
-async fn get_batch_status(addr: SocketAddr, id: &str) -> reqwest::Response {
-    reqwest::Client::new()
-        .get(format!("http://{addr}/api/v1/batches/{id}"))
-        .header("authorization", API_KEY)
-        .send()
-        .await
-        .unwrap()
+#[derive(Default)]
+struct Upstream {
+    hits: HashMap<String, u64>,
+    providers: HashMap<String, serde_json::Value>,
+    models: HashMap<String, String>,
+}
+
+fn mock_app(seen: Arc<Mutex<Upstream>>) -> Router {
+    let handler = move |body: Bytes| {
+        let seen = seen.clone();
+        async move {
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            let order = json["provider"]["order"][0]
+                .as_str()
+                .unwrap_or("?")
+                .to_string();
+            let mut seen = seen.lock().unwrap();
+            *seen.hits.entry(order.clone()).or_insert(0) += 1;
+            seen.providers
+                .insert(order.clone(), json["provider"].clone());
+            seen.models.insert(
+                order.clone(),
+                json["model"].as_str().unwrap_or("?").to_string(),
+            );
+            let mut headers = axum::http::HeaderMap::new();
+            headers.insert("content-type", "application/json".parse().unwrap());
+            (
+                StatusCode::OK,
+                headers,
+                format!(r#"{{"id":"ok","provider":"{order}"}}"#),
+            )
+        }
+    };
+    Router::new().route("/v1/chat/completions", post(handler))
 }
 
 #[tokio::test]
-async fn batch_submit_returns_202_with_batch_object() {
-    let seen = Arc::new(Mutex::new(Seen::default()));
-    let mock = spawn_batch_mock(seen.clone()).await;
-    let gw = spawn_gateway(mock).await;
+async fn batch_tier_routes_to_cheapest_batch_offering() {
+    let db = scratch_db("route");
+    build_db(&db);
+    let seen = Arc::new(Mutex::new(Upstream::default()));
+    let mock = spawn_mock(mock_app(seen.clone())).await;
+    let gw = spawn_gateway(mock, &db).await;
 
-    let res = post_batch(gw).await;
-    assert_eq!(res.status(), StatusCode::ACCEPTED);
-    let body = res.bytes().await.unwrap();
-    assert_eq!(body.as_ref(), BATCH_SUBMIT_RESPONSE);
-
-    let seen = seen.lock().unwrap();
-    assert_eq!(seen.method.as_deref(), Some("POST"));
-    assert_eq!(seen.path.as_deref(), Some("/api/v1/batches"));
-    assert_eq!(seen.auth.as_deref(), Some(API_KEY));
-    assert_eq!(seen.body.as_deref(), Some(BATCH_SUBMIT_REQUEST.as_bytes()));
-}
-
-#[tokio::test]
-async fn batch_status_poll_returns_batch_object() {
-    let seen = Arc::new(Mutex::new(Seen::default()));
-    let mock = spawn_batch_mock(seen.clone()).await;
-    let gw = spawn_gateway(mock).await;
-
-    let res = get_batch_status(gw, "batch_abc123").await;
+    let res = post_chat(gw, "openrouter/pair/batch").await;
     assert_eq!(res.status(), StatusCode::OK);
-    let body = res.bytes().await.unwrap();
-    assert_eq!(body.as_ref(), BATCH_STATUS_RESPONSE);
-
-    let seen = seen.lock().unwrap();
-    assert_eq!(seen.method.as_deref(), Some("GET"));
-    assert_eq!(seen.path.as_deref(), Some("/api/v1/batches/batch_abc123"));
-    assert_eq!(seen.auth.as_deref(), Some(API_KEY));
-    assert!(seen.body.is_none());
+    assert_eq!(
+        res.headers().get("x-pennyrouter-provider").unwrap(),
+        "CheapB"
+    );
+    let guard = seen.lock().unwrap();
+    assert_eq!(
+        guard.models.get("CheapB").map(String::as_str),
+        Some("m/cheap:batch"),
+        "upstream model rewritten to the batch backend id"
+    );
+    assert!(
+        !guard.hits.contains_key("Cheap"),
+        "cheaper interactive offering never serves batch: {:?}",
+        guard.hits
+    );
+    assert!(
+        !guard.hits.contains_key("Freebie"),
+        "free offering never serves the paid-only batch tier: {:?}",
+        guard.hits
+    );
 }
 
 #[tokio::test]
-async fn batch_endpoints_appear_in_metrics() {
-    let seen = Arc::new(Mutex::new(Seen::default()));
-    let mock = spawn_batch_mock(seen.clone()).await;
-    let gw = spawn_gateway(mock).await;
+async fn batch_privacy_variant_routes_same_pick_with_retention() {
+    let db = scratch_db("privacy");
+    build_db(&db);
+    let seen = Arc::new(Mutex::new(Upstream::default()));
+    let mock = spawn_mock(mock_app(seen.clone())).await;
+    let gw = spawn_gateway(mock, &db).await;
 
-    // Submit a batch
-    let _ = post_batch(gw).await;
-    // Poll status
-    let _ = get_batch_status(gw, "batch_abc123").await;
-
-    // Check metrics
-    let metrics_text = reqwest::get(format!("http://{gw}/metrics"))
-        .await
-        .unwrap()
-        .text()
-        .await
-        .unwrap();
-
-    // Both routes should have recorded requests
-    assert!(
-        metrics_text.contains("pennyrouter_requests_total{route=\"batch_submit\""),
-        "batch_submit route not in metrics: {metrics_text}"
+    let res = post_chat(gw, "openrouter/pair/privacy/batch").await;
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(
+        res.headers().get("x-pennyrouter-provider").unwrap(),
+        "CheapB"
     );
+    let guard = seen.lock().unwrap();
+    let provider_obj = guard.providers.get("CheapB").cloned().unwrap();
+    assert_eq!(provider_obj["zdr"], serde_json::json!(true));
+    assert_eq!(provider_obj["data_collection"], serde_json::json!("deny"));
+}
+
+#[tokio::test]
+async fn batch_without_batch_offerings_fails_closed() {
+    let db = scratch_db("empty");
+    build_db_without_batch(&db);
+    let seen = Arc::new(Mutex::new(Upstream::default()));
+    let mock = spawn_mock(mock_app(seen.clone())).await;
+    let gw = spawn_gateway(mock, &db).await;
+
+    let res = post_chat(gw, "openrouter/pair/batch").await;
+    assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body: serde_json::Value = res.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "no_eligible_offering");
+    assert!(seen.lock().unwrap().hits.is_empty());
+}
+
+#[test]
+fn batch_preview_lists_batch_candidates_only() {
+    let db = scratch_db("preview");
+    build_db(&db);
+    let router = pennyrouter_gateway::routing::Router::load(&db).expect("router loads");
+    let preview = router.preview("openrouter/pair/batch", None, 5);
+    assert!(preview.rejection.is_none());
+    let fresh = preview.fresh.expect("fresh pick");
+    assert_eq!(fresh.provider, "CheapB");
+    assert_eq!(fresh.model_id, "m/cheap:batch");
+    assert_eq!(preview.candidates.len(), 2);
     assert!(
-        metrics_text.contains("pennyrouter_requests_total{route=\"batch_status\""),
-        "batch_status route not in metrics: {metrics_text}"
+        preview
+            .candidates
+            .iter()
+            .all(|c| c.model_id.ends_with(":batch")),
+        "only batch variants listed: {:?}",
+        preview
+            .candidates
+            .iter()
+            .map(|c| &c.model_id)
+            .collect::<Vec<_>>()
     );
+    // Cheapest first.
+    assert_eq!(preview.candidates[0].provider, "CheapB");
+    assert_eq!(preview.candidates[1].provider, "DearB");
+}
+
+#[tokio::test]
+async fn batch_minindex_floor_scopes_to_indexed_batch_models() {
+    let db = scratch_db("minindex");
+    build_db(&db);
+    {
+        let catalog = Catalog::open(&db).unwrap();
+        for (model, index) in [("m/cheap:batch", 30), ("m/dear:batch", 60)] {
+            catalog
+                .update_model_index(
+                    model,
+                    &ModelIndex {
+                        aa_intelligence_index: None,
+                        aa_coding_index: Some(index),
+                        aa_agentic_index: None,
+                        aa_cost_per_task: None,
+                    },
+                )
+                .unwrap();
+        }
+    }
+    let seen = Arc::new(Mutex::new(Upstream::default()));
+    let mock = spawn_mock(mock_app(seen.clone())).await;
+    let gw = spawn_gateway(mock, &db).await;
+
+    // The floor admits only the indexed-60 batch model.
+    let res = post_chat(gw, "openrouter/pair/batch/minindex/50").await;
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(
+        res.headers().get("x-pennyrouter-provider").unwrap(),
+        "DearB"
+    );
+    assert_eq!(
+        res.headers()
+            .get("x-pennyrouter-minindex")
+            .and_then(|v| v.to_str().ok()),
+        Some("50"),
+        "floor echoed back"
+    );
+
+    // Nothing indexed that high: fail closed.
+    let res = post_chat(gw, "openrouter/pair/batch/minindex/90").await;
+    assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body: serde_json::Value = res.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "no_eligible_offering");
 }

@@ -1,66 +1,61 @@
-//! AI-assisted processing: model-judged signals into indexed columns.
+//! AI-assisted processing: model-scored signals into indexed columns.
 //!
 //! Phase 2b plugs behind the same per-endpoint update hook Phase 2a
-//! establishes. The recorded judge reads model outputs from a JSON file
-//! (no live model calls); live judges (`BasetenJudge`, `ModalJudge`)
-//! implement the same trait without touching the store.
+//! establishes. The recorded scorer reads model outputs from a JSON file
+//! (no live model calls); live scorers (`BasetenScorer`, `ModalScorer`,
+//! `OpenRouterScorer`) implement the same trait without touching the store.
 
-use crate::store::{Catalog, EndpointJudgment};
+use crate::store::{Catalog, EndpointScore};
 use crate::Error;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::Path;
 
-/// Model-judged signals for one endpoint. `None` means "no signal".
-pub struct Judgment {
+/// Model-scored signals for one endpoint. `None` means "no signal".
+pub struct Score {
     pub quality_tier: Option<String>,
     pub quality_score: Option<f64>,
 }
 
-/// Audit identity of a judge (Iter 15): the model that produced the
+/// Audit identity of a scorer (Iter 15): the model that produced the
 /// signals and the prompt version it answered. Stored with every
-/// judgment and in the rebuild meta, so a tier can always be traced
-/// back to the exact judge + prompt behind it.
+/// score and in the rebuild meta, so a tier can always be traced
+/// back to the exact scorer + prompt behind it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct JudgeIdentity {
+pub struct ScorerIdentity {
     pub model: String,
     pub prompt_version: String,
 }
 
-/// Judge hook: signals for one endpoint, given its identity and raw
+/// Scorer hook: signals for one endpoint, given its identity and raw
 /// payload. Implementations must be deterministic for the same input.
-pub trait Judge {
-    fn judge(
-        &self,
-        model_id: &str,
-        provider_name: &str,
-        payload: &Value,
-    ) -> Result<Judgment, Error>;
+pub trait Scorer {
+    fn score(&self, model_id: &str, provider_name: &str, payload: &Value) -> Result<Score, Error>;
 
     /// Who to blame in the audit trail. The default (`unknown`) keeps
-    /// third-party impls compiling; every in-tree judge overrides it.
-    fn identity(&self) -> JudgeIdentity {
-        JudgeIdentity {
+    /// third-party impls compiling; every in-tree scorer overrides it.
+    fn identity(&self) -> ScorerIdentity {
+        ScorerIdentity {
             model: "unknown".to_string(),
             prompt_version: "unknown".to_string(),
         }
     }
 }
 
-/// Judge that records "no signal" everywhere. Used when judging runs
-/// without a recording so endpoints still get a `judged_at` stamp.
-pub struct NullJudge;
+/// Scorer that records "no signal" everywhere. Used when scoring runs
+/// without a recording so endpoints still get a `scored_at` stamp.
+pub struct NullScorer;
 
-impl Judge for NullJudge {
-    fn judge(&self, _: &str, _: &str, _: &Value) -> Result<Judgment, Error> {
-        Ok(Judgment {
+impl Scorer for NullScorer {
+    fn score(&self, _: &str, _: &str, _: &Value) -> Result<Score, Error> {
+        Ok(Score {
             quality_tier: None,
             quality_score: None,
         })
     }
 
-    fn identity(&self) -> JudgeIdentity {
-        JudgeIdentity {
+    fn identity(&self) -> ScorerIdentity {
+        ScorerIdentity {
             model: "none".to_string(),
             prompt_version: "none".to_string(),
         }
@@ -75,21 +70,21 @@ struct Record {
     quality_score: Option<f64>,
 }
 
-/// Judge backed by a recorded-output file. File shape:
+/// Scorer backed by a recorded-output file. File shape:
 ///
 /// ```json
-/// {"judgments": [{"model_id": "m", "provider_name": "p", "tag": "t",
+/// {"scores": [{"model_id": "m", "provider_name": "p", "tag": "t",
 ///   "quality_tier": "high", "quality_score": 0.9}]}
 /// ```
 ///
 /// `quality_tier` is one of `high`/`standard`/`low`. Records for unknown
 /// endpoints are ignored; several records may match one endpoint and the
 /// last one wins. Invalid files fail at load, never mid-run.
-pub struct RecordedJudge {
+pub struct RecordedScorer {
     by_endpoint: HashMap<(String, String), Vec<Record>>,
 }
 
-impl RecordedJudge {
+impl RecordedScorer {
     pub fn load(path: &Path) -> Result<Self, Error> {
         let raw = std::fs::read_to_string(path)?;
         Self::from_str(&raw)
@@ -97,16 +92,13 @@ impl RecordedJudge {
 
     fn from_str(raw: &str) -> Result<Self, Error> {
         let doc: Value = serde_json::from_str(raw)
-            .map_err(|e| Error::InvalidFixture(format!("judgments file is not valid JSON: {e}")))?;
-        let list = doc
-            .get("judgments")
-            .and_then(Value::as_array)
-            .ok_or_else(|| {
-                Error::InvalidFixture("judgments file needs a \"judgments\" array".to_string())
-            })?;
+            .map_err(|e| Error::InvalidFixture(format!("scores file is not valid JSON: {e}")))?;
+        let list = doc.get("scores").and_then(Value::as_array).ok_or_else(|| {
+            Error::InvalidFixture("scores file needs a \"scores\" array".to_string())
+        })?;
         let mut by_endpoint: HashMap<(String, String), Vec<Record>> = HashMap::new();
         for (i, item) in list.iter().enumerate() {
-            let at = |what: &str| format!("judgments[{i}]: {what}");
+            let at = |what: &str| format!("scores[{i}]: {what}");
             let model_id = item
                 .get("model_id")
                 .and_then(Value::as_str)
@@ -176,24 +168,19 @@ pub fn endpoint_tag(payload: &Value) -> Option<&str> {
     payload.get("tag").and_then(Value::as_str)
 }
 
-impl Judge for RecordedJudge {
+impl Scorer for RecordedScorer {
     /// Recordings carry signals, not provenance: the audit trail says
-    /// `recorded`, honestly marking judgments whose original model and
+    /// `recorded`, honestly marking scores whose original model and
     /// prompt are no longer known.
-    fn identity(&self) -> JudgeIdentity {
-        JudgeIdentity {
+    fn identity(&self) -> ScorerIdentity {
+        ScorerIdentity {
             model: "recorded".to_string(),
             prompt_version: "recorded".to_string(),
         }
     }
 
-    fn judge(
-        &self,
-        model_id: &str,
-        provider_name: &str,
-        payload: &Value,
-    ) -> Result<Judgment, Error> {
-        let mut out = Judgment {
+    fn score(&self, model_id: &str, provider_name: &str, payload: &Value) -> Result<Score, Error> {
+        let mut out = Score {
             quality_tier: None,
             quality_score: None,
         };
@@ -216,58 +203,64 @@ impl Judge for RecordedJudge {
     }
 }
 
-pub struct JudgeSummary {
-    pub judged: usize,
+pub struct ScorerSummary {
+    pub scored: usize,
     pub matched: usize,
 }
 
-/// Fill the judgment columns for every endpoint. Idempotent:
-/// re-running overwrites the same columns. Touching only judgment
+/// Fill the score columns for every endpoint. Idempotent:
+/// re-running overwrites the same columns. Touching only score
 /// columns — deterministic values from Phase 2a are left alone.
-pub fn run_judging(
+pub fn run_scoring(
     catalog: &Catalog,
-    judge: &dyn Judge,
-    judged_at: &str,
-) -> Result<JudgeSummary, Error> {
+    score: &dyn Scorer,
+    scored_at: &str,
+) -> Result<ScorerSummary, Error> {
     let endpoints = catalog.all_endpoints()?;
-    run_judging_selected(catalog, judge, &endpoints, judged_at)
+    run_scoring_selected(catalog, score, &endpoints, scored_at)
 }
 
-/// Fill the judgment columns for exactly `endpoints` (Iter 15: the
-/// policy-selected subset). Every written row carries the judge's
+/// Fill the score columns for exactly `endpoints` (Iter 15: the
+/// policy-selected subset). Every written row carries the score's
 /// audit identity; the rebuild meta records it too.
-pub fn run_judging_selected(
+pub fn run_scoring_selected(
     catalog: &Catalog,
-    judge: &dyn Judge,
+    score: &dyn Scorer,
     endpoints: &[crate::store::EndpointRow],
-    judged_at: &str,
-) -> Result<JudgeSummary, Error> {
-    let identity = judge.identity();
-    let mut judged = 0;
-    let mut matched = 0;
-    for ep in endpoints {
-        let payload: Value = serde_json::from_str(&ep.payload)?;
-        let judgment = judge.judge(&ep.model_id, &ep.provider_name, &payload)?;
-        if judgment.quality_tier.is_some() || judgment.quality_score.is_some() {
-            matched += 1;
+    scored_at: &str,
+) -> Result<ScorerSummary, Error> {
+    let identity = score.identity();
+    // One transaction for the whole run (plus its meta): a mid-run
+    // failure rolls every score back instead of half-scoring. The
+    // pipeline scores a private work DB, so the lock never blocks
+    // gateway readers (they see only published artifacts).
+    catalog.transaction(|| {
+        let mut scored = 0;
+        let mut matched = 0;
+        for ep in endpoints {
+            let payload: Value = serde_json::from_str(&ep.payload)?;
+            let score = score.score(&ep.model_id, &ep.provider_name, &payload)?;
+            if score.quality_tier.is_some() || score.quality_score.is_some() {
+                matched += 1;
+            }
+            catalog.update_endpoint_score(
+                ep.id,
+                &EndpointScore {
+                    quality_tier: score.quality_tier,
+                    quality_score: score.quality_score,
+                    scored_at: scored_at.to_string(),
+                    score_model: Some(identity.model.clone()),
+                    score_prompt: Some(identity.prompt_version.clone()),
+                },
+            )?;
+            scored += 1;
         }
-        catalog.update_endpoint_judgment(
-            ep.id,
-            &EndpointJudgment {
-                quality_tier: judgment.quality_tier,
-                quality_score: judgment.quality_score,
-                judged_at: judged_at.to_string(),
-                judge_model: Some(identity.model.clone()),
-                judge_prompt: Some(identity.prompt_version.clone()),
-            },
-        )?;
-        judged += 1;
-    }
-    catalog.set_meta("judged_at", judged_at)?;
-    catalog.set_meta("judged_count", &judged.to_string())?;
-    catalog.set_meta("judge_model", &identity.model)?;
-    catalog.set_meta("judge_prompt", &identity.prompt_version)?;
-    Ok(JudgeSummary { judged, matched })
+        catalog.set_meta("scored_at", scored_at)?;
+        catalog.set_meta("scored_count", &scored.to_string())?;
+        catalog.set_meta("score_model", &identity.model)?;
+        catalog.set_meta("score_prompt", &identity.prompt_version)?;
+        Ok(ScorerSummary { scored, matched })
+    })
 }
 
 #[cfg(test)]
@@ -275,33 +268,33 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn recorded(raw: &str) -> RecordedJudge {
-        RecordedJudge::from_str(raw).unwrap()
+    fn recorded(raw: &str) -> RecordedScorer {
+        RecordedScorer::from_str(raw).unwrap()
     }
 
     #[test]
     fn tag_narrows_the_match() {
-        let judge = recorded(
-            r#"{"judgments": [
+        let score = recorded(
+            r#"{"scores": [
                 {"model_id": "m", "provider_name": "p",
                  "quality_tier": "low", "quality_score": 0.1},
                 {"model_id": "m", "provider_name": "p", "tag": "fast",
                  "quality_tier": "high", "quality_score": 0.9}
             ]}"#,
         );
-        let tagged = judge.judge("m", "p", &json!({"tag": "fast"})).unwrap();
+        let tagged = score.score("m", "p", &json!({"tag": "fast"})).unwrap();
         assert_eq!(tagged.quality_tier.as_deref(), Some("high"));
         assert_eq!(tagged.quality_score, Some(0.9));
         // Untagged record matches every offering.
-        let other = judge.judge("m", "p", &json!({"tag": "slow"})).unwrap();
+        let other = score.score("m", "p", &json!({"tag": "slow"})).unwrap();
         assert_eq!(other.quality_tier.as_deref(), Some("low"));
         assert_eq!(other.quality_score, Some(0.1));
     }
 
     #[test]
     fn unknown_endpoints_get_no_signal() {
-        let judge = recorded(r#"{"judgments": []}"#);
-        let out = judge.judge("m", "p", &json!({})).unwrap();
+        let score = recorded(r#"{"scores": []}"#);
+        let out = score.score("m", "p", &json!({})).unwrap();
         assert_eq!(out.quality_tier, None);
         assert_eq!(out.quality_score, None);
     }
@@ -310,29 +303,29 @@ mod tests {
     /// match-all record.
     #[test]
     fn wrong_type_tag_rejected() {
-        let raw = r#"{"judgments": [
+        let raw = r#"{"scores": [
             {"model_id": "m", "provider_name": "p", "tag": 42,
              "quality_tier": "high", "quality_score": 0.9}
         ]}"#;
-        assert!(RecordedJudge::from_str(raw).is_err());
+        assert!(RecordedScorer::from_str(raw).is_err());
     }
 
     #[test]
     fn invalid_recordings_fail_at_load() {
         let bad = [
-            r#"{"judgments": "nope"}"#,
-            r#"{"judgments": [{"provider_name": "p"}]}"#,
-            r#"{"judgments": [{"model_id": "m", "provider_name": ""}]}"#,
-            r#"{"judgments": [{"model_id": "m", "provider_name": "p",
+            r#"{"scores": "nope"}"#,
+            r#"{"scores": [{"provider_name": "p"}]}"#,
+            r#"{"scores": [{"model_id": "m", "provider_name": ""}]}"#,
+            r#"{"scores": [{"model_id": "m", "provider_name": "p",
                 "quality_tier": "ultra"}]}"#,
-            r#"{"judgments": [{"model_id": "m", "provider_name": "p",
+            r#"{"scores": [{"model_id": "m", "provider_name": "p",
                 "quality_score": 1.5}]}"#,
-            r#"{"judgments": [{"model_id": "m", "provider_name": "p",
+            r#"{"scores": [{"model_id": "m", "provider_name": "p",
                 "quality_score": "high"}]}"#,
         ];
         for raw in bad {
             assert!(
-                RecordedJudge::from_str(raw).is_err(),
+                RecordedScorer::from_str(raw).is_err(),
                 "should reject: {raw}"
             );
         }

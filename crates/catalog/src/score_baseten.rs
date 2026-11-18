@@ -1,28 +1,28 @@
-//! Phase 4: live judging through a Baseten-hosted model.
+//! Phase 4: live scoring through a Baseten-hosted model.
 //!
 //! OpenAI chat completions with a Bearer key; shared prompt, request
-//! shape, and validation live in `judge_openai`. The API key travels
+//! shape, and validation live in `score_openai`. The API key travels
 //! only in the Authorization header and is never logged (no `Debug`
 //! impl on purpose).
 
-use crate::judge::{Judge, Judgment};
-use crate::judge_openai::{chat_body, judgment_from_reply};
+use crate::score::{Score, Scorer};
+use crate::score_openai::{chat_body, score_from_reply};
 use crate::Error;
 use serde_json::Value;
 use std::time::Duration;
 
-/// Live judge over the Baseten OpenAI-compatible chat API.
-pub struct BasetenJudge {
+/// Live score over the Baseten OpenAI-compatible chat API.
+pub struct BasetenScorer {
     client: reqwest::blocking::Client,
     base_url: String,
     api_key: String,
     model: String,
 }
 
-impl BasetenJudge {
+impl BasetenScorer {
     /// Shared Model APIs / Frontier Gateway base URL.
     pub const BASE_URL: &'static str = "https://inference.baseten.co/v1";
-    /// Hackathon judge model a federated key is scoped to.
+    /// Hackathon scorer model a federated key is scoped to.
     pub const MODEL: &'static str = "meta-models/muse-spark-open-1026";
 
     pub fn new(base_url: &str, api_key: &str, model: &str) -> Result<Self, Error> {
@@ -37,25 +37,20 @@ impl BasetenJudge {
         })
     }
 
-    /// Production judge: documented base URL + model, key from `BASETEN_API_KEY`.
+    /// Production score: documented base URL + model, key from `BASETEN_API_KEY`.
     pub fn from_env() -> Result<Self, Error> {
         let api_key = std::env::var("BASETEN_API_KEY").map_err(|_| {
-            Error::Judge("BASETEN_API_KEY is not set (see .env.example)".to_string())
+            Error::Scorer("BASETEN_API_KEY is not set (see .env.example)".to_string())
         })?;
         if api_key.is_empty() {
-            return Err(Error::Judge(
+            return Err(Error::Scorer(
                 "BASETEN_API_KEY is empty (see .env.example)".to_string(),
             ));
         }
         Self::new(Self::BASE_URL, &api_key, Self::MODEL)
     }
 
-    fn chat(
-        &self,
-        model_id: &str,
-        provider_name: &str,
-        payload: &Value,
-    ) -> Result<Judgment, Error> {
+    fn chat(&self, model_id: &str, provider_name: &str, payload: &Value) -> Result<Score, Error> {
         let body = chat_body(&self.model, model_id, provider_name, payload);
         let url = format!("{}/chat/completions", self.base_url);
         let reply: Value = self
@@ -66,24 +61,19 @@ impl BasetenJudge {
             .send()?
             .error_for_status()?
             .json()?;
-        judgment_from_reply("baseten", &reply)
+        score_from_reply("baseten", &reply)
     }
 }
 
-impl Judge for BasetenJudge {
-    fn identity(&self) -> crate::judge::JudgeIdentity {
-        crate::judge::JudgeIdentity {
+impl Scorer for BasetenScorer {
+    fn identity(&self) -> crate::score::ScorerIdentity {
+        crate::score::ScorerIdentity {
             model: self.model.clone(),
-            prompt_version: crate::judge_openai::PROMPT_VERSION.to_string(),
+            prompt_version: crate::score_openai::PROMPT_VERSION.to_string(),
         }
     }
 
-    fn judge(
-        &self,
-        model_id: &str,
-        provider_name: &str,
-        payload: &Value,
-    ) -> Result<Judgment, Error> {
+    fn score(&self, model_id: &str, provider_name: &str, payload: &Value) -> Result<Score, Error> {
         self.chat(model_id, provider_name, payload)
     }
 }

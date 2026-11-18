@@ -12,16 +12,20 @@ milestones stay in [../TODO.md](../TODO.md).
       into fixed indexed columns with pure-code extraction (normalized
       price parts, precision class, promo discount). Test: processing
       fixtures yield expected indexed values; raw payloads preserved.
-- [x] **Phase 2b — Processing (AI-assisted).** Model-judged signals fill
+- [x] **Phase 2b — Processing (AI-assisted).** Model-scored signals fill
       further indexed columns. Test: recorded-output fixtures yield
       expected values; no live model calls in tests.
 - [x] **Phase 3 — Local deployment.** Containerized scheduled sync with
       volume-shared artifact (gateway read-only) + CI gates. Test:
       image builds; one-shot smoke publishes a readable artifact;
       compose renders.
-- [x] **Phase 4 — Judge backends: Baseten + Modal.** Live
-      `Judge` backends behind the Phase 2b trait (Baseten + Modal
-      models judging OpenRouter offerings); recorded-output fixtures
+- [x] **Phase 4 — Scorer backends: Baseten + Modal.** Live
+      `Scorer` backends behind the Phase 2b trait (Baseten + Modal
+      models scoring OpenRouter offerings); recorded-output fixtures
       stay the test path. Test: recorded fixtures yield expected
       values with no live calls; live backends opt-in via env keys
       only; gates pass.
+- [x] **Phase 5 — Live fetching (Iter 18).** `--fetch-openrouter`
+      pulls public models + per-model endpoints; `FETCH_OPENROUTER=1`
+      flips the container off fixtures. Test: stub-server fetch
+      tests; live one-shot synced 456 models / 1483 endpoints.

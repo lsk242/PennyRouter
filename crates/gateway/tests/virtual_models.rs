@@ -6,7 +6,7 @@
 //! away from recently rate-limited providers.
 
 use axum::{body::Bytes, http::StatusCode, routing::post, Router};
-use pennyrouter_catalog::{Catalog, EndpointIndex, EndpointJudgment, EndpointRow, ModelRow};
+use pennyrouter_catalog::{Catalog, EndpointIndex, EndpointRow, EndpointScore, ModelRow};
 use std::{
     collections::HashMap,
     net::SocketAddr,
@@ -47,13 +47,17 @@ fn build_db(path: &std::path::Path) {
                 price_cache_read: None,
                 price_cache_write: None,
                 precision_class: None,
+                quantization: None,
                 promo_discount: None,
                 processed_at: None,
+                supports_tools: None,
+                supports_decisions: None,
                 quality_tier: None,
                 quality_score: None,
-                judged_at: None,
-                judge_model: None,
-                judge_prompt: None,
+                scored_at: None,
+                score_model: None,
+                score_prompt: None,
+                price_override_tokens: None,
             })
             .unwrap();
         let id = catalog.endpoints_for(model).unwrap()[0].id;
@@ -66,20 +70,24 @@ fn build_db(path: &std::path::Path) {
                     price_cache_read: None,
                     price_cache_write: None,
                     precision_class: Some("fp16".to_string()),
+                    quantization: None,
                     promo_discount: None,
                     processed_at: "t".to_string(),
+                    supports_tools: None,
+                    supports_decisions: None,
+                    price_override_tokens: None,
                 },
             )
             .unwrap();
         catalog
-            .update_endpoint_judgment(
+            .update_endpoint_score(
                 id,
-                &EndpointJudgment {
+                &EndpointScore {
                     quality_tier: Some(tier.to_string()),
                     quality_score: None,
-                    judged_at: "t".to_string(),
-                    judge_model: None,
-                    judge_prompt: None,
+                    scored_at: "t".to_string(),
+                    score_model: None,
+                    score_prompt: None,
                 },
             )
             .unwrap();
@@ -94,6 +102,14 @@ async fn spawn_gateway(upstream: SocketAddr, db: &std::path::Path) -> SocketAddr
     let router = Arc::new(pennyrouter_gateway::routing::Router::load(db).expect("router loads"));
     let state =
         pennyrouter_gateway::AppState::new(format!("http://{upstream}")).with_router(router);
+    let app = pennyrouter_gateway::app_with_state(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    addr
+}
+
+async fn spawn_with_state(state: pennyrouter_gateway::AppState) -> SocketAddr {
     let app = pennyrouter_gateway::app_with_state(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -133,6 +149,17 @@ struct Upstream {
     models: HashMap<String, String>,
 }
 
+/// 429 reset stamp: 60s in the future, so throttle memory engages.
+/// A fixed stamp silently expires and disables throttling outright.
+fn reset_ms() -> String {
+    (std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+        + 60_000)
+        .to_string()
+}
+
 fn mock_app(
     seen: Arc<Mutex<Upstream>>,
     throttle: Vec<&'static str>,
@@ -159,23 +186,32 @@ fn mock_app(
             );
             let hit = seen.hits[&order];
             if throttle.contains(&order.as_str()) {
+                let mut headers = axum::http::HeaderMap::new();
+                headers.insert("content-type", "application/json".parse().unwrap());
+                headers.insert("x-ratelimit-limit", "50".parse().unwrap());
+                headers.insert("x-ratelimit-remaining", "0".parse().unwrap());
+                headers.insert("x-ratelimit-reset", reset_ms().parse().unwrap());
                 return (
-                        StatusCode::TOO_MANY_REQUESTS,
-                        [("content-type", "application/json")],
-                        r#"{"error":{"message":"slow down","type":"server_error","code":"rate_limited"}}"#.to_string(),
-                    );
+                    StatusCode::TOO_MANY_REQUESTS,
+                    headers,
+                    r#"{"error":{"message":"slow down","type":"server_error","code":"rate_limited"}}"#.to_string(),
+                );
             }
             if fail_once.contains(&order.as_str()) && hit == 1 {
+                let mut headers = axum::http::HeaderMap::new();
+                headers.insert("content-type", "application/json".parse().unwrap());
                 return (
                     StatusCode::SERVICE_UNAVAILABLE,
-                    [("content-type", "application/json")],
+                    headers,
                     r#"{"error":{"message":"flaky","type":"server_error","code":"flaky"}}"#
                         .to_string(),
                 );
             }
+            let mut headers = axum::http::HeaderMap::new();
+            headers.insert("content-type", "application/json".parse().unwrap());
             (
                 StatusCode::OK,
-                [("content-type", "application/json")],
+                headers,
                 format!(r#"{{"id":"ok","provider":"{order}"}}"#),
             )
         }
@@ -186,7 +222,7 @@ fn mock_app(
 }
 
 #[tokio::test]
-async fn models_menu_lists_exactly_the_six_virtual_ids() {
+async fn models_menu_lists_exactly_the_sixteen_virtual_ids() {
     let db = scratch_db("menu");
     build_db(&db);
     let mock = spawn_mock(mock_app(
@@ -215,11 +251,21 @@ async fn models_menu_lists_exactly_the_six_virtual_ids() {
     assert_eq!(
         ids,
         [
+            "openrouter/pair/batch",
+            "openrouter/pair/decision",
+            "openrouter/pair/decision/free",
             "openrouter/pair/free",
             "openrouter/pair/low",
+            "openrouter/pair/privacy/batch",
+            "openrouter/pair/privacy/decision",
+            "openrouter/pair/privacy/decision/free",
             "openrouter/pair/privacy/free",
             "openrouter/pair/privacy/low",
+            "openrouter/pair/privacy/smart",
+            "openrouter/pair/privacy/smart/max",
             "openrouter/pair/privacy/think",
+            "openrouter/pair/smart",
+            "openrouter/pair/smart/max",
             "openrouter/pair/think",
         ]
     );
@@ -309,6 +355,42 @@ async fn virtual_retry_lands_on_another_provider() {
     assert_eq!(total, 2, "exactly one retry, hits: {:?}", guard.hits);
 }
 
+/// A transient failure must not rewrite affinity: the retry leg
+/// serves the failover pick but leaves the session pin with the
+/// first decision, so the next request on the same key tries the
+/// cheapest pick again instead of sticking to the failover.
+#[tokio::test]
+async fn retry_does_not_steal_the_session_pin() {
+    let db = scratch_db("retry-pin");
+    build_db(&db);
+    let seen = Arc::new(Mutex::new(Upstream::default()));
+    // Cheap is cheapest but flaky once: request 1 retries onto Dear.
+    let mock = spawn_mock(mock_app(seen.clone(), vec![], vec!["Cheap"])).await;
+    let gw = spawn_gateway(mock, &db).await;
+
+    let first = post_chat(gw, "openrouter/pair/low").await;
+    assert_eq!(first.status(), StatusCode::OK);
+    assert_eq!(
+        first.headers().get("x-pennyrouter-provider").unwrap(),
+        "Dear",
+        "first request fails over to the retry pick"
+    );
+
+    // Same key: the pin still belongs to Cheap, so the second
+    // request goes back to the cheapest pick (now healthy).
+    let second = post_chat(gw, "openrouter/pair/low").await;
+    assert_eq!(second.status(), StatusCode::OK);
+    assert_eq!(
+        second.headers().get("x-pennyrouter-provider").unwrap(),
+        "Cheap",
+        "retry must not overwrite the session pin"
+    );
+
+    let guard = seen.lock().unwrap();
+    assert_eq!(guard.hits.get("Cheap"), Some(&2));
+    assert_eq!(guard.hits.get("Dear"), Some(&1));
+}
+
 #[tokio::test]
 async fn throttled_providers_are_avoided_and_counted() {
     let db = scratch_db("throttle");
@@ -337,13 +419,17 @@ async fn throttled_providers_are_avoided_and_counted() {
                 price_cache_read: None,
                 price_cache_write: None,
                 precision_class: None,
+                quantization: None,
                 promo_discount: None,
                 processed_at: None,
+                supports_tools: None,
+                supports_decisions: None,
                 quality_tier: None,
                 quality_score: None,
-                judged_at: None,
-                judge_model: None,
-                judge_prompt: None,
+                scored_at: None,
+                score_model: None,
+                score_prompt: None,
+                price_override_tokens: None,
             })
             .unwrap();
         let id = catalog.endpoints_for("m/mid").unwrap()[0].id;
@@ -356,22 +442,26 @@ async fn throttled_providers_are_avoided_and_counted() {
                     price_cache_read: None,
                     price_cache_write: None,
                     precision_class: Some("fp16".to_string()),
+                    quantization: None,
                     promo_discount: None,
                     processed_at: "t".to_string(),
+                    supports_tools: None,
+                    supports_decisions: None,
+                    price_override_tokens: None,
                 },
             )
             .unwrap();
-        // Judged `standard`: the `low`-tier quality floor (Iter 14)
-        // needs a judged tier, and this test is about throttling.
+        // Scorerd `standard`: the `low`-tier quality floor (Iter 14)
+        // needs a scored tier, and this test is about throttling.
         catalog
-            .update_endpoint_judgment(
+            .update_endpoint_score(
                 id,
-                &EndpointJudgment {
+                &EndpointScore {
                     quality_tier: Some("standard".to_string()),
                     quality_score: None,
-                    judged_at: "t".to_string(),
-                    judge_model: None,
-                    judge_prompt: None,
+                    scored_at: "t".to_string(),
+                    score_model: None,
+                    score_prompt: None,
                 },
             )
             .unwrap();
@@ -592,13 +682,17 @@ async fn free_tier_fails_over_on_throttle() {
                 price_cache_read: None,
                 price_cache_write: None,
                 precision_class: None,
+                quantization: None,
                 promo_discount: None,
                 processed_at: None,
+                supports_tools: None,
+                supports_decisions: None,
                 quality_tier: None,
                 quality_score: None,
-                judged_at: None,
-                judge_model: None,
-                judge_prompt: None,
+                scored_at: None,
+                score_model: None,
+                score_prompt: None,
+                price_override_tokens: None,
             })
             .unwrap();
         let id = catalog.endpoints_for("m/free2").unwrap()[0].id;
@@ -611,8 +705,12 @@ async fn free_tier_fails_over_on_throttle() {
                     price_cache_read: None,
                     price_cache_write: None,
                     precision_class: Some("fp16".to_string()),
+                    quantization: None,
                     promo_discount: None,
                     processed_at: "t".to_string(),
+                    supports_tools: None,
+                    supports_decisions: None,
+                    price_override_tokens: None,
                 },
             )
             .unwrap();
@@ -634,4 +732,776 @@ async fn free_tier_fails_over_on_throttle() {
     let guard = seen.lock().unwrap();
     assert_eq!(guard.hits.get("Freebie"), Some(&1), "no second Freebie hit");
     assert_eq!(guard.hits.get("Free2"), Some(&2));
+}
+
+/// Iter 21: `free/fallback/low` serves paid when the free leg 429s —
+/// one free attempt, no usable retry, then exactly one fallback call.
+#[tokio::test]
+async fn free_fallback_serves_paid_after_free_429() {
+    let db = scratch_db("free-fallback");
+    build_db(&db);
+    let seen = Arc::new(Mutex::new(Upstream::default()));
+    let mock = spawn_mock(mock_app(seen.clone(), vec!["Freebie"], vec![])).await;
+    let gw = spawn_gateway(mock, &db).await;
+
+    let res = post_chat(gw, "openrouter/pair/free/fallback/low").await;
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(
+        res.headers().get("x-pennyrouter-provider").unwrap(),
+        "Cheap"
+    );
+    let guard = seen.lock().unwrap();
+    assert_eq!(guard.hits.get("Freebie"), Some(&1));
+    assert_eq!(guard.hits.get("Cheap"), Some(&1));
+    assert_eq!(guard.models.get("Cheap").unwrap(), "m/cheap");
+}
+
+/// I10(d): the fallback dispatch serves every tier target, not just
+/// `low` — think (best quality), lowest (cheapest paid), decision
+/// (decisions-capable only), batch (`:batch` variants only).
+#[tokio::test]
+async fn free_fallback_serves_each_tier_target() {
+    let db = scratch_db("free-fallback-tiers");
+    build_db(&db);
+    // Decisions-capable paid offering for the `decision` target, plus
+    // a batch-variant offering for the `batch` target.
+    for (model, provider, decisions) in [
+        ("m/score", "Decider", Some(1)),
+        ("m/deferred:batch", "Batcher", None),
+    ] {
+        let catalog = Catalog::open(&db).unwrap();
+        catalog
+            .insert_model(&ModelRow {
+                model_id: model.to_string(),
+                name: model.to_string(),
+                source: "test".to_string(),
+                payload: "{}".to_string(),
+                fetched_at: "t".to_string(),
+            })
+            .unwrap();
+        catalog
+            .insert_endpoint(&EndpointRow {
+                id: 0,
+                model_id: model.to_string(),
+                provider_name: provider.to_string(),
+                payload: "{}".to_string(),
+                fetched_at: "t".to_string(),
+                price_prompt: None,
+                price_completion: None,
+                price_cache_read: None,
+                price_cache_write: None,
+                precision_class: None,
+                quantization: None,
+                promo_discount: None,
+                processed_at: None,
+                supports_tools: None,
+                supports_decisions: None,
+                quality_tier: None,
+                quality_score: None,
+                scored_at: None,
+                score_model: None,
+                score_prompt: None,
+                price_override_tokens: None,
+            })
+            .unwrap();
+        let id = catalog.endpoints_for(model).unwrap()[0].id;
+        catalog
+            .update_endpoint_index(
+                id,
+                &EndpointIndex {
+                    price_prompt: Some(2.0),
+                    price_completion: Some(2.0),
+                    price_cache_read: None,
+                    price_cache_write: None,
+                    precision_class: Some("fp16".to_string()),
+                    quantization: None,
+                    promo_discount: None,
+                    processed_at: "t".to_string(),
+                    supports_tools: None,
+                    supports_decisions: decisions,
+                    price_override_tokens: None,
+                },
+            )
+            .unwrap();
+        catalog
+            .update_endpoint_score(
+                id,
+                &EndpointScore {
+                    quality_tier: Some("standard".to_string()),
+                    quality_score: None,
+                    scored_at: "t".to_string(),
+                    score_model: None,
+                    score_prompt: None,
+                },
+            )
+            .unwrap();
+    }
+    let seen = Arc::new(Mutex::new(Upstream::default()));
+    let mock = spawn_mock(mock_app(seen.clone(), vec!["Freebie"], vec![])).await;
+    let gw = spawn_gateway(mock, &db).await;
+
+    // Distinct model ids pin under distinct session namespaces, so
+    // each POST below takes its own fresh fallback pick.
+    for (target, provider, model) in [
+        ("think", "Dear", "m/dear"),
+        ("lowest", "Cheap", "m/cheap"),
+        ("decision", "Decider", "m/score"),
+        ("batch", "Batcher", "m/deferred:batch"),
+    ] {
+        let res = post_chat(gw, &format!("openrouter/pair/free/fallback/{target}")).await;
+        assert_eq!(res.status(), StatusCode::OK, "target {target}");
+        assert_eq!(
+            res.headers().get("x-pennyrouter-provider").unwrap(),
+            provider,
+            "target {target}"
+        );
+        let guard = seen.lock().unwrap();
+        assert_eq!(
+            guard.models.get(provider).map(String::as_str),
+            Some(model),
+            "target {target}"
+        );
+    }
+    let guard = seen.lock().unwrap();
+    assert_eq!(guard.hits.get("Freebie"), Some(&4));
+    assert_eq!(guard.hits.get("Dear"), Some(&1));
+    assert_eq!(guard.hits.get("Cheap"), Some(&1));
+    assert_eq!(guard.hits.get("Decider"), Some(&1));
+    assert_eq!(guard.hits.get("Batcher"), Some(&1));
+}
+
+/// B04 probe: when the free attempt AND its retry both 429, the
+/// configured `/fallback/<tier>` must still serve — the retry leg
+/// must fall through to the fallback leg instead of returning.
+#[tokio::test]
+async fn free_fallback_serves_paid_after_retry_also_429s() {
+    let db = scratch_db("free-fallback-retry");
+    build_db(&db);
+    // Second free offering so a retry leg exists to fail.
+    {
+        let catalog = Catalog::open(&db).unwrap();
+        catalog
+            .insert_model(&ModelRow {
+                model_id: "m/free2".to_string(),
+                name: "m/free2".to_string(),
+                source: "test".to_string(),
+                payload: "{}".to_string(),
+                fetched_at: "t".to_string(),
+            })
+            .unwrap();
+        catalog
+            .insert_endpoint(&EndpointRow {
+                id: 0,
+                model_id: "m/free2".to_string(),
+                provider_name: "Free2".to_string(),
+                payload: "{}".to_string(),
+                fetched_at: "t".to_string(),
+                price_prompt: None,
+                price_completion: None,
+                price_cache_read: None,
+                price_cache_write: None,
+                precision_class: None,
+                quantization: None,
+                promo_discount: None,
+                processed_at: None,
+                supports_tools: None,
+                supports_decisions: None,
+                quality_tier: None,
+                quality_score: None,
+                scored_at: None,
+                score_model: None,
+                score_prompt: None,
+                price_override_tokens: None,
+            })
+            .unwrap();
+        let id = catalog.endpoints_for("m/free2").unwrap()[0].id;
+        catalog
+            .update_endpoint_index(
+                id,
+                &EndpointIndex {
+                    price_prompt: Some(0.0),
+                    price_completion: Some(0.0),
+                    price_cache_read: None,
+                    price_cache_write: None,
+                    precision_class: Some("fp16".to_string()),
+                    quantization: None,
+                    promo_discount: None,
+                    processed_at: "t".to_string(),
+                    supports_tools: None,
+                    supports_decisions: None,
+                    price_override_tokens: None,
+                },
+            )
+            .unwrap();
+    }
+    let seen = Arc::new(Mutex::new(Upstream::default()));
+    let mock = spawn_mock(mock_app(seen.clone(), vec!["Freebie", "Free2"], vec![])).await;
+    let gw = spawn_gateway(mock, &db).await;
+
+    let res = post_chat(gw, "openrouter/pair/free/fallback/low").await;
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(
+        res.headers().get("x-pennyrouter-provider").unwrap(),
+        "Cheap"
+    );
+    let guard = seen.lock().unwrap();
+    assert_eq!(guard.hits.get("Freebie"), Some(&1));
+    assert_eq!(guard.hits.get("Free2"), Some(&1));
+    assert_eq!(guard.hits.get("Cheap"), Some(&1));
+    assert_eq!(guard.models.get("Cheap").unwrap(), "m/cheap");
+}
+
+/// Iter 21: upstream quota headers reach the client on 429s instead
+/// of being stripped.
+#[tokio::test]
+async fn upstream_ratelimit_headers_reach_client_on_429() {
+    let db = scratch_db("ratelimit-headers");
+    build_db(&db);
+    let seen = Arc::new(Mutex::new(Upstream::default()));
+    let mock = spawn_mock(mock_app(seen.clone(), vec!["Cheap", "Dear"], vec![])).await;
+    let gw = spawn_gateway(mock, &db).await;
+
+    let res = post_chat(gw, "openrouter/pair/low").await;
+    assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(res.headers().get("x-ratelimit-remaining").unwrap(), "0");
+    assert_eq!(res.headers().get("x-ratelimit-limit").unwrap(), "50");
+    let reset: u64 = res
+        .headers()
+        .get("x-ratelimit-reset")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    assert!(
+        reset > now_ms && reset <= now_ms + 120_000,
+        "reset reaches the client with live future time, got {reset}"
+    );
+}
+
+/// Iter 22: a tool-bearing request skips the cheaper tool-incapable
+/// offering and pins the capable one, instead of failing upstream
+/// with "No endpoints found that support tool use".
+#[tokio::test]
+async fn tool_request_routes_to_capable_offering() {
+    let db = scratch_db("tools-route");
+    build_tools_db(&db, true);
+    let seen = Arc::new(Mutex::new(Upstream::default()));
+    let mock = spawn_mock(mock_app(seen.clone(), vec![], vec![])).await;
+    let gw = spawn_gateway(mock, &db).await;
+
+    let res = post_body(
+        gw,
+        "/v1/chat/completions",
+        r#"{"model":"openrouter/pair/low","messages":[],"tools":[{"type":"function","function":{"name":"patch"}}]}"#,
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let guard = seen.lock().unwrap();
+    assert_eq!(guard.hits.get("ToolCo"), Some(&1));
+    assert_eq!(guard.hits.get("NoToolCo"), None);
+}
+
+/// Iter 22: a tool-bearing request with no capable offering fails
+/// closed with a message naming the fix, instead of pinning a
+/// provider the upstream then 404s.
+#[tokio::test]
+async fn tool_request_without_capable_offering_fails_closed() {
+    let db = scratch_db("tools-closed");
+    build_tools_db(&db, false);
+    let seen = Arc::new(Mutex::new(Upstream::default()));
+    let mock = spawn_mock(mock_app(seen.clone(), vec![], vec![])).await;
+    let gw = spawn_gateway(mock, &db).await;
+
+    let res = post_body(
+        gw,
+        "/v1/chat/completions",
+        r#"{"model":"openrouter/pair/low","messages":[],"tools":[{"type":"function","function":{"name":"patch"}}]}"#,
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    let body: serde_json::Value = res.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "tools_unsupported");
+    assert!(
+        body["error"]["message"].as_str().unwrap().contains("tool"),
+        "rejection names the tool problem: {}",
+        body["error"]["message"]
+    );
+    assert!(seen.lock().unwrap().hits.is_empty());
+}
+
+/// Two paid `low`-tier offerings on one model: NoToolCo is cheaper
+/// but tool-incapable; ToolCo costs more and supports tools.
+/// `with_capable` toggles whether ToolCo is actually capable.
+fn build_tools_db(path: &std::path::Path, with_capable: bool) {
+    let _ = std::fs::remove_file(path);
+    let catalog = Catalog::open(path).unwrap();
+    catalog.init().unwrap();
+    catalog
+        .insert_model(&ModelRow {
+            model_id: "m/tool".to_string(),
+            name: "m/tool".to_string(),
+            source: "test".to_string(),
+            payload: "{}".to_string(),
+            fetched_at: "t".to_string(),
+        })
+        .unwrap();
+    for (provider, price, supports) in [("NoToolCo", 1.0, false), ("ToolCo", 2.0, with_capable)] {
+        catalog
+            .insert_endpoint(&EndpointRow {
+                id: 0,
+                model_id: "m/tool".to_string(),
+                provider_name: provider.to_string(),
+                payload: "{}".to_string(),
+                fetched_at: "t".to_string(),
+                price_prompt: None,
+                price_completion: None,
+                price_cache_read: None,
+                price_cache_write: None,
+                precision_class: None,
+                quantization: None,
+                promo_discount: None,
+                processed_at: None,
+                supports_tools: None,
+                supports_decisions: None,
+                quality_tier: None,
+                quality_score: None,
+                scored_at: None,
+                score_model: None,
+                score_prompt: None,
+                price_override_tokens: None,
+            })
+            .unwrap();
+        let id = catalog
+            .endpoints_for("m/tool")
+            .unwrap()
+            .iter()
+            .find(|e| e.provider_name == provider)
+            .unwrap()
+            .id;
+        catalog
+            .update_endpoint_index(
+                id,
+                &EndpointIndex {
+                    price_prompt: Some(price),
+                    price_completion: Some(price),
+                    price_cache_read: None,
+                    price_cache_write: None,
+                    precision_class: Some("fp16".to_string()),
+                    quantization: None,
+                    promo_discount: None,
+                    processed_at: "t".to_string(),
+                    supports_tools: Some(i64::from(supports)),
+                    supports_decisions: None,
+                    price_override_tokens: None,
+                },
+            )
+            .unwrap();
+        catalog
+            .update_endpoint_score(
+                id,
+                &EndpointScore {
+                    quality_tier: Some("low".to_string()),
+                    quality_score: None,
+                    scored_at: "t".to_string(),
+                    score_model: None,
+                    score_prompt: None,
+                },
+            )
+            .unwrap();
+    }
+}
+
+/// Iter 24: `decision/free` serves the decisions-capable free
+/// offering, skipping the cheaper-or-equal incapable one.
+#[tokio::test]
+async fn decision_free_routes_to_capable_offering() {
+    let db = scratch_db("decision-route");
+    build_decision_db(&db, true, false);
+    let seen = Arc::new(Mutex::new(Upstream::default()));
+    let mock = spawn_mock(mock_app(seen.clone(), vec![], vec![])).await;
+    let gw = spawn_gateway(mock, &db).await;
+
+    let res = post_body(
+        gw,
+        "/v1/chat/completions",
+        r#"{"model":"openrouter/pair/decision/free","messages":[]}"#,
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let guard = seen.lock().unwrap();
+    assert_eq!(guard.hits.get("DecCo"), Some(&1));
+    assert_eq!(guard.hits.get("NoDec"), None);
+}
+
+/// Iter 24: `decision/free/fallback/low` serves the paid low tier
+/// when no free offering is decisions-capable.
+#[tokio::test]
+async fn decision_free_falls_back_to_low() {
+    let db = scratch_db("decision-fallback");
+    build_decision_db(&db, false, true);
+    let seen = Arc::new(Mutex::new(Upstream::default()));
+    let mock = spawn_mock(mock_app(seen.clone(), vec![], vec![])).await;
+    let gw = spawn_gateway(mock, &db).await;
+
+    let res = post_body(
+        gw,
+        "/v1/chat/completions",
+        r#"{"model":"openrouter/pair/decision/free/fallback/low","messages":[]}"#,
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let guard = seen.lock().unwrap();
+    assert_eq!(guard.hits.get("Cheap"), Some(&1));
+    assert_eq!(guard.hits.get("NoDec"), None);
+}
+
+/// Iter 24: `decision/free` with no capable offering and no fallback
+/// fails closed (503 availability, like the other tiers) without
+/// touching the upstream.
+#[tokio::test]
+async fn decision_free_starved_fails_closed() {
+    let db = scratch_db("decision-closed");
+    build_decision_db(&db, false, false);
+    let seen = Arc::new(Mutex::new(Upstream::default()));
+    let mock = spawn_mock(mock_app(seen.clone(), vec![], vec![])).await;
+    let gw = spawn_gateway(mock, &db).await;
+
+    let res = post_body(
+        gw,
+        "/v1/chat/completions",
+        r#"{"model":"openrouter/pair/decision/free","messages":[]}"#,
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body: serde_json::Value = res.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "no_eligible_offering");
+    assert!(seen.lock().unwrap().hits.is_empty());
+}
+
+/// Decision fixtures: `m/dfree` holds two zero-cost offerings —
+/// NoDec (never capable) and DecCo (capable when `with_capable`) —
+/// and `m/dpaid` optionally holds a scored paid offering for the
+/// fallback leg.
+fn build_decision_db(path: &std::path::Path, with_capable: bool, with_paid: bool) {
+    let _ = std::fs::remove_file(path);
+    let catalog = Catalog::open(path).unwrap();
+    catalog.init().unwrap();
+    let mut specs: Vec<(&str, &str, f64, bool, Option<&str>)> = vec![
+        ("m/dfree", "NoDec", 0.0, false, None),
+        ("m/dfree", "DecCo", 0.0, with_capable, None),
+    ];
+    if with_paid {
+        specs.push(("m/dpaid", "Cheap", 1.0, false, Some("low")));
+    }
+    for (model, provider, price, decisions, tier) in specs {
+        catalog
+            .insert_model(&ModelRow {
+                model_id: model.to_string(),
+                name: model.to_string(),
+                source: "test".to_string(),
+                payload: "{}".to_string(),
+                fetched_at: "t".to_string(),
+            })
+            .unwrap_or(());
+        catalog
+            .insert_endpoint(&EndpointRow {
+                id: 0,
+                model_id: model.to_string(),
+                provider_name: provider.to_string(),
+                payload: "{}".to_string(),
+                fetched_at: "t".to_string(),
+                price_prompt: None,
+                price_completion: None,
+                price_cache_read: None,
+                price_cache_write: None,
+                precision_class: None,
+                quantization: None,
+                promo_discount: None,
+                processed_at: None,
+                supports_tools: None,
+                supports_decisions: None,
+                quality_tier: None,
+                quality_score: None,
+                scored_at: None,
+                score_model: None,
+                score_prompt: None,
+                price_override_tokens: None,
+            })
+            .unwrap();
+        let id = catalog
+            .endpoints_for(model)
+            .unwrap()
+            .iter()
+            .find(|e| e.provider_name == provider)
+            .unwrap()
+            .id;
+        catalog
+            .update_endpoint_index(
+                id,
+                &EndpointIndex {
+                    price_prompt: Some(price),
+                    price_completion: Some(price),
+                    price_cache_read: None,
+                    price_cache_write: None,
+                    precision_class: Some("fp16".to_string()),
+                    quantization: None,
+                    promo_discount: None,
+                    processed_at: "t".to_string(),
+                    supports_tools: None,
+                    supports_decisions: Some(i64::from(decisions)),
+                    price_override_tokens: None,
+                },
+            )
+            .unwrap();
+        if let Some(tier) = tier {
+            catalog
+                .update_endpoint_score(
+                    id,
+                    &EndpointScore {
+                        quality_tier: Some(tier.to_string()),
+                        quality_score: None,
+                        scored_at: "t".to_string(),
+                        score_model: None,
+                        score_prompt: None,
+                    },
+                )
+                .unwrap();
+        }
+    }
+}
+
+/// Q13-C fixture: one model, two providers. `Cap` is cheaper (1.0)
+/// but bills its override tier at/above 1000 input tokens; `Flat`
+/// (2.0) has no tier. Both fp16/low.
+fn build_threshold_db(path: &std::path::Path, cap_flat_too: bool) {
+    let _ = std::fs::remove_file(path);
+    let catalog = Catalog::open(path).unwrap();
+    catalog.init().unwrap();
+    catalog
+        .insert_model(&ModelRow {
+            model_id: "m/capped".to_string(),
+            name: "m/capped".to_string(),
+            source: "test".to_string(),
+            payload: "{}".to_string(),
+            fetched_at: "t".to_string(),
+        })
+        .unwrap();
+    for (provider, price, threshold) in [
+        ("Cap", 1.0, Some(1000_i64)),
+        ("Flat", 2.0, cap_flat_too.then_some(500_i64)),
+    ] {
+        catalog
+            .insert_endpoint(&EndpointRow {
+                id: 0,
+                model_id: "m/capped".to_string(),
+                provider_name: provider.to_string(),
+                payload: "{}".to_string(),
+                fetched_at: "t".to_string(),
+                price_prompt: None,
+                price_completion: None,
+                price_cache_read: None,
+                price_cache_write: None,
+                precision_class: None,
+                quantization: None,
+                promo_discount: None,
+                processed_at: None,
+                supports_tools: None,
+                supports_decisions: None,
+                quality_tier: None,
+                quality_score: None,
+                scored_at: None,
+                score_model: None,
+                score_prompt: None,
+                price_override_tokens: None,
+            })
+            .unwrap();
+        let id = catalog
+            .endpoints_for("m/capped")
+            .unwrap()
+            .iter()
+            .find(|e| e.provider_name == provider)
+            .unwrap()
+            .id;
+        catalog
+            .update_endpoint_index(
+                id,
+                &EndpointIndex {
+                    price_prompt: Some(price),
+                    price_completion: Some(price),
+                    price_cache_read: None,
+                    price_cache_write: None,
+                    precision_class: Some("fp16".to_string()),
+                    quantization: None,
+                    promo_discount: None,
+                    processed_at: "t".to_string(),
+                    supports_tools: None,
+                    supports_decisions: None,
+                    price_override_tokens: threshold,
+                },
+            )
+            .unwrap();
+        catalog
+            .update_endpoint_score(
+                id,
+                &EndpointScore {
+                    quality_tier: Some("low".to_string()),
+                    quality_score: None,
+                    scored_at: "t".to_string(),
+                    score_model: None,
+                    score_prompt: None,
+                },
+            )
+            .unwrap();
+    }
+}
+
+async fn post_chat_body(gw: SocketAddr, model: &str, content: &str) -> reqwest::Response {
+    client()
+        .post(format!("http://{gw}/v1/chat/completions"))
+        .header("authorization", API_KEY)
+        .header("content-type", "application/json")
+        .body(
+            serde_json::json!({"model": model, "messages": [{"role": "user", "content": content}]})
+                .to_string(),
+        )
+        .send()
+        .await
+        .unwrap()
+}
+
+/// Extended menu: virtual ids small-first, then popular OpenRouter
+/// pins in stored order, then operator-nominated provider ids — but
+/// only for configured providers (baseten is listed, not configured,
+/// so it stays out).
+#[tokio::test]
+async fn menu_lists_virtual_popular_and_configured_providers() {
+    let db = scratch_db("menu-extended");
+    build_db(&db);
+    let catalog = Catalog::open(&db).unwrap();
+    catalog
+        .set_meta(
+            "popular_models",
+            r#"[{"slug":"x/y","tokens":9},{"slug":"a/b","tokens":7}]"#,
+        )
+        .unwrap();
+    drop(catalog);
+    let mock = spawn_mock(mock_app(
+        Arc::new(Mutex::new(Upstream::default())),
+        vec![],
+        vec![],
+    ))
+    .await;
+    let router = Arc::new(pennyrouter_gateway::routing::Router::load(&db).expect("router loads"));
+    let state = pennyrouter_gateway::AppState::new(format!("http://{mock}"))
+        .with_router(router)
+        .with_upstream("modal", "http://127.0.0.1:9")
+        .with_modal_models(vec!["m-one".to_string(), "m-two".to_string()])
+        .with_baseten_models(vec!["b-one".to_string()]);
+    let gw = spawn_with_state(state).await;
+
+    let res = client()
+        .get(format!("http://{gw}/v1/models"))
+        .header("authorization", API_KEY)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body: serde_json::Value = res.json().await.unwrap();
+    let ids: Vec<&str> = body["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["id"].as_str().unwrap())
+        .collect();
+    let expected: Vec<&str> = vec![
+        "openrouter/pair/free",
+        "openrouter/pair/privacy/free",
+        "openrouter/pair/low",
+        "openrouter/pair/privacy/low",
+        "openrouter/pair/think",
+        "openrouter/pair/privacy/think",
+        "openrouter/pair/decision",
+        "openrouter/pair/privacy/decision",
+        "openrouter/pair/decision/free",
+        "openrouter/pair/privacy/decision/free",
+        "openrouter/pair/batch",
+        "openrouter/pair/privacy/batch",
+        "openrouter/pair/smart",
+        "openrouter/pair/privacy/smart",
+        "openrouter/pair/smart/max",
+        "openrouter/pair/privacy/smart/max",
+        "openrouter/x/y",
+        "openrouter/a/b",
+        "modal/m-one",
+        "modal/m-two",
+    ];
+    assert_eq!(ids, expected);
+}
+
+fn serving_provider(res: &reqwest::Response) -> String {
+    res.headers()
+        .get("x-pennyrouter-provider")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string()
+}
+
+fn provider_hits(seen: &Arc<Mutex<Upstream>>, provider: &str) -> u64 {
+    seen.lock()
+        .unwrap()
+        .hits
+        .get(provider)
+        .copied()
+        .unwrap_or(0)
+}
+
+/// Q13-C: a small request serves the cheapest pick; a long one skips
+/// the capped offering instead of silently billing its override tier.
+#[tokio::test]
+async fn over_threshold_request_skips_capped_offering() {
+    let db = scratch_db("threshold-skip");
+    build_threshold_db(&db, false);
+    let seen = Arc::new(Mutex::new(Upstream::default()));
+    let mock = spawn_mock(mock_app(seen.clone(), vec![], vec![])).await;
+    let gw = spawn_gateway(mock, &db).await;
+
+    let small = post_chat_body(gw, "openrouter/pair/low", "hi").await;
+    assert_eq!(small.status(), StatusCode::OK);
+    assert_eq!(serving_provider(&small), "Cap");
+    assert_eq!(provider_hits(&seen, "Cap"), 1);
+
+    // 8000 chars ≈ 2000 tokens ≥ Cap's 1000-token tier: Cap is
+    // skipped (the sticky pin from the small request cannot serve
+    // either, so the session re-pins fresh), Flat serves at its
+    // advertised price.
+    let big_text = "x".repeat(8000);
+    let big = post_chat_body(gw, "openrouter/pair/low", &big_text).await;
+    assert_eq!(big.status(), StatusCode::OK);
+    assert_eq!(serving_provider(&big), "Flat");
+    assert_eq!(provider_hits(&seen, "Flat"), 1);
+    assert_eq!(provider_hits(&seen, "Cap"), 1);
+}
+
+/// Q13-C: when every eligible offering would bill its override tier,
+/// the request fails closed instead of billing ~2× silently.
+#[tokio::test]
+async fn all_capped_request_fails_closed() {
+    let db = scratch_db("threshold-closed");
+    build_threshold_db(&db, true);
+    let seen = Arc::new(Mutex::new(Upstream::default()));
+    let mock = spawn_mock(mock_app(seen.clone(), vec![], vec![])).await;
+    let gw = spawn_gateway(mock, &db).await;
+
+    let big_text = "x".repeat(8000);
+    let res = post_chat_body(gw, "openrouter/pair/low", &big_text).await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    let body: serde_json::Value = res.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "context_exceeded");
+    assert!(seen.lock().unwrap().hits.is_empty());
 }
