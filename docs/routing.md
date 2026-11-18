@@ -94,7 +94,10 @@ session.
 - Session = (`Authorization`, model). The first decision pins the
   provider and class; later requests keep the provider, with
   orientation tags refining only which of its offerings serves.
-  Anonymous requests route fresh every time. A vanished pin re-routes.
+  Retry legs never pin: a transient failure fails over for that
+  request only, and the session keeps the first decision's affinity
+  (throttle memory steers around the outage instead). Anonymous
+  requests route fresh every time. A vanished pin re-routes.
 - Enforcement: `model` is stripped to the backend id and the request
   gains `provider: {"order": [<chosen>], "allow_fallbacks": false}` —
   never silently pay another provider. Every other caller `provider`

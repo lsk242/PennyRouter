@@ -149,6 +149,17 @@ struct Upstream {
     models: HashMap<String, String>,
 }
 
+/// 429 reset stamp: 60s in the future, so throttle memory engages.
+/// A fixed stamp silently expires and disables throttling outright.
+fn reset_ms() -> String {
+    (std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+        + 60_000)
+        .to_string()
+}
+
 fn mock_app(
     seen: Arc<Mutex<Upstream>>,
     throttle: Vec<&'static str>,
@@ -179,7 +190,7 @@ fn mock_app(
                 headers.insert("content-type", "application/json".parse().unwrap());
                 headers.insert("x-ratelimit-limit", "50".parse().unwrap());
                 headers.insert("x-ratelimit-remaining", "0".parse().unwrap());
-                headers.insert("x-ratelimit-reset", "1793491200000".parse().unwrap());
+                headers.insert("x-ratelimit-reset", reset_ms().parse().unwrap());
                 return (
                     StatusCode::TOO_MANY_REQUESTS,
                     headers,
@@ -342,6 +353,42 @@ async fn virtual_retry_lands_on_another_provider() {
     assert_eq!(guard.hits.get("Dear"), Some(&1));
     let total: u64 = guard.hits.values().sum();
     assert_eq!(total, 2, "exactly one retry, hits: {:?}", guard.hits);
+}
+
+/// A transient failure must not rewrite affinity: the retry leg
+/// serves the failover pick but leaves the session pin with the
+/// first decision, so the next request on the same key tries the
+/// cheapest pick again instead of sticking to the failover.
+#[tokio::test]
+async fn retry_does_not_steal_the_session_pin() {
+    let db = scratch_db("retry-pin");
+    build_db(&db);
+    let seen = Arc::new(Mutex::new(Upstream::default()));
+    // Cheap is cheapest but flaky once: request 1 retries onto Dear.
+    let mock = spawn_mock(mock_app(seen.clone(), vec![], vec!["Cheap"])).await;
+    let gw = spawn_gateway(mock, &db).await;
+
+    let first = post_chat(gw, "openrouter/pair/low").await;
+    assert_eq!(first.status(), StatusCode::OK);
+    assert_eq!(
+        first.headers().get("x-pennyrouter-provider").unwrap(),
+        "Dear",
+        "first request fails over to the retry pick"
+    );
+
+    // Same key: the pin still belongs to Cheap, so the second
+    // request goes back to the cheapest pick (now healthy).
+    let second = post_chat(gw, "openrouter/pair/low").await;
+    assert_eq!(second.status(), StatusCode::OK);
+    assert_eq!(
+        second.headers().get("x-pennyrouter-provider").unwrap(),
+        "Cheap",
+        "retry must not overwrite the session pin"
+    );
+
+    let guard = seen.lock().unwrap();
+    assert_eq!(guard.hits.get("Cheap"), Some(&2));
+    assert_eq!(guard.hits.get("Dear"), Some(&1));
 }
 
 #[tokio::test]
@@ -918,9 +965,14 @@ async fn upstream_ratelimit_headers_reach_client_on_429() {
     assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(res.headers().get("x-ratelimit-remaining").unwrap(), "0");
     assert_eq!(res.headers().get("x-ratelimit-limit").unwrap(), "50");
-    assert_eq!(
-        res.headers().get("x-ratelimit-reset").unwrap(),
-        "1793491200000"
+    let reset: u64 = res.headers().get("x-ratelimit-reset").unwrap().to_str().unwrap().parse().unwrap();
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    assert!(
+        reset > now_ms && reset <= now_ms + 120_000,
+        "reset reaches the client with live future time, got {reset}"
     );
 }
 

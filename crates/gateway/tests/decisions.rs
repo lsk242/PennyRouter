@@ -40,7 +40,14 @@ fn mock_app(seen: Arc<Mutex<Seen>>, throttle: Vec<&'static str>) -> Router {
                 headers.insert("content-type", "application/json".parse().unwrap());
                 headers.insert("x-ratelimit-limit", "50".parse().unwrap());
                 headers.insert("x-ratelimit-remaining", "0".parse().unwrap());
-                headers.insert("x-ratelimit-reset", "1793491200000".parse().unwrap());
+                // 60s in the future, so throttle memory engages — a
+                // fixed stamp silently expires and disables throttling.
+                let reset_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis() as u64
+                    + 60_000;
+                headers.insert("x-ratelimit-reset", reset_ms.to_string().parse().unwrap());
                 return (
                     StatusCode::TOO_MANY_REQUESTS,
                     headers,

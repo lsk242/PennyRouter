@@ -2537,7 +2537,7 @@ impl Router {
         headers: &axum::http::HeaderMap,
         body: &[u8],
     ) -> Option<(Vec<u8>, Decision)> {
-        self.route_inner(headers, body, None, Self::finish_route)
+        self.route_inner(headers, body, None, Self::finish_route, true)
             .ok()
             .flatten()
     }
@@ -2550,13 +2550,14 @@ impl Router {
         headers: &axum::http::HeaderMap,
         body: &[u8],
     ) -> Result<Option<(Vec<u8>, Decision)>, RouteRejection> {
-        self.route_inner(headers, body, None, Self::finish_route)
+        self.route_inner(headers, body, None, Self::finish_route, true)
     }
 
     /// Re-route after a failed attempt (Iter 13): same body, but the
     /// failed provider joins `ignore` so the retry lands elsewhere.
     /// Returns `None` when nothing else can serve (the first attempt's
-    /// response stands).
+    /// response stands). Never pins: the session keeps the first
+    /// decision's affinity, and the retry pick must not overwrite it.
     pub fn route_request_retry(
         &self,
         headers: &axum::http::HeaderMap,
@@ -2565,7 +2566,7 @@ impl Router {
     ) -> Option<(Vec<u8>, Decision)> {
         let mut extra = ProviderConstraints::default();
         extra.ignore.push(failed_provider.to_string());
-        self.route_inner(headers, body, Some(&extra), Self::finish_route)
+        self.route_inner(headers, body, Some(&extra), Self::finish_route, false)
             .ok()
             .flatten()
     }
@@ -2578,11 +2579,11 @@ impl Router {
         headers: &axum::http::HeaderMap,
         body: &[u8],
     ) -> Result<Option<(Vec<u8>, Decision)>, RouteRejection> {
-        self.route_inner(headers, body, None, Self::finish_decision_route)
+        self.route_inner(headers, body, None, Self::finish_decision_route, true)
     }
 
     /// Decisions retry (Iter 27): same provider-exclusion as chat,
-    /// model-only rewrite.
+    /// model-only rewrite. Never pins, like the chat retry.
     pub fn route_decision_retry(
         &self,
         headers: &axum::http::HeaderMap,
@@ -2591,9 +2592,15 @@ impl Router {
     ) -> Option<(Vec<u8>, Decision)> {
         let mut extra = ProviderConstraints::default();
         extra.ignore.push(failed_provider.to_string());
-        self.route_inner(headers, body, Some(&extra), Self::finish_decision_route)
-            .ok()
-            .flatten()
+        self.route_inner(
+            headers,
+            body,
+            Some(&extra),
+            Self::finish_decision_route,
+            false,
+        )
+        .ok()
+        .flatten()
     }
 
     fn route_inner(
@@ -2602,6 +2609,7 @@ impl Router {
         body: &[u8],
         extra: Option<&ProviderConstraints>,
         finish: BodyFinish,
+        allow_pin: bool,
     ) -> Result<Option<(Vec<u8>, Decision)>, RouteRejection> {
         let json: serde_json::Value = serde_json::from_slice(body).map_err(|_| RouteRejection {
             code: "invalid_body",
@@ -2618,6 +2626,13 @@ impl Router {
         let auth = headers
             .get(axum::http::header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok());
+        // Retry legs never consult or store session pins: the pin
+        // belongs to the first decision, and a transient failure must
+        // not rewrite affinity to the failover pick. Throttle memory
+        // (not pins) steers around the outage. Dropping auth changes
+        // only storage, never the pick — the pinned provider is always
+        // the ignored failed one, so the lookup would miss anyway.
+        let auth = if allow_pin { auth } else { None };
         let mut constraints = ProviderConstraints::from_body(&json);
         if let Some(extra) = extra {
             constraints.ignore.extend(extra.ignore.iter().cloned());
