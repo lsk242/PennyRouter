@@ -1348,18 +1348,61 @@ async fn ui_page(State(state): State<AppState>) -> Response {
             if summary.sessions.is_empty() {
                 page.push_str("<p>No active sessions (pins expire 30 min after creation).</p>");
             } else {
-                page.push_str("<table><thead><tr><th>Key suffix</th><th>Model</th><th>Provider</th><th>Precision</th><th>Pinned at (UTC)</th></tr></thead><tbody>");
+                page.push_str(
+                    "<p>One row per live pin: the requested session id, the exact backend model \
+                    serving it with its current catalog params, and the rule that selected it. \
+                    A <em>stale</em> backend id means the pinned offering left the catalog \
+                    (reload changed the set) — the next request re-routes.</p>",
+                );
+                page.push_str(
+                    "<div class=\"table-scroll\"><table><thead><tr><th>Key suffix</th><th>Model</th>\
+                    <th>Backend model</th><th>Provider</th><th>Tag</th><th>Precision</th><th>Quant</th>\
+                    <th>Prompt $/M</th><th>Completion $/M</th><th>Effective $/M</th><th>Tier</th>\
+                    <th>Score</th><th>Tools</th><th>Decisions</th><th>Pinned at (UTC)</th>\
+                    <th>Why selected</th></tr></thead><tbody>",
+                );
                 for session in &summary.sessions {
+                    let tools = match session.supports_tools {
+                        Some(true) => "yes",
+                        Some(false) => "no",
+                        None => "-",
+                    };
+                    let decisions = match session.supports_decisions {
+                        Some(true) => "yes",
+                        Some(false) => "no",
+                        None => "-",
+                    };
+                    let backend = if session.live {
+                        esc(&session.backend_model)
+                    } else {
+                        format!("{} <em>(stale)</em>", esc(&session.backend_model))
+                    };
                     page.push_str(&format!(
-                        "<tr><td><code>{}</code></td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+                        "<tr><td><code>{}</code></td><td>{}</td><td>{}</td><td>{}</td><td>{}</td>\
+                        <td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td>\
+                        <td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
                         esc(&session.key_suffix),
                         esc(&session.model),
+                        backend,
                         esc(&session.provider),
-                        esc(session.precision_class.as_deref().unwrap_or("-")),
-                        esc(&session.pinned_at)
+                        text(&session.tag),
+                        class(&session.precision_class),
+                        text(&session.quantization),
+                        money(session.price_prompt),
+                        money(session.price_completion),
+                        money(session.effective_cost),
+                        text(&session.quality_tier),
+                        session
+                            .quality_score
+                            .map(|s| format!("{s:.3}"))
+                            .unwrap_or_else(|| "-".to_string()),
+                        tools,
+                        decisions,
+                        esc(&session.pinned_at),
+                        esc(&session.reason),
                     ));
                 }
-                page.push_str("</tbody></table>");
+                page.push_str("</tbody></table></div>");
             }
         } else {
             page.push_str("<p>Routing: off (no catalog).</p>");

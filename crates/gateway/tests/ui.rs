@@ -1054,3 +1054,105 @@ async fn ui_sessions_tab_lists_active_pins() {
         "raw key never rendered, got: {body}"
     );
 }
+
+/// Sessions tab (Iter 39): each pin shows the exact backend model with
+/// its live offering params plus the rule that selected it — not just
+/// the provider. The virtual leg proves the backend id is pinned (it
+/// differs from the session namespace); the direct leg proves the
+/// default rule is explained.
+#[tokio::test]
+async fn ui_sessions_tab_shows_backend_model_params_and_reason() {
+    let _guard = lock_env().await;
+    std::env::set_var("GATEWAY_UI", "1");
+    let (mock, _) = spawn_mock().await;
+    let db = preview_db("sessions-reason", 1.0);
+    let router = Arc::new(pennyrouter_gateway::routing::Router::load(&db).expect("router loads"));
+    let state = pennyrouter_gateway::AppState::new(format!("http://{mock}")).with_router(router);
+    let app = pennyrouter_gateway::app_with_state(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let gw = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    std::env::remove_var("GATEWAY_UI");
+
+    // Virtual tier: cheapest paid wins (Cheap on m/code).
+    let res = client()
+        .post(format!("http://{gw}/v1/chat/completions"))
+        .header("authorization", "Bearer test-key-1234")
+        .header("content-type", "application/json")
+        .body(r#"{"model":"openrouter/pair/low","messages":[{"role":"user","content":"hi"}],"stream":false}"#)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), axum::http::StatusCode::OK);
+    // Direct model: same-model default rule.
+    let res = client()
+        .post(format!("http://{gw}/v1/chat/completions"))
+        .header("authorization", "Bearer other-key-5678")
+        .header("content-type", "application/json")
+        .body(r#"{"model":"m/code","messages":[{"role":"user","content":"hi"}],"stream":false}"#)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), axum::http::StatusCode::OK);
+
+    let body = client()
+        .get(format!("http://{gw}/ui"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    // New columns exist.
+    assert!(
+        body.contains("<th>Backend model</th>"),
+        "backend model column, got: {body}"
+    );
+    assert!(
+        body.contains("<th>Why selected</th>"),
+        "reason column, got: {body}"
+    );
+    // Virtual row: namespace differs from the pinned backend model.
+    assert!(
+        body.contains("openrouter/pair/low"),
+        "session namespace shown, got: {body}"
+    );
+    assert!(
+        body.contains("<code>1234</code>"),
+        "virtual key suffix shown, got: {body}"
+    );
+    assert!(
+        body.contains("tier &#x27;low&#x27;")
+            || body.contains("tier 'low'")
+            || body.contains("tier &quot;low&quot;")
+            || body.contains("tier low"),
+        "virtual rule names the low tier, got: {body}"
+    );
+    assert!(
+        body.contains("cheapest effective cost"),
+        "virtual rule names the price calculation, got: {body}"
+    );
+    // Direct row: the default rule is explained.
+    assert!(
+        body.contains("<code>5678</code>"),
+        "direct key suffix shown, got: {body}"
+    );
+    assert!(
+        body.contains("majority precision class"),
+        "direct rule names the class vote, got: {body}"
+    );
+    assert!(
+        body.contains("best quality tier, then cheapest"),
+        "direct rule names the ordering, got: {body}"
+    );
+    // Live offering params ride the row (Cheap: fp16, high 0.9,
+    // 1.0 $/tok prompt, tool-capable).
+    assert!(
+        body.contains("1000000.00"),
+        "prompt price per M shown, got: {body}"
+    );
+    assert!(
+        !body.contains("test-key-1234") && !body.contains("other-key-5678"),
+        "raw keys never rendered, got: {body}"
+    );
+}

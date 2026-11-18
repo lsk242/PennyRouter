@@ -295,3 +295,12 @@ cheap judge model, classifier-based routing.
       doubling); own `batch_submit` / `batch_status` metrics slots.
       Test: `tests/batch_api.rs` (submit/poll byte-equality, query
       kept, suffixed-base no-doubling, labels in `/metrics`).
+- [x] **Iter 39 — Sessions tab shows exact model + why.** Each
+      pin row names the backend model id serving the session (which
+      differs from the namespace on virtual tiers) with its live
+      catalog params (tag, quant, prompt/completion/effective
+      $/M, tier/score, tools/decisions) plus the recorded
+      selection rule (eligibility gates + ordering calculation).
+      Stale pins (offering left the catalog) are marked. Test:
+      `tests/ui.rs` virtual + direct rows assert backend id,
+      params, and rule text; raw keys never rendered.

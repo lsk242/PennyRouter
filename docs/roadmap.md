@@ -839,3 +839,32 @@ only when pulled forward deliberately.
   byte-equality, poll + byte-equality, query preserved, no `/api`
   doubling with a suffixed base, both labels in `/metrics`); full
   workspace green, clippy/fmt clean.
+
+## After Iter 38
+## Iter 39 — Sessions tab shows exact model + why (done)
+
+- Goal: answer "which exact model serves this session, and why was
+  it picked?" in the debug UI. Before, a pin row showed only the
+  session namespace + provider — on virtual tiers the backend model
+  id was invisible, and no row explained the selection.
+- Value: operators see per pin the backend model id with its live
+  catalog params (tag, quant, prompt/completion/effective $/M,
+  tier/score, tools/decisions support) plus the recorded rule:
+  eligibility gates and ordering calculation that won (majority
+  class vote, quality floor, cheapest-effective-cost blend,
+  tie-breaks, throttle skip, minindex floor where set).
+- Shipped: `Pin` stores backend model, tag, quantization, and a
+  human-readable reason built at each of the seven fresh-pick sites
+  (direct, pinned, low/think, lowest, decision, batch, free);
+  `UiSession` joins the pin with the current snapshot for live
+  params (exact-tag match, provider+class fallback, `live=false`
+  when the offering vanished) and the `/ui` sessions table renders
+  all of it, stale pins marked. Rows sort by
+  (namespace, key suffix, provider) for stable reading.
+- Test: new `tests/ui.rs`
+  `ui_sessions_tab_shows_backend_model_params_and_reason` routes a
+  virtual `low` id and a direct model, then asserts the backend id,
+  live params, and rule text on both rows (raw keys never
+  rendered); full workspace green. Note: this environment ships no
+  rustfmt/clippy binaries, so the fmt/clippy gates were not run —
+  new code follows the surrounding style manually.

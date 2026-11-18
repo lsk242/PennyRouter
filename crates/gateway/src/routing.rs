@@ -130,6 +130,40 @@ struct Pin {
     precision_class: Option<String>,
     /// Last 4 digits of the API key (for debug UI identification).
     key_suffix: String,
+    /// Backend model id the pin's first decision chose (Iter 39): for
+    /// virtual tiers this differs from the session namespace, so the
+    /// debug UI can show the exact model serving the session.
+    backend_model: String,
+    /// Tag + raw quantization of the chosen offering, for display.
+    tag: Option<String>,
+    quantization: Option<String>,
+    /// Human-readable selection rule (Iter 39): which eligibility
+    /// gates and ordering calculation picked this offering.
+    reason: String,
+}
+
+impl Pin {
+    /// Pin a fresh pick: identity from the offering, suffix from the
+    /// credential (the raw key never lands in the table), rule text
+    /// from the caller that ran the selection.
+    fn from_pick(authorization: Option<&str>, pick: &Offering, reason: String) -> Self {
+        Self {
+            provider: pick.provider_name.clone(),
+            precision_class: pick.precision_class.clone(),
+            key_suffix: Router::extract_key_suffix(authorization.unwrap_or("")),
+            backend_model: pick.model_id.clone(),
+            tag: pick.tag.clone(),
+            quantization: pick.quantization.clone(),
+            reason,
+        }
+    }
+}
+
+/// `minindex` tail for pin reasons (Iter 39): empty without a floor.
+fn minindex_note(minindex: Option<u8>) -> String {
+    minindex.map_or_else(String::new, |floor| {
+        format!(" minindex/{floor} floor applied first (models below it, or unindexed, never win).")
+    })
 }
 
 /// Router load/resolution failure. Callers treat this as "no routing".
@@ -1317,15 +1351,33 @@ impl Router {
         .into_iter()
         .next()?;
         if let Some(key) = key {
-            let key_suffix = Self::extract_key_suffix(authorization.unwrap_or(""));
-            self.store_pin(
-                key,
-                Pin {
-                    provider: pick.provider_name.clone(),
-                    precision_class: pick.precision_class.clone(),
-                    key_suffix,
-                },
+            let order = match orientation {
+                Orientation::Default => "best quality tier, then cheapest effective cost",
+                Orientation::Price => {
+                    "price orientation (first tag wins): cheapest effective cost first"
+                }
+                Orientation::Quality => {
+                    "quality orientation (first tag wins): best tier, then score"
+                }
+                Orientation::Lowest => "lowest orientation: cheapest paid first",
+            };
+            let source = if ranking
+                .as_ref()
+                .and_then(|r| r.models.get(&model_id))
+                .is_some_and(|classes| classes.iter().any(|c| &c.class == &class))
+            {
+                "published ranking order"
+            } else {
+                "inline sort (no ranking cover for this model/class)"
+            };
+            let reason = format!(
+                "direct model '{model_id}': majority precision class '{}'; \
+                 eligible = provider allow + budget + tools + context; order = {order} \
+                 (effective cost = balanced prompt/completion/cache blend, promo applied; \
+                 unpriceable last); {source}; later requests keep this provider (sticky).",
+                class.as_deref().unwrap_or("any"),
             );
+            self.store_pin(key, Pin::from_pick(authorization, pick, reason));
         }
         Some(Decision {
             model_id,
@@ -1798,6 +1850,7 @@ impl Router {
                 }
             }
         }
+        let ranked_used = ranked.is_some();
         let pick = if let Some(entries) = ranked {
             let mut order: Vec<&Offering> = Vec::with_capacity(candidates.len());
             let mut rest: Vec<&Offering> = candidates.clone();
@@ -1825,15 +1878,19 @@ impl Router {
             message: format!("no offering is currently eligible for {model_id:?}"),
         })?;
         if let Some(key) = key {
-            let key_suffix = Self::extract_key_suffix(authorization.unwrap_or(""));
-            self.store_pin(
-                key,
-                Pin {
-                    provider: pick.provider_name.clone(),
-                    precision_class: pick.precision_class.clone(),
-                    key_suffix,
-                },
+            let source = if ranked_used {
+                "published ranking order"
+            } else {
+                "inline cheapest effective cost (balanced prompt/completion/cache blend, promo applied)"
+            };
+            let reason = format!(
+                "pinned model '{model_id}': cheapest eligible provider (majority precision class '{}'); \
+                 eligible = provider allow + tools + context + budget; order = {source}; \
+                 throttle-skipped;{} later requests keep this provider (sticky).",
+                class.as_deref().unwrap_or("any"),
+                minindex_note(minindex),
             );
+            self.store_pin(key, Pin::from_pick(authorization, pick, reason));
         }
         Ok(Decision {
             model_id: pick.model_id.clone(),
@@ -2015,15 +2072,24 @@ impl Router {
             message: format!("no offering is eligible for the {tier_name} tier"),
         })?;
         if let Some(key) = key {
-            let key_suffix = Self::extract_key_suffix(authorization.unwrap_or(""));
-            self.store_pin(
-                key,
-                Pin {
-                    provider: pick.provider_name.clone(),
-                    precision_class: pick.precision_class.clone(),
-                    key_suffix,
-                },
+            let (rule, floor) = if tier == VirtualTier::Low {
+                (
+                    "cheapest effective cost (balanced prompt/completion/cache blend, promo applied); tie-break cost, model id, provider",
+                    "any scored tier",
+                )
+            } else {
+                (
+                    "best quality signals (tier, then score, then cost)",
+                    "high",
+                )
+            };
+            let reason = format!(
+                "tier '{tier_name}': {rule}; quality floor = {floor}; \
+                 eligible = paid priceable + known precision class + provider allow + tools + context + budget; \
+                 throttle-skipped;{} later requests keep this provider (sticky).",
+                minindex_note(minindex),
             );
+            self.store_pin(key, Pin::from_pick(authorization, pick, reason));
         }
         Ok(Decision {
             model_id: pick.model_id.clone(),
@@ -2130,15 +2196,13 @@ impl Router {
                 message: "no paid offering is currently eligible".to_string(),
             })?;
         if let Some(key) = key {
-            let key_suffix = Self::extract_key_suffix(authorization.unwrap_or(""));
-            self.store_pin(
-                key,
-                Pin {
-                    provider: pick.provider_name.clone(),
-                    precision_class: pick.precision_class.clone(),
-                    key_suffix,
-                },
-            );
+            let reason = "cross-model 'lowest' tag: cheapest paid priceable offering with a known \
+                 precision class, no quality floor; eligible = paid + known class + provider allow + \
+                 tools + context + budget; effective cost = balanced prompt/completion/cache blend, \
+                 promo applied; tie-break cost, model id, provider; exactly-once; \
+                 later requests keep this provider (sticky)."
+                .to_string();
+            self.store_pin(key, Pin::from_pick(authorization, pick, reason));
         }
         Ok(Decision {
             model_id: pick.model_id.clone(),
@@ -2265,15 +2329,21 @@ impl Router {
                 message: format!("no decisions-capable {scope}offering is currently eligible"),
             })?;
         if let Some(key) = key {
-            let key_suffix = Self::extract_key_suffix(authorization.unwrap_or(""));
-            self.store_pin(
-                key,
-                Pin {
-                    provider: pick.provider_name.clone(),
-                    precision_class: pick.precision_class.clone(),
-                    key_suffix,
-                },
+            let cost_scope = if free_only {
+                "zero-cost scope (catalog zeros or unexpired promo)"
+            } else {
+                "paid scope"
+            };
+            let reason = format!(
+                "tier 'decision': cheapest decisions-capable offering ({cost_scope}); no quality floor, \
+                 no precision-class requirement (capability match replaces it); \
+                 eligible = decisions-capable + provider allow + tools + context + budget; \
+                 effective cost = balanced prompt/completion/cache blend, promo applied; \
+                 tie-break cost, model id, provider; throttle-skipped;{} \
+                 later requests keep this provider (sticky).",
+                minindex_note(minindex),
             );
+            self.store_pin(key, Pin::from_pick(authorization, pick, reason));
         }
         Ok(Decision {
             model_id: pick.model_id.clone(),
@@ -2392,15 +2462,16 @@ impl Router {
                 message: "no batch offering is currently eligible".to_string(),
             })?;
         if let Some(key) = key {
-            let key_suffix = Self::extract_key_suffix(authorization.unwrap_or(""));
-            self.store_pin(
-                key,
-                Pin {
-                    provider: pick.provider_name.clone(),
-                    precision_class: pick.precision_class.clone(),
-                    key_suffix,
-                },
+            let reason = format!(
+                "tier 'batch': cheapest ':batch'-variant paid offering (async batch API pricing); \
+                 no quality floor, no precision-class requirement (the suffix is the capability match); \
+                 eligible = ':batch' model id + paid priceable + provider allow + tools + context + budget; \
+                 effective cost = balanced prompt/completion/cache blend, promo applied; \
+                 tie-break cost, model id, provider; throttle-skipped;{} \
+                 later requests keep this provider (sticky).",
+                minindex_note(minindex),
             );
+            self.store_pin(key, Pin::from_pick(authorization, pick, reason));
         }
         Ok(Decision {
             model_id: pick.model_id.clone(),
@@ -2548,15 +2619,26 @@ impl Router {
         // Candidates were pre-filtered to free offerings, so the pick is
         // free by construction.
         if let Some(key) = key {
-            let key_suffix = Self::extract_key_suffix(authorization.unwrap_or(""));
-            self.store_pin(
-                key,
-                Pin {
-                    provider: pick.provider_name.clone(),
-                    precision_class: pick.precision_class.clone(),
-                    key_suffix,
-                },
+            let order = match orientation {
+                Orientation::Price | Orientation::Lowest => "cheapest effective cost first",
+                Orientation::Quality => "best tier, then score",
+                Orientation::Default => "best quality tier, then cheapest effective cost",
+            };
+            let leg = if session_ns == FREE_MODEL {
+                "legacy 'openrouter/free' meta-model"
+            } else {
+                "tier 'free'"
+            };
+            let reason = format!(
+                "{leg}: zero-cost offering (catalog zeros or unexpired promo window); \
+                 majority precision class '{}'; eligible = provider allow + free-eligible + tools; \
+                 order = {order} (effective cost = balanced prompt/completion/cache blend, promo applied); \
+                 throttle-skipped;{} pin re-routes if it stops being free, else later requests keep \
+                 this provider (sticky).",
+                class.as_deref().unwrap_or("any"),
+                minindex_note(minindex),
             );
+            self.store_pin(key, Pin::from_pick(authorization, pick, reason));
         }
         Ok(Some(free_decision(pick, orientation, false, minindex)))
     }
@@ -2789,8 +2871,12 @@ pub struct UiOffering {
     pub quality_score: Option<f64>,
 }
 
-/// Session pin info for debug UI (Iter 37): shows last 4 digits of
-/// API key, pinned provider, model, and timestamp.
+/// Session pin info for debug UI (Iter 37; Iter 39 adds the exact
+/// backend offering with its live params plus the selection rule):
+/// last 4 digits of the API key, session namespace, pinned provider,
+/// precision class, and timestamp — plus the backend model id the
+/// first decision chose (which differs from the namespace on virtual
+/// tiers), the offering's current catalog params, and why it won.
 #[derive(Debug, Clone)]
 pub struct UiSession {
     pub key_suffix: String,
@@ -2798,6 +2884,26 @@ pub struct UiSession {
     pub provider: String,
     pub precision_class: Option<String>,
     pub pinned_at: String, // RFC3339 timestamp
+    /// Backend model id serving this session (Iter 39).
+    pub backend_model: String,
+    pub tag: Option<String>,
+    pub quantization: Option<String>,
+    /// Live params from the current snapshot (Iter 39): `None` when
+    /// the pinned offering vanished (catalog reload changed the set).
+    pub price_prompt: Option<f64>,
+    pub price_completion: Option<f64>,
+    pub price_cache_read: Option<f64>,
+    pub price_cache_write: Option<f64>,
+    pub effective_cost: Option<f64>,
+    pub promo_discount: Option<f64>,
+    pub quality_tier: Option<String>,
+    pub quality_score: Option<f64>,
+    pub supports_tools: Option<bool>,
+    pub supports_decisions: Option<bool>,
+    /// False when the pinned offering is gone from the snapshot.
+    pub live: bool,
+    /// Selection rule recorded when the pin was stored (Iter 39).
+    pub reason: String,
 }
 
 /// Default-orientation provider order for one (model, class).
@@ -2816,7 +2922,8 @@ pub struct UiSummary {
     pub models: Vec<(String, Option<i64>, Vec<UiOffering>)>,
     pub ranking: Vec<(String, Vec<UiClassRanking>)>,
     pub free_offers: Vec<(String, String, Option<String>, Option<u64>)>,
-    /// Active session pins (Iter 37): key suffix, model, provider, precision, timestamp.
+    /// Active session pins (Iter 37; Iter 39 adds backend model,
+    /// live offering params, and the selection rule per pin).
     pub sessions: Vec<UiSession>,
 }
 
@@ -2883,17 +2990,41 @@ impl Router {
                 }
             }
         }
-        // Collect active session pins for debug UI (Iter 37).
+        // Collect active session pins for debug UI (Iter 37; live
+        // params + rule in Iter 39).
         let sessions = {
+            let snapshot = self.snapshot.read().unwrap_or_else(|e| e.into_inner());
             let sessions_guard = self.sessions.read().unwrap_or_else(|e| e.into_inner());
             let now = Instant::now();
-            sessions_guard
+            let mut sessions: Vec<UiSession> = sessions_guard
                 .iter()
                 .filter(|(_, (_, stored))| stored.elapsed() < SESSION_TTL)
                 .map(|((_, model), (pin, stored))| {
                     let age = now.duration_since(*stored);
                     let pinned_at = time::OffsetDateTime::now_utc()
                         - time::Duration::seconds(age.as_secs() as i64);
+                    // Live params for the pinned offering: exact tag
+                    // match first, then any offering of the pinned
+                    // provider+class (the pick's tag may be gone after
+                    // a reload); nothing when the offering vanished.
+                    let live_offering = snapshot
+                        .models
+                        .get(&pin.backend_model)
+                        .and_then(|offerings| {
+                            offerings
+                                .iter()
+                                .find(|o| {
+                                    o.provider_name == pin.provider
+                                        && o.precision_class == pin.precision_class
+                                        && o.tag == pin.tag
+                                })
+                                .or_else(|| {
+                                    offerings.iter().find(|o| {
+                                        o.provider_name == pin.provider
+                                            && o.precision_class == pin.precision_class
+                                    })
+                                })
+                        });
                     UiSession {
                         key_suffix: pin.key_suffix.clone(),
                         model: model.clone(),
@@ -2902,9 +3033,29 @@ impl Router {
                         pinned_at: pinned_at
                             .format(&time::format_description::well_known::Rfc3339)
                             .unwrap_or_else(|_| "unknown".to_string()),
+                        backend_model: pin.backend_model.clone(),
+                        tag: pin.tag.clone(),
+                        quantization: pin.quantization.clone(),
+                        price_prompt: live_offering.and_then(|o| o.price_prompt),
+                        price_completion: live_offering.and_then(|o| o.price_completion),
+                        price_cache_read: live_offering.and_then(|o| o.price_cache_read),
+                        price_cache_write: live_offering.and_then(|o| o.price_cache_write),
+                        effective_cost: live_offering.and_then(inline_cost),
+                        promo_discount: live_offering.and_then(|o| o.promo_discount),
+                        quality_tier: live_offering.and_then(|o| o.quality_tier.clone()),
+                        quality_score: live_offering.and_then(|o| o.quality_score),
+                        supports_tools: live_offering.and_then(|o| o.supports_tools),
+                        supports_decisions: live_offering.and_then(|o| o.supports_decisions),
+                        live: live_offering.is_some(),
+                        reason: pin.reason.clone(),
                     }
                 })
-                .collect()
+                .collect();
+            sessions.sort_by(|a, b| {
+                (&a.model, &a.key_suffix, &a.provider)
+                    .cmp(&(&b.model, &b.key_suffix, &b.provider))
+            });
+            sessions
         };
         UiSummary {
             artifact_version,
@@ -4847,6 +4998,10 @@ mod tests {
                 provider: "P".to_string(),
                 precision_class: Some("fp16".to_string()),
                 key_suffix: "robe".to_string(), // last 4 alnum of "direct-probe"
+                backend_model: "m/direct".to_string(),
+                tag: None,
+                quantization: Some("fp16".to_string()),
+                reason: "test pin".to_string(),
             },
         );
         let body = serde_json::json!({
