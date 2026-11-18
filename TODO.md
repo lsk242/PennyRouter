@@ -288,3 +288,10 @@ cheap judge model, classifier-based routing.
       30-min TTL; the key suffix is extracted at store time so the
       raw key never lands in the table. Test: `tests/ui.rs` shows
       sessions table when router has pins; empty state when none.
+- [x] **Iter 38 — OpenRouter Batch API.** Dedicated `POST
+      /api/v1/batches` (submit, 202) and `GET /api/v1/batches/{id}`
+      (poll) handlers with the standard shedding/cap/error mapping;
+      upstream path rewritten to `/v1/batches…` (Iter 25, no `/api`
+      doubling); own `batch_submit` / `batch_status` metrics slots.
+      Test: `tests/batch_api.rs` (submit/poll byte-equality, query
+      kept, suffixed-base no-doubling, labels in `/metrics`).

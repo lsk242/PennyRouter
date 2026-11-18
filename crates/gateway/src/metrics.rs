@@ -27,6 +27,8 @@ pub enum Route {
     Metrics,
     Other,
     Decisions,
+    BatchSubmit,
+    BatchStatus,
 }
 
 impl Route {
@@ -39,6 +41,8 @@ impl Route {
             "/v1/decisions" | "/api/v1/decisions" => Self::Decisions,
             "/ui" => Self::Ui,
             "/metrics" => Self::Metrics,
+            "/api/v1/batches" => Self::BatchSubmit,
+            _ if path.starts_with("/api/v1/batches/") => Self::BatchStatus,
             _ => Self::Other,
         }
     }
@@ -50,6 +54,8 @@ impl Route {
             Self::Responses => "responses",
             Self::Ui => "ui",
             Self::Metrics => "metrics",
+            Self::BatchSubmit => "batch_submit",
+            Self::BatchStatus => "batch_status",
             Self::Other => "other",
             Self::Decisions => "decisions",
         }
@@ -63,9 +69,12 @@ impl Route {
             Self::Ui => 3,
             Self::Metrics => 4,
             Self::Other => 5,
-            // Appended last (Iter 27) so existing slot indices —
-            // and any dashboard pinned to them — never shift.
+            // Appended last (Iter 27, Iter 38) so existing slot
+            // indices — and any dashboard pinned to them — never
+            // shift.
             Self::Decisions => 6,
+            Self::BatchSubmit => 7,
+            Self::BatchStatus => 8,
         }
     }
 }
@@ -230,7 +239,7 @@ pub struct ClassifierSummary {
 }
 
 pub struct Metrics {
-    routes: [RouteMetrics; 7],
+    routes: [RouteMetrics; 9],
     upstream_errors: [AtomicU64; 4],
     guard_rejections: AtomicU64,
     load_shed: AtomicU64,
@@ -254,6 +263,8 @@ impl Metrics {
     pub fn new() -> Self {
         Self {
             routes: [
+                RouteMetrics::new(),
+                RouteMetrics::new(),
                 RouteMetrics::new(),
                 RouteMetrics::new(),
                 RouteMetrics::new(),
@@ -426,6 +437,8 @@ impl Metrics {
             Route::Metrics,
             Route::Other,
             Route::Decisions,
+            Route::BatchSubmit,
+            Route::BatchStatus,
         ] {
             let metrics = &self.routes[route.index()];
             let counts = metrics
@@ -455,6 +468,8 @@ impl Metrics {
             Route::Metrics,
             Route::Other,
             Route::Decisions,
+            Route::BatchSubmit,
+            Route::BatchStatus,
         ] {
             let metrics = &self.routes[route.index()];
             for (bound, bucket) in BUCKETS.iter().zip(metrics.buckets.iter()) {

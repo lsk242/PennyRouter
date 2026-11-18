@@ -820,3 +820,22 @@ only when pulled forward deliberately.
   clean.
 
 ## After Iter 37
+## Iter 38 — OpenRouter Batch API (done)
+
+- Goal: first-class gateway support for OpenRouter's async Batch API
+  (~50% discount): submit a batch, poll it to completion. Before,
+  these paths rode the fallback proxy with a generic route label;
+  dedicated handlers give them their own metrics and docs.
+- Value: batch users get byte-correct submit (202) + status polling
+  through the gateway with the same concurrency shedding, body cap,
+  and error mapping as every other proxied path, observable as
+  `batch_submit` / `batch_status` in Prometheus.
+- Shipped: `POST /api/v1/batches` and `GET /api/v1/batches/{id}`
+  handlers forwarding method/path/query/headers/body untouched; the
+  upstream path is rewritten to `/v1/batches…` (Iter 25 convention)
+  so the configured `/api` base never doubles it. New `Route`
+  slots appended last so existing indices never shift.
+- Test: `tests/batch_api.rs` against a mock backend (submit 202 +
+  byte-equality, poll + byte-equality, query preserved, no `/api`
+  doubling with a suffixed base, both labels in `/metrics`); full
+  workspace green, clippy/fmt clean.

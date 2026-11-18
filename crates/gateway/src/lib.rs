@@ -728,6 +728,10 @@ pub fn app_with_state(state: AppState) -> Router {
         // Responses bodies carry the same `model` field, so they get
         // the same routing, budget, and floor policy (Iter 14).
         .route("/v1/responses", post(routed_completion))
+        // OpenRouter Batch API (Iter 38): asynchronous batch processing
+        // at a discount. Submit returns 202, poll with GET.
+        .route("/api/v1/batches", post(batch_submit))
+        .route("/api/v1/batches/{id}", get(batch_status))
         // OpenRouter-native aliases (Iter 25): native SDKs address the
         // same routed handler under `/api/v1/…`. The upstream path is
         // rewritten to `/v1/…` before forwarding, so the configured
@@ -1421,6 +1425,80 @@ async fn models_list(State(state): State<AppState>) -> Response {
         })),
     )
         .into_response()
+}
+
+/// OpenRouter Batch API (Iter 38): submit an asynchronous batch of
+/// requests for discounted processing. Returns 202 with the batch
+/// object on submission; poll GET /api/v1/batches/{id} for status.
+async fn batch_submit(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    uri: axum::http::Uri,
+    body: Body,
+) -> Response {
+    let permit = match acquire_upstream_slot(&state).await {
+        Some(permit) => permit,
+        None => {
+            state.metrics.load_shed();
+            return service_unavailable();
+        }
+    };
+    let buffered = match read_capped_body(&state, body).await {
+        Ok(buffered) => buffered,
+        Err(response) => return *response,
+    };
+    // Native-alias strip (Iter 25): forward as `/v1/batches` so the
+    // configured `/api` base never doubles it.
+    let path = uri
+        .path_and_query()
+        .map(|path_and_query| strip_api_prefix(path_and_query.as_str()))
+        .unwrap_or_else(|| "/v1/batches".to_string());
+    let default_base = state.upstream_base_url.clone();
+    forward_upstream(
+        &state,
+        &default_base,
+        permit,
+        &Method::POST,
+        &path,
+        &headers,
+        buffered,
+    )
+    .await
+}
+
+/// OpenRouter Batch API (Iter 38): poll the status of a submitted batch.
+/// Returns the batch object with current status (validating, in_progress,
+/// finalizing, completed, failed, expired, cancelling, cancelled).
+async fn batch_status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    uri: axum::http::Uri,
+) -> Response {
+    let permit = match acquire_upstream_slot(&state).await {
+        Some(permit) => permit,
+        None => {
+            state.metrics.load_shed();
+            return service_unavailable();
+        }
+    };
+    // GET requests have no body. The raw path forwards byte-verbatim
+    // (query string kept); the native `/api` prefix is stripped so
+    // the configured `/api` base never doubles it (Iter 25).
+    let path = uri
+        .path_and_query()
+        .map(|path_and_query| strip_api_prefix(path_and_query.as_str()))
+        .unwrap_or_else(|| "/v1/batches/".to_string());
+    let default_base = state.upstream_base_url.clone();
+    forward_upstream(
+        &state,
+        &default_base,
+        permit,
+        &Method::GET,
+        &path,
+        &headers,
+        Vec::new(),
+    )
+    .await
 }
 
 /// Observability middleware (Iter 3): request ID, latency histogram,

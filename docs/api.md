@@ -41,6 +41,8 @@ serves, so don't put unrelated secrets in headers.
 | `POST /v1/chat/completions` | Custom handler: guard, provider routing, streaming |
 | `POST /v1/responses` | Same routed handler as chat (Iter 14): model rewrite, budget, floor, retry, rejections |
 | `POST /api/v1/chat/completions`, `POST /api/v1/responses` | OpenRouter-native aliases (Iter 25): same routed handler as `/v1/…`; the upstream path is rewritten to `/v1/…` before forwarding |
+| `POST /api/v1/batches` | OpenRouter Batch API (Iter 38): submit an async batch, returns 202 with the batch object; concurrency limits + body cap apply; upstream path rewritten to `/v1/batches` like the other native handlers |
+| `GET /api/v1/batches/{id}` | OpenRouter Batch API (Iter 38): poll batch status; path + query forwarded, upstream path rewritten to `/v1/batches/{id}` |
 | `modal/<model>`, `baseten/<model>` on either routed endpoint | Provider-pinned direct route (Iter 16): stripped model forwarded to that provider's upstream, OpenRouter fields dropped, caller auth unchanged |
 | `GET /` | Landing page: binary version + build hash, config status, links; always served locally (never proxied) |
 | `GET /ui` | Debug UI (Iter 17): read-only snapshot, ranking, metrics page; registered only with `GATEWAY_UI=1`, otherwise falls through to fallback |
