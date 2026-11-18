@@ -304,3 +304,12 @@ cheap judge model, classifier-based routing.
       Stale pins (offering left the catalog) are marked. Test:
       `tests/ui.rs` virtual + direct rows assert backend id,
       params, and rule text; raw keys never rendered.
+- [x] **Iter 40 — Smart + minindex examples in the UIs.** Gateway
+      `/ui`: two fixed minindex inspector combos (plain + privacy,
+      key-refresh covers both groups), smart example ids on the
+      Classifier tab, composition note on the virtual menu
+      (minindex/pinned/fallback forms); inspector points smart at
+      the Classifier tab. Catalog UI overview ties the coding
+      index to the gateway `/minindex/` filter with an example.
+      Test: gateway `ui_shows_smart_and_minindex_examples` +
+      catalog overview assertion; full workspace green.

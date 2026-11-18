@@ -556,6 +556,10 @@ fn overview_explains_the_score_and_models_tabs_split_free_from_tiers() {
         index.contains("coding → intelligence → agentic"),
         "basis chain documented"
     );
+    assert!(
+        index.contains("openrouter/pair/low/minindex/50"),
+        "minindex example tied to the coding index, got: {index}"
+    );
 
     let free = get(&server, "/models?tab=free");
     assert!(free.contains("free/model"), "free offering listed");

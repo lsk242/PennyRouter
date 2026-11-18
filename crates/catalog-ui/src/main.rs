@@ -593,6 +593,13 @@ async fn index(
         decision_pct = pct(decision, total),
     ));
 
+    body.push_str(
+        "<p>Gateway filter: the coding index powers the gateway's \
+        <code>/minindex/&lt;n&gt;</code> suffix — e.g. \
+        <code>openrouter/pair/low/minindex/50</code> keeps only models with coding \
+        at or above 50 (models with no index never pass).</p>",
+    );
+
     body.push_str("<h2>Precision classes</h2><table><tr><th>class</th><th>offerings</th></tr>");
     for (class, count) in &classes {
         body.push_str(&format!("<tr><td>{}</td><td>{count}</td></tr>", esc(class)));

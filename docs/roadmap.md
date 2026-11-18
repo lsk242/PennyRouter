@@ -868,3 +868,31 @@ only when pulled forward deliberately.
   rendered); full workspace green. Note: this environment ships no
   rustfmt/clippy binaries, so the fmt/clippy gates were not run —
   new code follows the surrounding style manually.
+
+## After Iter 39
+## Iter 40 — Smart + minindex examples in the UIs (done)
+
+- Goal: both features existed (smart since Iter 26, minindex since
+  Iter 33) but neither appeared as an example in any UI — the
+  inspector's fixed combos skipped smart by design and minindex by
+  omission, and the catalog UI never connected its coding index to
+  the gateway filter it powers.
+- Value: operators meet both features where they look. Gateway
+  `/ui`: two fixed minindex inspector combos
+  (`low/minindex/40`, `privacy/think/minindex/70`) in their own
+  top-3 group with key-refresh support; smart example ids with
+  tier sets on the Classifier tab; a composition note on the
+  virtual menu (minindex/pinned-model/fallback/full-chain forms).
+  Catalog UI overview ties coding coverage to `/minindex/` with a
+  worked example id. Smart stays out of the catalog UI — it is a
+  gateway classifier leg, not catalog data.
+- Shipped: `MININDEX_PREVIEW_IDS` const; inspector renders both
+  fixed groups from one loop (row ids prefixed per group) and the
+  refresh script dispatches per group; static example blocks on
+  the Classifier tab and virtual menu; one catalog overview
+  paragraph. `docs/routing.md` inspector paragraph updated.
+- Test: new gateway `ui_shows_smart_and_minindex_examples`
+  (combos, row ids, refresh coverage, smart ids, menu examples)
+  plus a catalog overview assertion; full workspace green
+  (43 suites). fmt/clippy binaries still absent here, same
+  manual-style note as Iter 39.

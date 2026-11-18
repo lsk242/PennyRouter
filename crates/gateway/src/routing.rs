@@ -3067,6 +3067,14 @@ impl Router {
     }
 }
 
+/// Fixed minindex inspector ids (Iter 40): same preview table as
+/// [`FIXED_PREVIEW_IDS`] but with a coding-index floor, so operators
+/// see the suffix working — one plain, one composed with `privacy/`.
+pub const MININDEX_PREVIEW_IDS: [&str; 2] = [
+    "openrouter/pair/low/minindex/40",
+    "openrouter/pair/privacy/think/minindex/70",
+];
+
 /// Fixed inspector ids (Iter 29): the non-smart virtual menu. Smart ids
 /// need a live classifier leg, so they preview as an explanatory
 /// rejection instead of a candidate list.

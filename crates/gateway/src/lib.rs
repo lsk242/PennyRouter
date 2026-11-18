@@ -1003,6 +1003,14 @@ async fn ui_page(State(state): State<AppState>) -> Response {
                     page.push_str(&format!("<li>{}</li>", esc(id)));
                 }
                 page.push_str("</ul>");
+                page.push_str(
+                    "<p>Every id composes with a coding-index floor \
+                    <code>/minindex/&lt;0..=100&gt;</code> \
+                    (e.g. <code>openrouter/pair/low/minindex/50</code>); pinned-model form \
+                    <code>openrouter/pair/model/&lt;id&gt;</code>; fallback form \
+                    <code>openrouter/pair/free/fallback/low</code> \
+                    (full chain: <code>openrouter/pair/privacy/think/minindex/40/fallback/low</code>).</p>",
+                );
                 // Popularity pins: top OpenRouter models (menu pins, served
                 // passthrough) and hot apps, with the citation timestamp.
                 // The Data API publishes no per-app models, so apps are
@@ -1133,76 +1141,94 @@ async fn ui_page(State(state): State<AppState>) -> Response {
                     None => "-",
                 }
             }
-            for (i, id) in routing::FIXED_PREVIEW_IDS.iter().enumerate() {
-                let preview = router.preview(id, None, 3);
-                page.push_str(&format!("<h4>{}</h4>", esc(id)));
-                match &preview.fresh {
-                    Some(fresh) => page.push_str(&format!(
-                        "<p id=\"fixed-{i}-pick\">Fresh pick: <strong>{}</strong> ({})</p>",
-                        esc(&fresh.provider),
-                        esc(&fresh.model_id),
-                    )),
-                    None => page.push_str(&format!(
-                        "<p id=\"fixed-{i}-pick\">No eligible offering{}</p>",
-                        preview
-                            .rejection
-                            .as_ref()
-                            .map(|r| format!(" ({})", esc(r.code)))
-                            .unwrap_or_default(),
-                    )),
+            for (prefix, ids) in [
+                ("fixed", routing::FIXED_PREVIEW_IDS.as_slice()),
+                ("minindex", routing::MININDEX_PREVIEW_IDS.as_slice()),
+            ] {
+                if prefix == "minindex" {
+                    page.push_str(
+                        "<h3>Fixed minindex combinations (top 3)</h3>\
+                    <p>Same tiers with a coding-index floor (<code>/minindex/&lt;n&gt;</code>): \
+                    only models with a known AA coding index at or above the floor can win.</p>",
+                    );
                 }
-                page.push_str(
-                "<table><thead><tr><th>#</th><th>provider</th><th>backend model</th><th>tag</th>\
-                <th>prompt $/M</th><th>completion $/M</th><th>cache-read $/M</th>\
-                <th>cache-write $/M</th><th>effective $/M</th><th>promo</th><th>class</th>\
-                <th>quant</th>\
-                <th>tier</th><th>score</th><th>tools</th><th>decisions</th>\
-                <th>free</th><th>availability</th><th>rank</th></tr></thead>",
-            );
-                page.push_str(&format!("<tbody id=\"fixed-{i}-rows\">"));
-                for (n, c) in preview.candidates.iter().enumerate() {
-                    page.push_str(&format!(
-                        "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td>\
-                    <td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td>\
-                    <td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td>\
-                    <td>{}</td><td>{}</td><td>{}</td></tr>",
-                        n + 1,
-                        esc(&c.provider),
-                        esc(&c.model_id),
-                        c.tag.as_deref().map(esc).unwrap_or_else(|| "-".to_string()),
-                        money(c.price_prompt),
-                        money(c.price_completion),
-                        money(c.price_cache_read),
-                        money(c.price_cache_write),
-                        money(c.effective_cost),
-                        c.promo_discount
-                            .map(|d| format!("{d:.2}"))
-                            .unwrap_or_else(|| "-".to_string()),
-                        class(&c.precision_class),
-                        text(&c.quantization),
-                        text(&c.quality_tier),
-                        c.quality_score
-                            .map(|s| format!("{s:.3}"))
-                            .unwrap_or_else(|| "-".to_string()),
-                        bool3(c.supports_tools),
-                        bool3(c.supports_decisions),
-                        if c.free_eligible { "yes" } else { "no" },
-                        if c.throttled {
-                            "cool-down"
-                        } else {
-                            "available"
-                        },
-                        c.rank_index
-                            .map(|r| r.to_string())
-                            .unwrap_or_else(|| "-".to_string()),
-                    ));
+                for (i, id) in ids.iter().enumerate() {
+                    let preview = router.preview(id, None, 3);
+                    page.push_str(&format!("<h4>{}</h4>", esc(id)));
+                    match &preview.fresh {
+                        Some(fresh) => page.push_str(&format!(
+                            "<p id=\"{prefix}-{i}-pick\">Fresh pick: <strong>{}</strong> ({})</p>",
+                            esc(&fresh.provider),
+                            esc(&fresh.model_id),
+                        )),
+                        None => page.push_str(&format!(
+                            "<p id=\"{prefix}-{i}-pick\">No eligible offering{}</p>",
+                            preview
+                                .rejection
+                                .as_ref()
+                                .map(|r| format!(" ({})", esc(r.code)))
+                                .unwrap_or_default(),
+                        )),
+                    }
+                    page.push_str(
+                    "<table><thead><tr><th>#</th><th>provider</th><th>backend model</th><th>tag</th>\
+                    <th>prompt $/M</th><th>completion $/M</th><th>cache-read $/M</th>\
+                    <th>cache-write $/M</th><th>effective $/M</th><th>promo</th><th>class</th>\
+                    <th>quant</th>\
+                    <th>tier</th><th>score</th><th>tools</th><th>decisions</th>\
+                    <th>free</th><th>availability</th><th>rank</th></tr></thead>",
+                );
+                    page.push_str(&format!("<tbody id=\"{prefix}-{i}-rows\">"));
+                    for (n, c) in preview.candidates.iter().enumerate() {
+                        page.push_str(&format!(
+                            "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td>\
+                        <td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td>\
+                        <td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td>\
+                        <td>{}</td><td>{}</td><td>{}</td></tr>",
+                            n + 1,
+                            esc(&c.provider),
+                            esc(&c.model_id),
+                            c.tag.as_deref().map(esc).unwrap_or_else(|| "-".to_string()),
+                            money(c.price_prompt),
+                            money(c.price_completion),
+                            money(c.price_cache_read),
+                            money(c.price_cache_write),
+                            money(c.effective_cost),
+                            c.promo_discount
+                                .map(|d| format!("{d:.2}"))
+                                .unwrap_or_else(|| "-".to_string()),
+                            class(&c.precision_class),
+                            text(&c.quantization),
+                            text(&c.quality_tier),
+                            c.quality_score
+                                .map(|s| format!("{s:.3}"))
+                                .unwrap_or_else(|| "-".to_string()),
+                            bool3(c.supports_tools),
+                            bool3(c.supports_decisions),
+                            if c.free_eligible { "yes" } else { "no" },
+                            if c.throttled {
+                                "cool-down"
+                            } else {
+                                "available"
+                            },
+                            c.rank_index
+                                .map(|r| r.to_string())
+                                .unwrap_or_else(|| "-".to_string()),
+                        ));
+                    }
+                    page.push_str("</tbody></table>");
                 }
-                page.push_str("</tbody></table>");
             }
         } else {
             page.push_str("<p>Routing off: no catalog loaded.</p>");
         }
         page.push_str("</div>");
+        page.push_str(
+            "<p>Smart ids (<code>openrouter/pair/smart</code>, \
+            <code>openrouter/pair/smart/max</code>, plus <code>privacy/</code> variants) \
+            need a live classifier leg, so they have no fixed preview — see the \
+            Classifier tab for examples, or paste one into Custom model below.</p>",
+        );
         page.push_str(
             "<h3>Custom model</h3>\
         <p><label>Model: <input id=\"inspector-model\" size=\"48\" \
@@ -1259,18 +1285,11 @@ async fn ui_page(State(state): State<AppState>) -> Response {
         var hash=document.getElementById('inspector-hash');\
         hash.textContent=data.session_key_hash_hex?('hash '+data.session_key_hash_hex):'';}\
         catch(e){box.textContent='preview failed: '+e;}};\
-        document.getElementById('inspector-refresh').onclick=async function(){\
-        var ids=[];var els=document.querySelectorAll('[id^=\"fixed-\"][id$=\"-rows\"]');\
-        for(var k=0;k<els.length;k++){ids.push(k);}\
-        var models=['openrouter/pair/free','openrouter/pair/low','openrouter/pair/think',\
-        'openrouter/pair/decision','openrouter/pair/decision/free','openrouter/pair/batch',\
-        'openrouter/pair/privacy/free',\
-        'openrouter/pair/privacy/low','openrouter/pair/privacy/think','openrouter/pair/privacy/decision',\
-        'openrouter/pair/privacy/decision/free','openrouter/pair/privacy/batch'];\
+        async function insRefreshGroup(prefix,models){\
         for(var i=0;i<models.length;i++){\
         try{var data=await insFetch(models[i],3);\
-        var rows=document.getElementById('fixed-'+i+'-rows');\
-        var pick=document.getElementById('fixed-'+i+'-pick');\
+        var rows=document.getElementById(prefix+'-'+i+'-rows');\
+        var pick=document.getElementById(prefix+'-'+i+'-pick');\
         if(rows){var h='';for(var j=0;j<data.candidates.length;j++){var c=data.candidates[j];\
         h+='<tr><td>'+(j+1)+'</td><td>'+insEsc(c.provider)+'</td><td>'+insEsc(c.model_id)+'</td><td>'\
         +(c.tag?insEsc(c.tag):'-')+'</td><td>'+insMoney(c.price_prompt)+'</td><td>'+insMoney(c.price_completion)\
@@ -1286,7 +1305,15 @@ async fn ui_page(State(state): State<AppState>) -> Response {
         if(pick){if(data.sticky){pick.innerHTML='With this key'+(data.sticky_hit?' (sticky)':' (fresh)')\
         +': <strong>'+insEsc(data.sticky.provider)+'</strong> ('+insEsc(data.sticky.model_id)+')';}}\
         if(data.session_key_hash_hex){document.getElementById('inspector-hash').textContent='hash '+data.session_key_hash_hex;}}\
-        catch(e){}}};\
+        catch(e){}}}\
+        document.getElementById('inspector-refresh').onclick=async function(){\
+        await insRefreshGroup('fixed',['openrouter/pair/free','openrouter/pair/low','openrouter/pair/think',\
+        'openrouter/pair/decision','openrouter/pair/decision/free','openrouter/pair/batch',\
+        'openrouter/pair/privacy/free',\
+        'openrouter/pair/privacy/low','openrouter/pair/privacy/think','openrouter/pair/privacy/decision',\
+        'openrouter/pair/privacy/decision/free','openrouter/pair/privacy/batch']);\
+        await insRefreshGroup('minindex',['openrouter/pair/low/minindex/40',\
+        'openrouter/pair/privacy/think/minindex/70']);};\
         </script>",
     );
     }
@@ -1306,6 +1333,19 @@ async fn ui_page(State(state): State<AppState>) -> Response {
             ));
         }
     }
+        page.push_str(
+            "<h3>Example ids</h3><ul>\
+            <li><code>openrouter/pair/smart</code> — the classifier picks \
+            <code>free</code>, <code>lowest</code>, or <code>low</code> per request</li>\
+            <li><code>openrouter/pair/smart/max</code> — the classifier may also pick \
+            <code>think</code></li>\
+            <li><code>openrouter/pair/privacy/smart/max/minindex/40</code> — privacy fields \
+            plus a coding-index floor compose; a <code>/fallback/</code> suffix never does \
+            (<code>smart/.../fallback/...</code> is rejected)</li>\
+            </ul>\
+            <p>Paste one into the Inspector custom-model box: without a live classifier leg \
+            it previews as <code>smart_requires_classifier</code>.</p>",
+        );
         {
             let summary = state.metrics.classifier_summary();
             page.push_str("<table><tr><th>result</th><th>tier</th><th>count</th></tr>");

@@ -271,8 +271,9 @@ stores a pin. Throttled pins fall through exactly like the request
 path; fallback ids preview the leg that would serve; smart ids
 preview as `smart_requires_classifier` because their tier comes
 from the live classifier leg, not the local index. The `/ui` page
-renders the twelve fixed non-smart virtual combos top-3 plus a custom
-model box on top of this endpoint. Plain-request view: tools, budget,
+renders the twelve fixed non-smart virtual combos top-3, two fixed
+minindex combos (Iter 40), smart examples on the Classifier tab,
+plus a custom model box on top of this endpoint. Plain-request view: tools, budget,
 and only/ignore constraints are not applied, so a capped request can
 fail closed where the preview shows a pick.
 Session pins are keyed by a seeded 64-bit non-cryptographic hash of

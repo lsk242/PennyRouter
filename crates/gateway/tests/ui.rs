@@ -940,6 +940,68 @@ async fn ui_page_contains_inspector() {
     );
 }
 
+/// Iter 40: smart + minindex examples across the debug UI — minindex
+/// fixed combos in the inspector (with key-refresh coverage), smart
+/// examples on the classifier tab, and the composition note on the
+/// virtual menu.
+#[tokio::test]
+async fn ui_shows_smart_and_minindex_examples() {
+    let _guard = lock_env().await;
+    std::env::set_var("GATEWAY_UI", "1");
+    let (mock, _) = spawn_mock().await;
+    let db = scratch_db("examples");
+    let router = Arc::new(pennyrouter_gateway::routing::Router::load(&db).expect("router loads"));
+    let state = pennyrouter_gateway::AppState::new(format!("http://{mock}")).with_router(router);
+    let app = pennyrouter_gateway::app_with_state(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let gw = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    std::env::remove_var("GATEWAY_UI");
+
+    let body = client()
+        .get(format!("http://{gw}/ui"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    // Inspector: minindex fixed group renders with its own row ids.
+    assert!(
+        body.contains("Fixed minindex combinations"),
+        "minindex group header, got: {body}"
+    );
+    for id in pennyrouter_gateway::routing::MININDEX_PREVIEW_IDS {
+        assert!(body.contains(id), "combo {id} listed, got: {body}");
+    }
+    assert!(
+        body.contains("id=\"minindex-0-rows\""),
+        "minindex rows id, got: {body}"
+    );
+    assert!(
+        body.contains("insRefreshGroup('minindex'"),
+        "key refresh covers the minindex group, got: {body}"
+    );
+    // Inspector points at the classifier tab for smart ids.
+    assert!(
+        body.contains("openrouter/pair/smart/max"),
+        "smart example id, got: {body}"
+    );
+    assert!(
+        body.contains("smart_requires_classifier"),
+        "smart preview behavior named, got: {body}"
+    );
+    // Overview menu note shows the composed forms.
+    assert!(
+        body.contains("openrouter/pair/low/minindex/50"),
+        "menu minindex example, got: {body}"
+    );
+    assert!(
+        body.contains("openrouter/pair/privacy/think/minindex/40/fallback/low"),
+        "menu full-chain example, got: {body}"
+    );
+}
+
 #[tokio::test]
 async fn favicon_serves_the_shared_penny_svg() {
     let _guard = lock_env().await;
