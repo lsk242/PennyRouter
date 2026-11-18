@@ -313,3 +313,26 @@ cheap judge model, classifier-based routing.
       index to the gateway `/minindex/` filter with an example.
       Test: gateway `ui_shows_smart_and_minindex_examples` +
       catalog overview assertion; full workspace green.
+- [ ] **Iter 38 — Coding-app popularity data.** Collect coding-focused
+      popularity from OpenRouter rankings API. `CODING_APPS` config,
+      filter + aggregate, store in catalog meta. Test: mock rankings
+      → coding filter → aggregate; empty allowlist → all-model fallback.
+- [ ] **Iter 39 — Popularity-first ranking orientation.** New
+      `RankOrientation::PopularityFirst` in rank.rs. Popular model
+      beats unpopular; within tier, cheapest wins. Test: popularity
+      beats price; unknown popularity sorts last.
+- [ ] **Iter 40 — Gateway: popularity-first routing.** Gateway reads
+      popularity_first ranking. `openrouter/pair/coding` +
+      `coding/think` virtual IDs. Fallback chain. Test: popular
+      routes over unpopular; coding tier picks cheapest popular.
+- [ ] **Iter 41 — Long-tail min-value fallback.** Unknown models →
+      cheapest provider per type. Test: rare model → cheapest offering.
+- [ ] **Iter 42 — UI: popularity visibility.** `/ui` shows top
+      coding-popular models, popularity column per model, inspector
+      shows rank. Metrics: popularity counters. Test: popularity
+      section + metrics present.
+- [ ] **Iter 43 — Default switch + validation.** `ROUTING_DEFAULT`
+      flag (default: `popularity_first`). A/B validation. Rollback
+      path. Test: flag honored; fallback to quality_first.
+
+## After Iter 43
