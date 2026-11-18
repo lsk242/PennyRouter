@@ -127,6 +127,7 @@
     <button role="tab" id="tabbtn-overview" aria-controls="tab-overview" aria-selected="true" data-tab="overview">Overview</button>
     <button role="tab" id="tabbtn-models" aria-controls="tab-models" aria-selected="false" data-tab="models">Models</button>
     <button role="tab" id="tabbtn-inspector" aria-controls="tab-inspector" aria-selected="false" data-tab="inspector">Inspector</button>
+    <button role="tab" id="tabbtn-sessions" aria-controls="tab-sessions" aria-selected="false" data-tab="sessions">Sessions</button>
     <button role="tab" id="tabbtn-classifier" aria-controls="tab-classifier" aria-selected="false" data-tab="classifier">Classifier</button>
     <button role="tab" id="tabbtn-metrics" aria-controls="tab-metrics" aria-selected="false" data-tab="metrics">Metrics</button>
   </nav>
@@ -144,6 +145,10 @@
     <section class="tab-panel" id="tab-inspector" role="tabpanel" aria-labelledby="tabbtn-inspector" tabindex="0">
       <h2>Routing inspector</h2>
 {{inspector}}
+    </section>
+    <section class="tab-panel" id="tab-sessions" role="tabpanel" aria-labelledby="tabbtn-sessions" tabindex="0">
+      <h2>Active Sessions</h2>
+{{sessions}}
     </section>
     <section class="tab-panel" id="tab-classifier" role="tabpanel" aria-labelledby="tabbtn-classifier" tabindex="0">
       <h2>Smart classifier</h2>
