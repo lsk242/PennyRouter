@@ -65,13 +65,14 @@ pub fn run_processing(catalog: &Catalog, processed_at: &str) -> Result<ProcessSu
             let index = ModelIndex {
                 // Embedded first: the backfill only adds scores, never
                 // moves existing ones.
-                aa_intelligence_index: extract_aa_index(&payload, "intelligence_index")
-                    .or_else(|| {
+                aa_intelligence_index: extract_aa_index(&payload, "intelligence_index").or_else(
+                    || {
                         backfill
                             .get(slug)
                             .or_else(|| backfill.get(&model.model_id))
                             .copied()
-                    }),
+                    },
+                ),
                 aa_coding_index: extract_aa_index(&payload, "coding_index"),
                 aa_agentic_index: extract_aa_index(&payload, "agentic_index"),
                 aa_cost_per_task: extract_aa_cost_per_task(&payload),

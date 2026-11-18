@@ -128,6 +128,8 @@ pub struct Decision {
 struct Pin {
     provider: String,
     precision_class: Option<String>,
+    /// Last 4 digits of the API key (for debug UI identification).
+    key_suffix: String,
 }
 
 /// Router load/resolution failure. Callers treat this as "no routing".
@@ -954,6 +956,8 @@ impl Router {
 
     /// Store a pin, evicting expired entries first; past the cap plus
     /// no expired entries, the session routes fresh (never unbounded).
+    /// Callers fill `pin.key_suffix` via `extract_key_suffix` so the
+    /// raw credential never lands in the table.
     fn store_pin(&self, key: (u64, String), pin: Pin) {
         let mut sessions = self.sessions.write().unwrap_or_else(|e| e.into_inner());
         if sessions.len() >= MAX_SESSIONS {
@@ -963,6 +967,30 @@ impl Router {
             }
         }
         sessions.insert(key, (pin, Instant::now()));
+    }
+
+    /// Extract the last 4 alphanumeric characters from an Authorization header
+    /// for debug display (e.g., "Bearer [REDACTED]" -> "f456").
+    fn extract_key_suffix(authorization: &str) -> String {
+        // The credential rides after "Bearer " or similar; a bare
+        // scheme word carries no credential at all.
+        let key_part = authorization.split_whitespace().nth(1).unwrap_or_else(|| {
+            if authorization.trim().eq_ignore_ascii_case("bearer") {
+                ""
+            } else {
+                authorization
+            }
+        });
+        // Get last 4 alphanumeric chars
+        key_part
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .rev()
+            .take(4)
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect()
     }
 
     /// Load a router with an explicit ranking artifact (directory or
@@ -1289,11 +1317,13 @@ impl Router {
         .into_iter()
         .next()?;
         if let Some(key) = key {
+            let key_suffix = Self::extract_key_suffix(authorization.unwrap_or(""));
             self.store_pin(
                 key,
                 Pin {
                     provider: pick.provider_name.clone(),
                     precision_class: pick.precision_class.clone(),
+                    key_suffix,
                 },
             );
         }
@@ -1358,13 +1388,9 @@ impl Router {
                 false,
                 minindex,
             ),
-            "batch" => self.decide_batch(
-                snapshot,
-                authorization,
-                constraints,
-                model_field,
-                minindex,
-            ),
+            "batch" => {
+                self.decide_batch(snapshot, authorization, constraints, model_field, minindex)
+            }
             _ => Err(RouteRejection {
                 code: "no_eligible_offering",
                 message: format!("unknown fallback tier {tier:?}"),
@@ -1799,11 +1825,13 @@ impl Router {
             message: format!("no offering is currently eligible for {model_id:?}"),
         })?;
         if let Some(key) = key {
+            let key_suffix = Self::extract_key_suffix(authorization.unwrap_or(""));
             self.store_pin(
                 key,
                 Pin {
                     provider: pick.provider_name.clone(),
                     precision_class: pick.precision_class.clone(),
+                    key_suffix,
                 },
             );
         }
@@ -1987,11 +2015,13 @@ impl Router {
             message: format!("no offering is eligible for the {tier_name} tier"),
         })?;
         if let Some(key) = key {
+            let key_suffix = Self::extract_key_suffix(authorization.unwrap_or(""));
             self.store_pin(
                 key,
                 Pin {
                     provider: pick.provider_name.clone(),
                     precision_class: pick.precision_class.clone(),
+                    key_suffix,
                 },
             );
         }
@@ -2100,11 +2130,13 @@ impl Router {
                 message: "no paid offering is currently eligible".to_string(),
             })?;
         if let Some(key) = key {
+            let key_suffix = Self::extract_key_suffix(authorization.unwrap_or(""));
             self.store_pin(
                 key,
                 Pin {
                     provider: pick.provider_name.clone(),
                     precision_class: pick.precision_class.clone(),
+                    key_suffix,
                 },
             );
         }
@@ -2233,11 +2265,13 @@ impl Router {
                 message: format!("no decisions-capable {scope}offering is currently eligible"),
             })?;
         if let Some(key) = key {
+            let key_suffix = Self::extract_key_suffix(authorization.unwrap_or(""));
             self.store_pin(
                 key,
                 Pin {
                     provider: pick.provider_name.clone(),
                     precision_class: pick.precision_class.clone(),
+                    key_suffix,
                 },
             );
         }
@@ -2358,11 +2392,13 @@ impl Router {
                 message: "no batch offering is currently eligible".to_string(),
             })?;
         if let Some(key) = key {
+            let key_suffix = Self::extract_key_suffix(authorization.unwrap_or(""));
             self.store_pin(
                 key,
                 Pin {
                     provider: pick.provider_name.clone(),
                     precision_class: pick.precision_class.clone(),
+                    key_suffix,
                 },
             );
         }
@@ -2512,11 +2548,13 @@ impl Router {
         // Candidates were pre-filtered to free offerings, so the pick is
         // free by construction.
         if let Some(key) = key {
+            let key_suffix = Self::extract_key_suffix(authorization.unwrap_or(""));
             self.store_pin(
                 key,
                 Pin {
                     provider: pick.provider_name.clone(),
                     precision_class: pick.precision_class.clone(),
+                    key_suffix,
                 },
             );
         }
@@ -2751,6 +2789,17 @@ pub struct UiOffering {
     pub quality_score: Option<f64>,
 }
 
+/// Session pin info for debug UI (Iter 37): shows last 4 digits of
+/// API key, pinned provider, model, and timestamp.
+#[derive(Debug, Clone)]
+pub struct UiSession {
+    pub key_suffix: String,
+    pub model: String,
+    pub provider: String,
+    pub precision_class: Option<String>,
+    pub pinned_at: String, // RFC3339 timestamp
+}
+
 /// Default-orientation provider order for one (model, class).
 #[derive(Debug, Clone)]
 pub struct UiClassRanking {
@@ -2767,6 +2816,8 @@ pub struct UiSummary {
     pub models: Vec<(String, Option<i64>, Vec<UiOffering>)>,
     pub ranking: Vec<(String, Vec<UiClassRanking>)>,
     pub free_offers: Vec<(String, String, Option<String>, Option<u64>)>,
+    /// Active session pins (Iter 37): key suffix, model, provider, precision, timestamp.
+    pub sessions: Vec<UiSession>,
 }
 
 impl Router {
@@ -2832,11 +2883,35 @@ impl Router {
                 }
             }
         }
+        // Collect active session pins for debug UI (Iter 37).
+        let sessions = {
+            let sessions_guard = self.sessions.read().unwrap_or_else(|e| e.into_inner());
+            let now = Instant::now();
+            sessions_guard
+                .iter()
+                .filter(|(_, (_, stored))| stored.elapsed() < SESSION_TTL)
+                .map(|((_, model), (pin, stored))| {
+                    let age = now.duration_since(*stored);
+                    let pinned_at = time::OffsetDateTime::now_utc()
+                        - time::Duration::seconds(age.as_secs() as i64);
+                    UiSession {
+                        key_suffix: pin.key_suffix.clone(),
+                        model: model.clone(),
+                        provider: pin.provider.clone(),
+                        precision_class: pin.precision_class.clone(),
+                        pinned_at: pinned_at
+                            .format(&time::format_description::well_known::Rfc3339)
+                            .unwrap_or_else(|_| "unknown".to_string()),
+                    }
+                })
+                .collect()
+        };
         UiSummary {
             artifact_version,
             models,
             ranking: rank_rows,
             free_offers: free_rows,
+            sessions,
         }
     }
 }
@@ -4771,6 +4846,7 @@ mod tests {
             Pin {
                 provider: "P".to_string(),
                 precision_class: Some("fp16".to_string()),
+                key_suffix: "robe".to_string(), // last 4 alnum of "direct-probe"
             },
         );
         let body = serde_json::json!({
@@ -4784,6 +4860,17 @@ mod tests {
             .unwrap();
         assert!(decision.sticky, "should keep the pinned provider");
         assert_eq!(decision.provider, "P");
+    }
+
+    #[test]
+    fn extract_key_suffix_takes_last_four_alphanumerics() {
+        assert_eq!(Router::extract_key_suffix("Bearer sk-or-v1-f456"), "f456");
+        assert_eq!(Router::extract_key_suffix("Bearer abc"), "abc");
+        assert_eq!(Router::extract_key_suffix("raw-key-7890"), "7890");
+        assert_eq!(Router::extract_key_suffix(""), "");
+        // A bare scheme word carries no credential.
+        assert_eq!(Router::extract_key_suffix("Bearer"), "");
+        assert_eq!(Router::extract_key_suffix("bearer"), "");
     }
 
     #[test]

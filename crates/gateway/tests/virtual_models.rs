@@ -965,7 +965,14 @@ async fn upstream_ratelimit_headers_reach_client_on_429() {
     assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(res.headers().get("x-ratelimit-remaining").unwrap(), "0");
     assert_eq!(res.headers().get("x-ratelimit-limit").unwrap(), "50");
-    let reset: u64 = res.headers().get("x-ratelimit-reset").unwrap().to_str().unwrap().parse().unwrap();
+    let reset: u64 = res
+        .headers()
+        .get("x-ratelimit-reset")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()

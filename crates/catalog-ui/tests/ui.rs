@@ -610,7 +610,9 @@ fn resync_button_requests_a_sync_cycle() {
     let posted = post(&server, "/resync");
     assert!(posted.contains("303"), "redirects back, got: {posted}");
     assert!(
-        posted.to_lowercase().contains("location: /?resync=requested"),
+        posted
+            .to_lowercase()
+            .contains("location: /?resync=requested"),
         "redirects to the overview banner, got: {posted}"
     );
     assert!(

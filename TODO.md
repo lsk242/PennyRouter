@@ -280,3 +280,11 @@ cheap judge model, classifier-based routing.
       the inspector shows it. Deploy with/after the first v9
       publish. Test: extraction + processing + migrate + wire-pin
       suite + preview carry; full workspace green (40 suites).
+- [x] **Iter 37 — Sessions tab in debug UI.** New `Sessions` tab on
+      `GET /ui` (behind `GATEWAY_UI=1`) showing all active session
+      pins: last 4 digits of the API key, model namespace, pinned
+      provider, precision class, and pinned-at timestamp (RFC3339).
+      Pins are keyed by seeded hash of (Authorization, model) with
+      30-min TTL; the key suffix is extracted at store time so the
+      raw key never lands in the table. Test: `tests/ui.rs` shows
+      sessions table when router has pins; empty state when none.
