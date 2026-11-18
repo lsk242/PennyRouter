@@ -799,6 +799,27 @@ only when pulled forward deliberately.
 
 ## After Iter 36
 
+## Iter 37 — Sessions tab in debug UI (done)
+
+- Goal: expose active session pins in the debug UI so operators can
+  see which keys are pinning to which models/providers.
+- Value: debugging "why did this key pick this model?" becomes a
+  glance at the Sessions tab — last 4 digits of the key, model
+  namespace, provider, precision class, and pinned-at timestamp
+  (RFC3339). Pins are keyed by seeded hash of (Authorization, model)
+  with 30-min TTL; the key suffix is extracted at store time so the
+  raw key never lands in the table.
+- Shipped: `UiSession` struct + `sessions: Vec<UiSession>` in
+  `UiSummary`; `Router::ui_summary()` collects live pins; new
+  `Sessions` tab in `templates/ui.html` with a table; `lib.rs`
+  renders it. Callers fill the pin's key suffix via
+  `extract_key_suffix`, so the raw credential never lands in the
+  table.
+- Test: `tests/ui.rs` shows sessions table when router has pins;
+  empty state when none. `cargo test --workspace`, clippy, fmt
+  clean.
+
+## After Iter 37
 ## Iter 38 — OpenRouter Batch API (done)
 
 - Goal: first-class gateway support for OpenRouter's async Batch API

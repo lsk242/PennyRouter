@@ -150,9 +150,16 @@ async fn ui_enabled_shows_ranking_and_metrics() {
     // Price columns are labeled per million tokens, never per token.
     assert!(body.contains("$/M"), "prices labeled $/M");
     assert!(!body.contains("$/tok"), "no per-token prices shown");
-    // Tabbed shell: one tab bar, five panels, every placeholder filled.
+    // Tabbed shell: one tab bar, six panels, every placeholder filled.
     assert!(body.contains("role=\"tablist\""), "tab bar present");
-    for panel in ["overview", "models", "inspector", "classifier", "metrics"] {
+    for panel in [
+        "overview",
+        "models",
+        "inspector",
+        "sessions",
+        "classifier",
+        "metrics",
+    ] {
         assert!(
             body.contains(&format!("id=\"tab-{panel}\"")),
             "{panel} panel present"
@@ -974,5 +981,76 @@ async fn favicon_serves_the_shared_penny_svg() {
     assert!(
         landing.contains(r#"<link rel="icon" href="/favicon.ico""#),
         "landing links the icon"
+    );
+}
+
+/// Sessions tab (Iter 37): empty state with no pins; one row per
+/// live pin after a routed request — key suffix, never the key.
+#[tokio::test]
+async fn ui_sessions_tab_lists_active_pins() {
+    let _guard = lock_env().await;
+    std::env::set_var("GATEWAY_UI", "1");
+    let (mock, _) = spawn_mock().await;
+    let db = scratch_db("sessions");
+    let router = Arc::new(pennyrouter_gateway::routing::Router::load(&db).expect("router loads"));
+    let state = pennyrouter_gateway::AppState::new(format!("http://{mock}")).with_router(router);
+    let app = pennyrouter_gateway::app_with_state(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let gw = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    std::env::remove_var("GATEWAY_UI");
+
+    // No pins yet: the tab exists and shows the empty state.
+    let body = client()
+        .get(format!("http://{gw}/ui"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        body.contains("data-tab=\"sessions\""),
+        "sessions tab present"
+    );
+    assert!(
+        body.contains("id=\"tab-sessions\""),
+        "sessions panel present"
+    );
+    assert!(
+        body.contains("No active sessions"),
+        "empty state shown, got: {body}"
+    );
+
+    // One routed request pins the session.
+    let res = client()
+        .post(format!("http://{gw}/v1/chat/completions"))
+        .header("authorization", "Bearer ui-key-s3ss")
+        .header("content-type", "application/json")
+        .body(r#"{"model":"m/ui","messages":[{"role":"user","content":"hi"}],"stream":false}"#)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), axum::http::StatusCode::OK);
+
+    let body = client()
+        .get(format!("http://{gw}/ui"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        body.contains("<th>Key suffix</th>"),
+        "sessions table headers, got: {body}"
+    );
+    assert!(
+        body.contains("<code>s3ss</code>"),
+        "key suffix shown, got: {body}"
+    );
+    assert!(
+        !body.contains("ui-key-s3ss"),
+        "raw key never rendered, got: {body}"
     );
 }

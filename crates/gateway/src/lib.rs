@@ -977,6 +977,7 @@ async fn ui_page(State(state): State<AppState>) -> Response {
     let mut inspector = String::new();
     let mut classifier = String::new();
     let mut metrics_panel = String::new();
+    let mut sessions_panel = String::new();
     let router = state.router_handle();
     {
         let page = &mut overview;
@@ -1340,12 +1341,37 @@ async fn ui_page(State(state): State<AppState>) -> Response {
         page.push_str(&esc(&state.metrics.render()));
         page.push_str("</pre>");
     }
+    {
+        let page = &mut sessions_panel;
+        if let Some(router) = router.as_ref() {
+            let summary = router.ui_summary();
+            if summary.sessions.is_empty() {
+                page.push_str("<p>No active sessions (pins expire 30 min after creation).</p>");
+            } else {
+                page.push_str("<table><thead><tr><th>Key suffix</th><th>Model</th><th>Provider</th><th>Precision</th><th>Pinned at (UTC)</th></tr></thead><tbody>");
+                for session in &summary.sessions {
+                    page.push_str(&format!(
+                        "<tr><td><code>{}</code></td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+                        esc(&session.key_suffix),
+                        esc(&session.model),
+                        esc(&session.provider),
+                        esc(session.precision_class.as_deref().unwrap_or("-")),
+                        esc(&session.pinned_at)
+                    ));
+                }
+                page.push_str("</tbody></table>");
+            }
+        } else {
+            page.push_str("<p>Routing: off (no catalog).</p>");
+        }
+    }
     let body = UI_TEMPLATE
         .replace("{{overview}}", &overview)
         .replace("{{models}}", &models_panel)
         .replace("{{inspector}}", &inspector)
         .replace("{{classifier}}", &classifier)
-        .replace("{{metrics}}", &metrics_panel);
+        .replace("{{metrics}}", &metrics_panel)
+        .replace("{{sessions}}", &sessions_panel);
     (
         StatusCode::OK,
         [("content-type", "text/html; charset=utf-8")],
