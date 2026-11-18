@@ -94,9 +94,7 @@ pub fn aggregate_intelligence(body: &Value) -> Vec<(String, i64)> {
             _ => None,
         });
         match (slug, index) {
-            (Some(slug), Some(index))
-                if index.is_finite() && (0.0..=100.0).contains(&index) =>
-            {
+            (Some(slug), Some(index)) if index.is_finite() && (0.0..=100.0).contains(&index) => {
                 scores
                     .entry(slug.to_string())
                     .or_insert_with(|| index.round() as i64);
@@ -119,10 +117,7 @@ pub fn store_benchmarks(catalog: &Catalog, benchmarks: &Benchmarks) -> Result<()
         .map(|(slug, index)| (slug.clone(), serde_json::json!(index)))
         .collect();
     catalog.set_meta("benchmark_intel", &Value::Object(intel).to_string())?;
-    catalog.set_meta(
-        "benchmark_as_of",
-        benchmarks.as_of.as_deref().unwrap_or(""),
-    )?;
+    catalog.set_meta("benchmark_as_of", benchmarks.as_of.as_deref().unwrap_or(""))?;
     Ok(())
 }
 

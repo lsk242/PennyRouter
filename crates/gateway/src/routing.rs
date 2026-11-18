@@ -955,39 +955,43 @@ impl Router {
     }
 
     /// Store a pin, evicting expired entries first; past the cap plus
-        /// no expired entries, the session routes fresh (never unbounded).
-        /// `authorization` is the raw header value (e.g. "Bearer sk-...") from
-        /// which the last 4 digits are extracted for debug UI identification.
-        fn store_pin(&self, key: (u64, String), pin: Pin, authorization: &str) {
-            let mut sessions = self.sessions.write().unwrap_or_else(|e| e.into_inner());
+    /// no expired entries, the session routes fresh (never unbounded).
+    /// Callers fill `pin.key_suffix` via `extract_key_suffix` so the
+    /// raw credential never lands in the table.
+    fn store_pin(&self, key: (u64, String), pin: Pin) {
+        let mut sessions = self.sessions.write().unwrap_or_else(|e| e.into_inner());
+        if sessions.len() >= MAX_SESSIONS {
+            sessions.retain(|_, (_, used)| used.elapsed() < SESSION_TTL);
             if sessions.len() >= MAX_SESSIONS {
-                sessions.retain(|_, (_, used)| used.elapsed() < SESSION_TTL);
-                if sessions.len() >= MAX_SESSIONS {
-                    return;
-                }
+                return;
             }
-            sessions.insert(key, (pin, Instant::now()));
         }
+        sessions.insert(key, (pin, Instant::now()));
+    }
 
-        /// Extract the last 4 alphanumeric characters from an Authorization header
-        /// for debug display (e.g., "Bearer sk-abc123def456" -> "f456").
-        fn extract_key_suffix(authorization: &str) -> String {
-            // Find the actual key part after "Bearer " or similar
-            let key_part = authorization
-                .split_whitespace()
-                .nth(1)
-                .unwrap_or(authorization);
-            // Get last 4 alphanumeric chars
-            key_part
-                .chars()
-                .filter(|c| c.is_ascii_alphanumeric())
-                .rev()
-                .take(4)
-                .collect::<String>()
-                .chars()
-                .rev()
-                .collect()
-        }
+    /// Extract the last 4 alphanumeric characters from an Authorization header
+    /// for debug display (e.g., "Bearer [REDACTED]" -> "f456").
+    fn extract_key_suffix(authorization: &str) -> String {
+        // The credential rides after "Bearer " or similar; a bare
+        // scheme word carries no credential at all.
+        let key_part = authorization.split_whitespace().nth(1).unwrap_or_else(|| {
+            if authorization.trim().eq_ignore_ascii_case("bearer") {
+                ""
+            } else {
+                authorization
+            }
+        });
+        // Get last 4 alphanumeric chars
+        key_part
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .rev()
+            .take(4)
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect()
+    }
 
     /// Load a router with an explicit ranking artifact (directory or
     /// manifest file). Fails when the ranking is unloadable.
@@ -1321,7 +1325,6 @@ impl Router {
                     precision_class: pick.precision_class.clone(),
                     key_suffix,
                 },
-                authorization.unwrap_or(""),
             );
         }
         Some(Decision {
@@ -1385,13 +1388,9 @@ impl Router {
                 false,
                 minindex,
             ),
-            "batch" => self.decide_batch(
-                snapshot,
-                authorization,
-                constraints,
-                model_field,
-                minindex,
-            ),
+            "batch" => {
+                self.decide_batch(snapshot, authorization, constraints, model_field, minindex)
+            }
             _ => Err(RouteRejection {
                 code: "no_eligible_offering",
                 message: format!("unknown fallback tier {tier:?}"),
@@ -1834,7 +1833,6 @@ impl Router {
                     precision_class: pick.precision_class.clone(),
                     key_suffix,
                 },
-                authorization.unwrap_or(""),
             );
         }
         Ok(Decision {
@@ -2025,7 +2023,6 @@ impl Router {
                     precision_class: pick.precision_class.clone(),
                     key_suffix,
                 },
-                authorization.unwrap_or(""),
             );
         }
         Ok(Decision {
@@ -2141,7 +2138,6 @@ impl Router {
                     precision_class: pick.precision_class.clone(),
                     key_suffix,
                 },
-                authorization.unwrap_or(""),
             );
         }
         Ok(Decision {
@@ -2277,7 +2273,6 @@ impl Router {
                     precision_class: pick.precision_class.clone(),
                     key_suffix,
                 },
-                authorization.unwrap_or(""),
             );
         }
         Ok(Decision {
@@ -2405,7 +2400,6 @@ impl Router {
                     precision_class: pick.precision_class.clone(),
                     key_suffix,
                 },
-                authorization.unwrap_or(""),
             );
         }
         Ok(Decision {
@@ -2562,7 +2556,6 @@ impl Router {
                     precision_class: pick.precision_class.clone(),
                     key_suffix,
                 },
-                authorization.unwrap_or(""),
             );
         }
         Ok(Some(free_decision(pick, orientation, false, minindex)))
@@ -2796,7 +2789,7 @@ pub struct UiOffering {
     pub quality_score: Option<f64>,
 }
 
-/// Session pin info for debug UI (Iter 20): shows last 4 digits of
+/// Session pin info for debug UI (Iter 37): shows last 4 digits of
 /// API key, pinned provider, model, and timestamp.
 #[derive(Debug, Clone)]
 pub struct UiSession {
@@ -2804,7 +2797,7 @@ pub struct UiSession {
     pub model: String,
     pub provider: String,
     pub precision_class: Option<String>,
-    pub last_used: String, // RFC3339 timestamp
+    pub pinned_at: String, // RFC3339 timestamp
 }
 
 /// Default-orientation provider order for one (model, class).
@@ -2823,7 +2816,7 @@ pub struct UiSummary {
     pub models: Vec<(String, Option<i64>, Vec<UiOffering>)>,
     pub ranking: Vec<(String, Vec<UiClassRanking>)>,
     pub free_offers: Vec<(String, String, Option<String>, Option<u64>)>,
-    /// Active session pins (Iter 20): key suffix, model, provider, precision, timestamp.
+    /// Active session pins (Iter 37): key suffix, model, provider, precision, timestamp.
     pub sessions: Vec<UiSession>,
 }
 
@@ -2890,23 +2883,23 @@ impl Router {
                 }
             }
         }
-        // Collect active session pins for debug UI (Iter 20).
+        // Collect active session pins for debug UI (Iter 37).
         let sessions = {
             let sessions_guard = self.sessions.read().unwrap_or_else(|e| e.into_inner());
             let now = Instant::now();
             sessions_guard
                 .iter()
-                .filter(|(_, (_, used))| used.elapsed() < SESSION_TTL)
-                .map(|((_, model), (pin, used))| {
-                    let age = now.duration_since(*used);
-                    let last_used = time::OffsetDateTime::now_utc()
+                .filter(|(_, (_, stored))| stored.elapsed() < SESSION_TTL)
+                .map(|((_, model), (pin, stored))| {
+                    let age = now.duration_since(*stored);
+                    let pinned_at = time::OffsetDateTime::now_utc()
                         - time::Duration::seconds(age.as_secs() as i64);
                     UiSession {
                         key_suffix: pin.key_suffix.clone(),
                         model: model.clone(),
                         provider: pin.provider.clone(),
                         precision_class: pin.precision_class.clone(),
-                        last_used: last_used
+                        pinned_at: pinned_at
                             .format(&time::format_description::well_known::Rfc3339)
                             .unwrap_or_else(|_| "unknown".to_string()),
                     }
@@ -4853,9 +4846,8 @@ mod tests {
             Pin {
                 provider: "P".to_string(),
                 precision_class: Some("fp16".to_string()),
-                key_suffix: "be".to_string(), // last 4 of "direct-probe" -> "be"
+                key_suffix: "robe".to_string(), // last 4 alnum of "direct-probe"
             },
-            "Bearer direct-probe",
         );
         let body = serde_json::json!({
             "model": "m/direct",
@@ -4868,6 +4860,17 @@ mod tests {
             .unwrap();
         assert!(decision.sticky, "should keep the pinned provider");
         assert_eq!(decision.provider, "P");
+    }
+
+    #[test]
+    fn extract_key_suffix_takes_last_four_alphanumerics() {
+        assert_eq!(Router::extract_key_suffix("Bearer sk-or-v1-f456"), "f456");
+        assert_eq!(Router::extract_key_suffix("Bearer abc"), "abc");
+        assert_eq!(Router::extract_key_suffix("raw-key-7890"), "7890");
+        assert_eq!(Router::extract_key_suffix(""), "");
+        // A bare scheme word carries no credential.
+        assert_eq!(Router::extract_key_suffix("Bearer"), "");
+        assert_eq!(Router::extract_key_suffix("bearer"), "");
     }
 
     #[test]

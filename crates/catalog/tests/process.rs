@@ -865,10 +865,7 @@ fn migration_v8_to_v9_adds_quantization_column() {
 
     let catalog = Catalog::open(&db).unwrap();
     catalog.init().unwrap();
-    assert_eq!(
-        catalog.endpoints_for("m/id").unwrap()[0].quantization,
-        None
-    );
+    assert_eq!(catalog.endpoints_for("m/id").unwrap()[0].quantization, None);
     assert_eq!(
         catalog.get_meta("schema_version").unwrap().as_deref(),
         Some("9")

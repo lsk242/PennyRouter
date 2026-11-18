@@ -1342,9 +1342,9 @@ async fn ui_page(State(state): State<AppState>) -> Response {
         if let Some(router) = router.as_ref() {
             let summary = router.ui_summary();
             if summary.sessions.is_empty() {
-                page.push_str("<p>No active sessions (pins expire after 30 min of inactivity).</p>");
+                page.push_str("<p>No active sessions (pins expire 30 min after creation).</p>");
             } else {
-                page.push_str("<table><thead><tr><th>Key suffix</th><th>Model</th><th>Provider</th><th>Precision</th><th>Last used (UTC)</th></tr></thead><tbody>");
+                page.push_str("<table><thead><tr><th>Key suffix</th><th>Model</th><th>Provider</th><th>Precision</th><th>Pinned at (UTC)</th></tr></thead><tbody>");
                 for session in &summary.sessions {
                     page.push_str(&format!(
                         "<tr><td><code>{}</code></td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
@@ -1352,7 +1352,7 @@ async fn ui_page(State(state): State<AppState>) -> Response {
                         esc(&session.model),
                         esc(&session.provider),
                         esc(session.precision_class.as_deref().unwrap_or("-")),
-                        esc(&session.last_used)
+                        esc(&session.pinned_at)
                     ));
                 }
                 page.push_str("</tbody></table>");
@@ -3479,10 +3479,7 @@ mod tests {
         let headers = |value: Option<&str>| {
             let mut headers = HeaderMap::new();
             if let Some(value) = value {
-                headers.insert(
-                    axum::http::header::AUTHORIZATION,
-                    value.parse().unwrap(),
-                );
+                headers.insert(axum::http::header::AUTHORIZATION, value.parse().unwrap());
             }
             headers
         };
@@ -3530,9 +3527,10 @@ mod tests {
     /// is pinned here rather than captured per request.)
     #[test]
     fn access_log_entry_marks_errors_only() {
-        let ok: serde_json::Value =
-            serde_json::from_str(&access_log_entry("r1", "GET", "other", 200, 1.5, "3456", None))
-                .unwrap();
+        let ok: serde_json::Value = serde_json::from_str(&access_log_entry(
+            "r1", "GET", "other", 200, 1.5, "3456", None,
+        ))
+        .unwrap();
         assert_eq!(ok["key"], serde_json::json!("3456"));
         assert_eq!(ok["status"], serde_json::json!(200));
         assert!(ok.get("error_code").is_none());
