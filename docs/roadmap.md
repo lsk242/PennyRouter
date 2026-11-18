@@ -798,3 +798,52 @@ only when pulled forward deliberately.
   205 fp4-family kept exact).
 
 ## After Iter 36
+
+## Iter 38 — Coding-app popularity data (planned)
+
+- Goal: Collect coding-focused popularity data from OpenRouter rankings.
+- Value: The gateway knows which models developers actually use most.
+- Shipped: `CODING_APPS` config, `fetch_coding_popularity()` in
+  popular.rs, store in catalog meta. Test: mock rankings → filter → aggregate.
+- Proposal: `docs/proposals/2026-11-18-popularity-first-ranking.md`.
+
+## Iter 39 — Popularity-first ranking orientation (planned)
+
+- Goal: A new `RankOrientation::PopularityFirst` that puts coding-popular
+  models first, then price-segments.
+- Value: Routing decisions match what developers actually use.
+- Shipped: `compare()` arm, `rank_catalog()` produces new ordering.
+  Test: popularity beats price; unknown popularity sorts last.
+
+## Iter 40 — Gateway: popularity-first routing (planned)
+
+- Goal: Gateway reads and uses the popularity-first ordering.
+- Value: `openrouter/pair/coding` picks cheapest coding-popular model;
+  `openrouter/pair/coding/think` picks best.
+- Shipped: New virtual IDs, fallback chain. Test: popular routes over
+  unpopular; coding tier picks cheapest popular.
+
+## Iter 41 — Long-tail min-value fallback (planned)
+
+- Goal: For models outside the popularity tiers, route to cheapest
+  eligible offering per type.
+- Value: Rare models still get served at the best possible price.
+- Shipped: `decide_ordered_virtual` falls back to `Price` orientation
+  when no popularity data. Test: rare model → cheapest offering.
+
+## Iter 42 — UI: popularity visibility (planned)
+
+- Goal: Show popularity data in the debug UI.
+- Value: Operators can see why a model was chosen.
+- Shipped: `/ui` Overview: top 10 coding-popular; Models: popularity
+  column; Inspector: rank in candidate table. Metrics: popularity
+  counters. Test: popularity section + metrics present.
+
+## Iter 43 — Default switch + validation (planned)
+
+- Goal: Make popularity-first the default for `low`/`think`, with rollback.
+- Value: The system learns what developers want and routes accordingly.
+- Shipped: `ROUTING_DEFAULT` flag (default: `popularity_first`). A/B
+  validation. Rollback path. Test: flag honored; fallback works.
+
+## After Iter 43
