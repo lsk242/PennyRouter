@@ -1,175 +1,244 @@
-# Implementation Plan: Popularity-First Ranking
+# Implementation Plan: Catalog score + popularity-first ranking
 
 **Depends on:** `docs/proposals/2026-11-18-popularity-first-ranking.md`
 
 This plan turns the proposal into small, testable iterations. Each ships
-one layer, is testable alone, and adds value on its own.
+one layer, is testable alone, and adds value on its own. Rule for every
+fetch added here: sync-time only, never the request path, at most 1
+request/hour per source (self-imposed; upstream tiers allow more).
 
-## Iter 38 — Coding-app popularity data
+## Iter 38 — Score data sources (AA + OpenRouter Data API)
 
-**Goal:** Collect and store coding-focused popularity data from OpenRouter.
+**Goal:** Download everything the score needs, versioned and cited.
 
-**Value:** The gateway knows which models developers actually use most (Cline,
-Cursor, etc.), not just what's on the menu.
+**Value:** The catalog stops depending on embedded payloads alone:
+direct AA indexes with test versions and cost/task, plus activity
+level + trend from the rankings window.
 
 **Shipped:**
-- `crates/catalog/src/popular.rs`: `fetch_coding_popularity(base_url, api_key,
-  coding_apps)` — fetches `rankings-daily`, filters to `coding_apps` allowlist,
-  aggregates tokens per model, returns `CodingPopularity { models: Vec<(String, u64)>, apps: Vec<String>, as_of }`.
-- `CODING_APPS` config: env var (comma-separated) or `coders.json` file.
-  Default list ships as a constant in `popular.rs`.
-- Store in catalog meta: `coding_popular_models`, `coding_popular_apps`,
-  `coding_popular_as_of` (new keys; old artifacts read as empty).
-- `catalog-sync` passes the coding apps list through to `fetch_popularity`.
+
+AA API (`crates/catalog/src/aa.rs`, new):
+
+- `fetch_aa_models(base_url, api_key)` — `GET
+  /api/v2/language/models/free` with `x-api-key` (`AA_API_KEY`);
+  parses headline indexes, `intelligence_index_version`,
+  `cost_per_task.total_cost`, pricing, median performance.
+- Store per model: `aa_intel_index`, `aa_intel_version`,
+  `aa_cost_per_task`, `aa_pricing`, plus `aa_as_of` in meta.
+  Keyless syncs store nothing; old artifacts read as empty.
+
+// Fetch policy: at most 1 request/hour to the AA Data API per sync
+// host (self-imposed; the free tier allows far more). Sync-time
+// only, never the request path.
+
+OpenRouter Data API (`popular.rs` + `benchmarks.rs`, extended):
+
+- Rankings window grows to recent + 3 prior windows for trend
+  (same `rankings-daily` endpoint, one call with a wider span);
+  `aggregate_activity()` returns level (recent share) + trend
+  (recent vs prior mean) per slug; store as `activity_tokens`.
+- `app-rankings` with `sort=trending` + `category=coding` for the
+  hot/coding app display (names only — the API has no per-app
+  models, so this never filters models).
+- Task classifications Code share stored as `task_code_share`
+  (coding weight); benchmarks keep the intel backfill and add
+  Design Arena code + OpenRouter GPQA/tau-bench fallbacks.
+
+// Fetch policy: at most 1 request/hour to the OpenRouter Data API
+// per endpoint group per sync host (self-imposed; upstream allows
+// 30/min per key, 500/day per account). Sync-time only, never the
+// request path.
 
 **Tests:**
-- `crates/catalog/tests/popular_coding.rs`: mock rankings body → filter → aggregate
-- Filter: only coding apps counted, `other` row skipped, unparseable dropped
-- Empty allowlist → falls back to all-model popularity
-- `store/read` round trip for new meta keys
+
+- `crates/catalog/tests/aa_fetch.rs`: fixture free-shape body →
+  parse → store → read round trip; keyless → empty, no penalty.
+- `crates/catalog/tests/popular_coding.rs` → renamed
+  `activity_trend.rs`: multi-window fixture → level + trend;
+  `other` skipped; unparseable dropped; single-window → trend
+  neutral; store/read round trip for new meta keys.
+- Citation: `as_of` present for every stored source.
 
 **Config:**
+
 ```bash
 # .env.example
-CODING_APPS=Cline,Roo Code,Cursor,Continue,Zed,Aider,GitHub Copilot,Windsurf
+AA_API_KEY=
+# RANKINGS_API_KEY=  (already exists; unchanged)
 ```
 
-## Iter 39 — Popularity-first ranking orientation
+## Iter 39 — Catalog score v2 + brackets
 
-**Goal:** A new `popularity_first` ordering that puts coding-popular models first,
-then price-segments into low/think tiers.
+**Goal:** One versioned score per offering plus the top-usage
+bracket, computed offline in a single transaction.
 
-**Value:** Routing decisions match what developers actually use.
+**Value:** Routing inputs become inspectable facts: performance ×
+efficiency × activity with version gating, and declared bracket
+ends for `low`/`think`.
 
 **Shipped:**
-- `crates/catalog/src/rank.rs`: new `RankOrientation::PopularityFirst`
-- `compare()` arm for `PopularityFirst`:
-  1. Popularity score (descending) — models not in popularity data sort last
-  2. Tier (high > standard > low) — quality floor within popularity
-  3. Cost (ascending) — cheapest wins within tier
-  4. Error rate (ascending)
-  5. Latency (ascending)
-  6. Provider identity (tie-breaker)
-- `rank_catalog()` produces `ClassRanking.popularity_first: Vec<RankEntry>`
-- `RankingDocument` gains `popularity_first` field per class (optional,
-  `#[serde(default, skip_serializing_if = "Vec::is_empty")]`).
+
+- `crates/catalog/src/rank_score.rs`: `RULESET_VERSION =
+  "rank-v2"`; `score()` gains activity input (level × bounded
+  trend boost) and the version gate (index counts only on the
+  current `aa_intel_version`, else `NULL`); AA `cost_per_task`
+  wins when present, else catalog cost × `TASK_TOKENS`.
+- Brackets (`process.rs`): top-usage cutoff (top-N + minimum
+  share, declared constants); `low` end = cheapest at/above the
+  performance floor; `think` end = best performance under
+  `THINK_MAX_COST_TASK`; flags per model (`stale-version`,
+  `no-current-score`, `popular-but-unscored`, `no-price`,
+  `no-activity`).
+- Model-level TOP rollup: new `top_models` meta (generic models,
+  best score + components + flags each) — the TOP tab reads this,
+  never recomputes.
+- Schema v9→v10, additive only: `aa_intel_version`,
+  `activity_level`, `activity_trend`, `rank_activity`,
+  `rank_ruleset` already exists; migration via the existing
+  `has_column` + `ALTER TABLE` loop.
 
 **Tests:**
-- `crates/catalog/tests/rank_popularity.rs`:
-  - Popular model beats unpopular even if pricier
-  - Within same popularity tier, cheapest wins
-  - Unknown popularity sorts last
-  - Tier floor applies within popularity
 
-## Iter 40 — Gateway: popularity-first routing
+- Version gating: current in, stale out, missing → `NULL`.
+- Trend math: rising > flat > falling at equal level; neutral on
+  one window.
+- Bracket ends on fixtures: `low` cheapest-above-floor, `think`
+  best-under-cap, over-cap excluded, popular-unscored flagged.
+- `lowest` semantics untouched (full-list cheapest, no floor).
+- v9→v10 migration idempotent; unprocessed rows keep `NULL`.
 
-**Goal:** Gateway reads and uses the popularity-first ordering.
+## Iter 40 — Gateway consumes the score
 
-**Value:** `openrouter/pair/low` picks the cheapest coding-popular model;
-`openrouter/pair/think` picks the best coding-popular model.
+**Goal:** Routing reads the published score/ordering and stops
+recomputing quality math.
+
+**Value:** `low`/`think` serve the bracket ends from one lookup;
+`lowest` keeps full-list cheapest; scoring changes ship without
+gateway deploys.
 
 **Shipped:**
+
 - `crates/gateway/src/routing.rs`:
-  - `ordered()` in `decide_ordered_virtual`: when `popularity_first` ranking
-    exists for the model, use it; otherwise fall back to inline `compare()`
-  - New `VirtualTier::Low` picks cheapest from popularity top-quartile
-  - New `VirtualTier::Think` picks highest-quality from popularity top-decile
-- Fallback chain: popularity_first → default → price → quality
-- New virtual ID: `openrouter/pair/coding` (cheapest coding-popular)
-- New virtual ID: `openrouter/pair/coding/think` (best coding-popular)
+  - `decide_ordered_virtual` orders by the published `score`
+    ranking for `low`/`think` (floor = bracket membership +
+    existing budget/tool/context gates); no inline tier blending.
+  - `lowest` stays full-list cheapest (`Price` orientation) with
+    `/minindex/` filtering; activity breaks price ties.
+  - Fallback chain: score → legacy tier ordering → cheapest.
+- No new virtual ids: `low`/`think`/`lowest` already name the
+  bracket ends and the full list.
 
 **Tests:**
-- `crates/gateway/tests/popularity_routing.rs`:
-  - Popular model routes over unpopular (even if pricier)
-  - `coding` tier picks cheapest popular
-  - `coding/think` picks best popular
-  - Fallback to default when no popularity data
-  - `x-pennyrouter-tier: coding` header
+
+- `crates/gateway/tests/score_routing.rs`:
+  - `low` picks cheapest-above-floor from the bracket fixture.
+  - `think` picks best-under-cap; over-cap never wins.
+  - `lowest` picks full-list cheapest incl. out-of-bracket.
+  - Missing score column → legacy ordering (rollback path).
+  - Budget/tool/context gates still apply on top of score order.
 
 ## Iter 41 — Long-tail min-value fallback
 
-**Goal:** For models outside the popularity tiers, always route to the
+**Goal:** For models outside the bracket, always route to the
 cheapest eligible offering per type.
 
 **Value:** Rare models still get served at the best possible price.
 
 **Shipped:**
+
 - `crates/gateway/src/routing.rs`:
-  - `decide_ordered_virtual`: when model not in popularity data, use
-    `RankOrientation::Price` (cheapest) instead of quality-first
-  - `decide_pinned`: same — unknown model → cheapest provider
-- New rejection code: `no_eligible_offering` (unchanged) but message clarifies
-  "no popularity data, falling back to cheapest"
+  - `decide_ordered_virtual`: model absent from the bracket uses
+    `RankOrientation::Price` (cheapest) instead of score order.
+  - `decide_pinned`: same — unknown model → cheapest provider.
+- Rejection message clarifies "outside the top-usage bracket,
+  falling back to cheapest" (code unchanged).
 
 **Tests:**
-- `crates/gateway/tests/popularity_routing.rs`:
-  - Unknown model → cheapest provider
-  - `openrouter/pair/model/rare-model` → cheapest offering
-  - Popularity tier > price tier for known models
 
-## Iter 42 — UI: popularity visibility
+- `crates/gateway/tests/score_routing.rs`:
+  - Unknown model → cheapest provider.
+  - `openrouter/pair/model/rare-model` → cheapest offering.
+  - Bracket members never take the long-tail path.
 
-**Goal:** Show popularity data in the debug UI.
+## Iter 42 — UI: catalog TOP tab
 
-**Value:** Operators can see why a model was chosen (popularity rank + tier).
+**Goal:** Show the score, its arithmetic, and its flags where the
+score is made.
+
+**Value:** Operators debug routing inputs without guessing: every
+bracket decision is inspectable per model.
 
 **Shipped:**
-- `crates/gateway/src/lib.rs` `ui_page()`:
-  - Overview: "Top coding-popular models" section (top 10 with token counts)
-  - Models: popularity column per model (rank, tokens)
-  - Inspector: popularity-aware preview (shows popularity rank in candidate table)
-- New metrics: `pennyrouter_popularity_models_total{model, tier}`,
-  `pennyrouter_popularity_tokens_total{model}`
-- `/ui` Sessions tab: shows tier (low/think/coding) per pin
+
+- `crates/catalog-ui/src/main.rs`:
+  - `/models?tab=top`: generic models only (best score +
+    components + activity/trend + flags each), score desc;
+    expandable arithmetic per row; `?q=` + `?min=` filters.
+  - Overview: bracket counts (in-bracket, stale-excluded,
+    popular-unscored flagged) + per-source fetch health (`as_of`,
+    version, last ok).
+- `crates/gateway/src/lib.rs` inspector: score-rank column only.
+- Metrics: `pennyrouter_score_models_total{basis,bracket}`,
+  `pennyrouter_score_flag_total{flag}`,
+  `pennyrouter_sync_fetch_total{source,result}`.
 
 **Tests:**
-- `crates/gateway/tests/ui.rs`:
-  - Popularity section appears with top models
-  - Models table shows popularity rank
-  - Inspector shows popularity in candidate rows
-  - Metrics include popularity counters
+
+- `crates/catalog-ui/tests/ui.rs`:
+  - TOP tab lists bracket models score-desc with arithmetic.
+  - Flags render exactly when set; unscored popular flagged.
+  - Overview shows bracket counts + fetch health.
+  - Empty/unscored artifact degrades gracefully, no NaN.
 
 ## Iter 43 — Default switch + validation
 
-**Goal:** Make popularity-first the default for `low`/`think`, with rollback.
+**Goal:** Make the score ordering the default for `low`/`think`,
+with rollback.
 
-**Value:** The system learns what developers want and routes accordingly.
+**Value:** The system routes on usage-backed value instead of
+static tier sorts.
 
 **Shipped:**
-- Config: `ROUTING_DEFAULT=popularity_first|quality_first` (default: `popularity_first`)
-- A/B validation: 10% traffic → popularity_first, measure error/latency
-- Rollback: `ROUTING_DEFAULT=quality_first` reverts instantly
-- Documentation update: `docs/routing.md` reflects new default
-- `TODO.md` + `docs/roadmap.md` updated
+
+- Config: `ROUTING_DEFAULT=score_first|legacy` (default:
+  `score_first`).
+- A/B validation: 10% traffic → score order, measure
+  error/latency/cost vs legacy.
+- Rollback: `ROUTING_DEFAULT=legacy` reverts instantly.
+- Docs: `docs/routing.md` reflects the new default; `TODO.md` +
+  `docs/roadmap.md` updated.
 
 **Tests:**
-- Config flag honored
-- Fallback to quality_first when flag set
-- Metrics compare the two orderings
+
+- Config flag honored; legacy fallback works.
+- Metrics compare the two orderings.
 
 ## Dependencies
 
 ```
 Iter 38 (data)
-  └─▶ Iter 39 (ranking)
-       └─▶ Iter 40 (routing)
+  └─▶ Iter 39 (score + brackets)
+       └─▶ Iter 40 (gateway consume)
             ├─▶ Iter 41 (long-tail)
-            └─▶ Iter 42 (UI)
+            └─▶ Iter 42 (TOP tab)
                  └─▶ Iter 43 (default switch)
 ```
 
 ## Rollout Plan
 
-1. **Iter 38-39**: Ship data + ranking. No gateway behavior change.
-2. **Iter 40-41**: Ship routing. Default stays `quality_first`.
-3. **Iter 42**: Ship UI. Operators can compare.
+1. **Iter 38-39**: Ship data + score. No gateway behavior change.
+2. **Iter 40-41**: Ship consumption. Default stays `legacy`.
+3. **Iter 42**: Ship TOP tab. Operators compare score vs legacy.
 4. **Iter 43**: Switch default. Monitor. Rollback if needed.
 
 ## Open Decisions
 
-1. **Coding app list**: Initial list in proposal. Who maintains it?
-2. **Time window**: 7 days (current) vs 30 days (more stable)?
-3. **Popularity floor**: What minimum token count makes a model "popular"?
-   (e.g., 1M tokens/week?)
-4. **Tier split**: Top 25% for `low`, top 10% for `think` — or absolute
-   thresholds?
+1. **AA Coding/Agentic retirement**: verify live payloads in Iter
+   38 — decides the basis chain and whether `minindex` follows.
+2. **Bracket cutoff**: top-N + minimum share values (proposal
+   suggests 25 + 0.5%).
+3. **Think max spend**: `THINK_MAX_COST_TASK` value (proposal
+   suggests $0.05/task), versioned with the ruleset.
+4. **Trend window**: 7-day recent vs 3 priors, or 30-day smoothing?
+5. **`cost_per_task` coverage**: Iter 38 measures it; v2 uses AA
+   cost only where universal.

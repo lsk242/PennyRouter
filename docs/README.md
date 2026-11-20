@@ -32,5 +32,5 @@ All product documentation lives here, Markdown only.
 - [proposals/2026-11-03-artificial-analysis-index.md](proposals/2026-11-03-artificial-analysis-index.md) — proposal: catalog ingestion of `benchmarks.artificial_analysis.*` (AA coding/intelligence/agentic index, schema v5→v6).
 - [proposals/2026-11-03-minindex-filter.md](proposals/2026-11-03-minindex-filter.md) — proposal: `openrouter/pair/.../minindex/[number]` suffix filter on AA coding index.
 - [proposals/2026-11-12-catalog-ui-value-score.md](proposals/2026-11-12-catalog-ui-value-score.md) — proposal: deterministic catalog rank score (AA index × precision × price efficiency × popularity) + catalog UI overview and models tabs.
-- [proposals/2026-11-18-popularity-first-ranking.md](proposals/2026-11-18-popularity-first-ranking.md) — proposal: popularity-first ranking (coding-app focus, price-segmented tiers, long-tail min-value).
-- [popularity-first-plan.md](popularity-first-plan.md) — implementation plan for popularity-first ranking (Iter 38-43).
+- [proposals/2026-11-18-popularity-first-ranking.md](proposals/2026-11-18-popularity-first-ranking.md) — proposal: catalog score + popularity-first ranking (usage brackets, version-gated performance, TOP tab).
+- [popularity-first-plan.md](popularity-first-plan.md) — implementation plan for catalog score + popularity-first ranking (Iter 38-43).
