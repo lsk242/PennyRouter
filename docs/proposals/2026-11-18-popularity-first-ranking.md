@@ -1,257 +1,332 @@
-# Proposal: Popularity-First Ranking Refactor
+# Proposal: Catalog score + popularity-first ranking
 
-**Date:** 2026-11-18
+**Date:** 2026-11-18 · **Revised:** 2026-11-20
 **Status:** Proposed
 **Authors:** leandro
 
+> Revision note: the 2026-11-18 draft filtered rankings per coding
+> app, but the rankings API has no app dimension, so that filter is
+> unimplementable. This revision replaces it with all-model activity
+> + trend, makes the catalog score (not a new lexicographic order)
+> the routing input, moves the TOP view into the catalog UI, and
+> drops the `coding/*` virtual ids — `low`/`think` already are the
+> popular-bracket tiers.
+
 ## Executive Summary
 
-This proposal rearchitectures the catalog and ranking system to prioritize **popularity by token usage** (focused on coding apps) as the primary signal, with **price segmentation** as the secondary filter. The goal is to make the routing more responsive to what developers actually use, rather than purely optimizing on theoretical cost/quality metrics.
+The catalog owns scoring; the gateway consumes it. Each sync, the
+catalog downloads everything it needs (AA free API + OpenRouter Data
+API), runs one deep analytical step, and publishes a versioned score
+and ordering per offering. Gateway routing stays a single lookup: it
+reads the published ranking/score and never recomputes it.
 
-## Current System (As of Iter 37)
+Usage drives the ranking. `low` and `think` serve only the top-usage
+bracket — `low` is the cheapest offering with a performance floor,
+`think` the best performance under a max spend — while `lowest`
+keeps the entire list for cheapest-overall with `minindex`
+filtering. Intelligence indexes stop being the primary key and become
+the performance input, always pinned to the latest test version:
+models without the current version are excluded from the bracket,
+and popular ones missing it are flagged.
 
-The current ranking system orders providers by:
-1. Quality tier (high/standard/low from AA indexes or scoring)
-2. Error rate (from historical trends)
-3. Cost (effective cost under balanced workload)
-4. Latency
-5. Provider identity (tie-breaker)
+## Contract: catalog → gateway
 
-**Strengths:**
-- Deterministic, offline-rebuildable
-- Multi-signal with fallback chains
-- Free offer tracking with expiry
+- The catalog publishes, per offering: `rank_score` + components
+  (performance, efficiency, activity), `rank_basis`,
+  `rank_ruleset`, and the `score` ordering in the ranking
+  document. One ruleset version per artifact.
+- The gateway reads the score/ordering and applies only
+  request-scoped gates (budget, `only`/`ignore`, tools, context,
+  throttle, stickiness). No price blending, no tier math on the
+  request path.
+- A scoring change ships as a new ruleset version in the artifact.
+  Gateway code does not change when the formula does.
+
+## Current system (as of Iter 36)
+
+- `rank_score` (`rank-v1`, Iter 34): `quality × efficiency ×
+  popularity`, with precision discounting and a saturating price
+  curve. Published per offering; the gateway ignores it.
+- Gateway orientations (`rank.rs`): `Default`/`Price`/`Quality`
+  lexicographic sorts, plus `low`/`think` quality floors
+  (`low` needs any scored tier, `think` needs `high`).
+- Popularity (`popular.rs`): 7-day `rankings-daily` window, top-10
+  menu pins plus the full slug→tokens map behind the ≤10%
+  popularity factor.
+- AA signals: embedded `benchmarks.artificial_analysis.*` per model
+  (Iter 31) plus the intelligence backfill from the benchmarks API.
+- Catalog UI: overview + models (`free`/`tiers`/`batch`/`decision`),
+  no TOP view, no model-level rollup.
 
 **Limitations:**
-- Popularity data (OpenRouter rankings) is collected but only used for the `openrouter/<slug>` menu pins — not for routing decisions
-- The ranking doesn't adapt to real usage patterns
-- No distinction between "coding-heavy" models (used by Cline, Roo, Cursor, etc.) and general models
 
-## Proposed Architecture
+- The score is published but never consumed — routing still sorts
+  by tier, then error rate, then price.
+- Popularity is a static 7-day sum: no trend, no activity signal.
+- No test-version gating: a stale index scores like a current one,
+  and popular models without any score fail silently.
+- The catalog UI cannot show "top models with score arithmetic".
+- `rankings-daily` rows carry no app dimension, so per-model
+  "coding app" filtering is impossible (see §4).
 
-### 1. Primary Signal: Popularity by Tokens (Coding Focus)
+## Data sources
 
-**Data Source:** OpenRouter `/api/v1/datasets/rankings-daily`
+Two sources, both sync-time only, never the request path. Both get
+a self-imposed fetch cap so syncs stay polite and artifacts stay
+reproducible instead of rate-driven.
 
-**Process:**
-1. Fetch daily rankings (trailing 7-day window)
-2. Filter to **coding apps** using a curated allowlist:
-   - Cline, Roo Code, Cursor, Continue, Zed, Aider, GitHub Copilot, Windsurf, etc.
-   - Configurable via `CODING_APPS` env or `coders.json` fixture
-3. Aggregate tokens per model across coding apps
-4. Compute **popularity score** per model:
-   ```
-   popularity_score(model) = coding_tokens(model) / total_coding_tokens
-   ```
+### 1. AA Data API (free tier)
 
-**Coding App Allowlist (initial):**
-```json
-{
-  "coding_apps": [
-    "Cline",
-    "Roo Code", 
-    "Roo",
-    "Cursor",
-    "Continue",
-    "Zed",
-    "Aider",
-    "GitHub Copilot",
-    "Windsurf",
-    "Codeium",
-    "Tabnine",
-    "Amazon Q",
-    "CodeWhisperer"
-  ]
-}
-```
+`GET https://artificialanalysis.ai/api/v2/language/models/free`
+with an `x-api-key` (`AA_API_KEY`). Free-shape fields: headline
+Intelligence/Coding/Agentic indexes, `intelligence_index_version`,
+the six Capability Indexes, median performance, Performance v3
+headline means, input/output pricing, and the Intelligence Index run
+cost including `cost_per_task.total_cost`. Provider detail, full
+eval sets, percentiles, and context/params stay Pro-only.
 
-**Why This Works:**
-- Coding apps represent the primary use case (developer productivity)
-- Token usage is a strong signal of real-world adoption
-- Daily refresh keeps rankings current
-- Fallback: if no coding app data available, use all-model rankings
-
-### 2. Secondary Signal: Price Segmentation
-
-Once popularity is established, segment the top models:
-
-**Tiers:**
-- **low**: Cheapest models in top quartile by popularity
-  - Use: `openrouter/pair/low` 
-  - Target: Budget-conscious developers, hobby projects
-  - Strategy: Minimize cost while maintaining quality floor
-
-- **think**: Highest-quality models in top decile by popularity  
-  - Use: `openrouter/pair/think`
-  - Target: Production systems, complex reasoning
-  - Strategy: Maximize capability, accept higher cost
-
-**Implementation:**
 ```rust
-pub struct PopularityFirstRanking {
-    pub models: Vec<ModelPopularity>,
-    pub low_tier: Vec<String>,   // cheapest top-quartile
-    pub think_tier: Vec<String>, // highest-quality top-decile
-    pub long_tail: Vec<String>,  // everything else
-}
-
-pub struct ModelPopularity {
-    pub model_id: String,
-    pub coding_tokens: u64,
-    pub rank: u32,
-    pub tier: Tier,  // Low | Think | LongTail
-    pub cost_per_m: Option<f64>,
-    pub quality_tier: Option<String>,
-}
+// Fetch policy: at most 1 request/hour to the AA Data API per sync
+// host (self-imposed; the free tier allows far more). Sync-time
+// only, never the request path.
 ```
 
-### 3. Long Tail: Minimum Value Model
+Stored per model: indexes + `intelligence_index_version` +
+`cost_per_task` + pricing + `aa_as_of`. The version gates the top
+bracket (§5): only the current version counts, and the sync records
+which version that is so staleness is visible in the artifact.
 
-For models outside the top popularity tiers:
-- Route to **minimum value model cheapest of all per type**
-- This ensures we always have a fallback even for obscure models
-- Per-type means: chat, completion, decision, etc.
+### 2. OpenRouter Data API
 
-**Example:**
-```
-openrouter/pair/model/rare-model-v2  →  routes to cheapest eligible provider
-openrouter/pair/decision             →  routes to cheapest decision-capable model
-```
+Any valid OpenRouter key (`RANKINGS_API_KEY`; the inference key is
+fine). Upstream limits: 30 requests/minute per key, 500/day per
+account; data is CC-BY and every figure carries its `meta.as_of`
+citation, as the existing popularity fetch already does.
 
-### 4. Data Flow
-
-```
-┌─────────────────┐     ┌──────────────────┐     ┌─────────────────┐
-│ OpenRouter      │────▶│ Popularity       │────▶│ Routing         │
-│ Rankings API    │     │ Aggregator       │     │ Decision        │
-│ (daily)         │     │ (coding focus)   │     │ (popularity-    │
-└─────────────────┘     └──────────────────┘     │  first)         │
-                                                  └─────────────────┘
-                                                           │
-                                                           ▼
-                        ┌─────────────────┐     ┌──────────────────┐
-                        │ Popularity      │     │ Gateway          │
-                        │ Artifact        │────▶│ (serves          │
-                        │ (ranking.json)  │     │  ordering)       │
-                        └─────────────────┘     └──────────────────┘
+```rust
+// Fetch policy: at most 1 request/hour to the OpenRouter Data API
+// per endpoint group per sync host (self-imposed; upstream allows
+// 30/min per key, 500/day per account). Sync-time only, never the
+// request path.
 ```
 
-### 5. Reliability & Fallbacks
+Endpoints used:
 
-**Data Reliability:**
-- Popularity data is CC-BY licensed from OpenRouter
-- Falls back gracefully: if rankings API fails, use last-known-good
-- If no popularity data: fall back to current quality-first ranking
+- `rankings-daily`: top 50 models/day + `other` row as
+  `(date, model_permaslug, total_tokens)`, window up to 366 days.
+  Feeds the activity level (recent-window share) and the trend
+  (recent window vs the windows before it). Tokenizers differ per
+  provider, so cross-provider sums are coarse magnitudes.
+- `app-rankings`: top apps by tokens, `sort=popular|trending`,
+  `category=coding` for the coding display. Trending (excess growth
+  vs the prior three windows) is the closest native "what is hot"
+  signal. It has no per-app models, so it cannot filter models —
+  it only names the apps and the trend.
+- `benchmarks`: keeps the AA intelligence backfill; adds Design
+  Arena code categories and OpenRouter's own GPQA/tau-bench as
+  fallbacks. Note: the docs say AA retired its Coding/Agentic
+  indexes for `task_type` filtering — verify against live payloads
+  before trusting any non-intelligence basis (open question 1).
+- Task classifications: sampled relative traffic shares with a
+  Code macro-category — a coding weight when a per-model coding
+  join is unavailable (which is always: no endpoint joins apps to
+  models).
 
-**Freshness:**
-- Sync every 24 hours (configurable)
-- Ranking artifact includes `as_of` timestamp
-- Gateway rejects stale rankings (older than 2× sync interval)
+## Score calculation (catalog-owned, `rank-v2` sketch)
 
-**Failure Modes:**
+Per offering, all terms stored so the UI shows arithmetic and the
+gateway reads one column:
+
+```
+performance  = gated_index × precision_factor        # 0..100
+efficiency   = COST_HALF_CREDIT / (cost_task + COST_HALF_CREDIT)
+activity     = level × (1 + trend_boost)              # bounded
+rank_score   = performance × efficiency × activity
+```
+
+- `gated_index`: the model's index on the *current* test version
+  only (Intelligence vN first; Coding/Agentic only if the
+  retirement question resolves in their favor). No current version
+  → no score (`NULL`), never zero.
+- `precision_factor`: keep the `rank-v1` table (fp32/fp16 1.00,
+  fp8 0.97, int8 0.95, int4 0.88, unknown 0.95). Quantization is
+  part of performance, not a tie-break.
+- `cost_task`: AA `cost_per_task.total_cost` wins wherever it is
+  universal; otherwise the catalog's own effective cost ×
+  `TASK_TOKENS`, same curve as `rank-v1`.
+- `activity`: recent-window token share (level) times a bounded
+  trend multiplier (rising vs prior windows). This is the usage
+  signal that drives the ranking; price, availability, and speed
+  tune inside it via efficiency and the existing tie-breaks
+  (throughput → latency → uptime → provider/tag).
+- Constants stay in code with the ruleset version, never env knobs.
+
+## Brackets and tier names
+
+- **Top-usage bracket**: models ordered by activity; the cutoff is
+  a declared rule (top-N + minimum share — open question 2). Only
+  scored (current-version) models enter. A popular model without
+  the current version is excluded *and flagged* (§8).
+- **`think`** = top of the bracket: best performance index inside
+  the bracket under a declared max spend (`THINK_MAX_COST_TASK`).
+- **`low`** = bottom of the bracket: cheapest offering in the
+  bracket at or above a declared performance floor. Prices move
+  models up/down the bracket every rebuild — dynamic, not pinned.
+- **`lowest`** (existing tag, unchanged meaning): cheapest paid
+  offering over the *entire* list, no quality floor, combinable
+  with `/minindex/` to filter up/down. Activity still orders equal
+  prices so trending cheap models surface.
+- **`free` / `decision` / `batch`**: unchanged scopes (zero-cost,
+  decisions-capable, `:batch` suffix). They read the same score
+  where it exists but keep their own eligibility rules.
+- No new `coding/*` virtual ids: `low`/`think` already are the
+  popular-bracket tiers, and a parallel family would split the
+  contract for no routing gain.
+
+Top of the activity list never means "best" by itself — the score
+always blends performance × price efficiency × activity, and the
+TOP tab shows all three so the tradeoff is inspectable.
+
+## Long tail: minimum value
+
+Models outside the bracket (unpopular, unscored, or long-tail
+direct pins like `openrouter/pair/model/<id>`) route to the
+cheapest eligible offering per type. Unknown is cheapest-first,
+never quality-first: a rare model still serves at the best price.
+
+## Data flow
+
+```text
+AA free API ──┐
+              ├─▶ catalog-sync (≤1 req/hour/source) ─▶ catalog DB ─▶ ship
+OpenRouter    │      │                                     │
+Data API ─────┘      ▼                                     ▼
+              deep analysis step              gateway hosts: atomic
+              (score v2 + brackets             swap → snapshot rebuild
+              + flags, 1 txn)                  → in-memory publish
+                                                     │
+                                                     ▼
+                                              gateway: single lookup
+                                              of score/ordering +
+                                              request gates only
+```
+
+## Reliability & fallbacks
+
 | Scenario | Behavior |
 |----------|----------|
-| Rankings API down | Use last-good popularity data |
-| No coding app data | Use all-model popularity |
-| No popularity data at all | Fall back to current quality-first |
-| Stale artifact | Gateway keeps serving last-good |
+| AA API down | Keep last-good AA payload + version; scores carry the old `aa_as_of`, TOP tab warns |
+| Rankings API down | Keep last-good activity window; trend freezes, level persists |
+| No AA key | No version gate possible: bracket falls back to embedded AA indexes, TOP tab warns "AA direct missing" |
+| No rankings key | No activity: score degrades to performance × efficiency, brackets fall back to price segments |
+| No score at all | Gateway falls back to the current tier ordering (rollback path) |
+| Stale artifact | Gateway keeps serving last-good; boot without a scored artifact stays in standby passthrough |
 
-### 6. Migration Path
+## Catalog TOP tab (debuggable output)
 
-**Phase 1: Data Collection (No breaking changes)**
-- Add `CODING_APPS` config
-- Extend `popular.rs` to compute coding-focused popularity
-- Store in catalog meta (new keys, old ignored)
+The catalog UI gains a `top` tab: generic models only (no
+providers — per-provider quantification stays in the offering
+rows), ordered by rank score, each row expandable to the full
+arithmetic:
 
-**Phase 2: Ranking Integration**
-- Add `popularity_first` ranking orientation
-- Gateway reads new ranking, falls back to current if absent
-- No breaking changes to existing virtual IDs
-
-**Phase 3: Default Switch (after validation)**
-- Make `popularity_first` the default for `low` and `think`
-- Monitor metrics: error rates, latency, user complaints
-- Rollback plan: config flag to revert to old ranking
-
-### 7. Metrics & Observability
-
-**New Metrics:**
-```
-pennyrouter_popularity_models_total{model, tier}
-pennyrouter_popularity_requests_total{result}
-pennyrouter_popularity_tokens_total{model}
+```text
+activity     = share 0.42 × trend +12%              = 0.470
+performance  = 71 (intel v5) × 0.97 (fp8)           = 68.87
+cost/task    = $0.012825 (AA)                       → eff 0.438
+rank_score   = 68.87 × 0.438 × 0.470                = 14.18
+bracket      = top-usage #6 · think-eligible (under cap)
 ```
 
-**UI Additions:**
-- `/ui` Overview: Top 10 coding-popular models
-- `/ui` Models: Popularity column per model
-- `/ui` Inspector: Popularity-aware routing preview
+- Flags column: `stale-version`, `no-current-score`,
+  `popular-but-unscored`, `no-price`, `no-activity`.
+- Filters: `?q=` substring, `?min=` minimum score — same as the
+  other tabs, no JS.
+- The overview page adds bracket counts (in-bracket, excluded
+  stale, flagged popular-unscored) next to the existing coverage.
+- Gateway `/ui` gets only a score-rank column in the inspector:
+  deep debugging lives in the catalog, where the score is made.
 
-### 8. Testing Strategy
+## Migration path
 
-**Unit Tests:**
-- Coding app filter logic
-- Popularity score calculation
-- Tier assignment (low/think/longtail)
-- Fallback chains
+**Phase 1: Data (no behavior change).** Add the AA fetch and the
+extended OpenRouter fetches (trend window, app-rankings, task
+classes) with the 1/hour policies; store versioned payloads; old
+artifacts read as empty.
 
-**Integration Tests:**
-- Rankings API mock → popular.rs → artifact
-- Gateway reads artifact → routes correctly
-- Stale artifact → falls back
+**Phase 2: Score.** Ship `rank-v2` + brackets + TOP tab. Gateway
+still routes on the old ordering; operators compare in the UIs.
 
-**Live Validation:**
-- One-shot: compare popularity-first vs current routing
-- A/B test: 10% traffic → popularity-first, measure error/latency
+**Phase 3: Consume + switch.** Gateway reads the score ordering
+behind `ROUTING_DEFAULT` (`score_first` vs legacy), validated by
+A/B, with instant rollback to the legacy ordering.
 
-## Open Questions
+## Metrics & observability
 
-1. **Coding app list maintenance**: Who maintains the allowlist? Auto-detect new apps?
-2. **Token vs request count**: Tokens better reflects usage, but requests might better reflect adoption
-3. **Time window**: 7 days current; 30 days might be more stable for ranking
-4. **Long tail policy**: Cheapest-per-type vs popularity-tier fallback?
+```text
+pennyrouter_score_models_total{basis,bracket}
+pennyrouter_score_flag_total{flag}
+pennyrouter_activity_share{model}
+pennyrouter_sync_fetch_total{source,result}
+```
 
-## Implementation Plan
+Catalog overview shows fetch health per source (last ok, `as_of`,
+version); gateway metrics count served brackets per tier.
 
-### Sprint 1 (2-3 days)
-- [ ] Extend `popular.rs` with coding app filter
-- [ ] Add `CODING_APPS` config (env + file)
-- [ ] Unit tests for popularity aggregation
+## Testing strategy
 
-### Sprint 2 (2-3 days)  
-- [ ] Add `popularity_first` ranking orientation
-- [ ] Update `rank.rs` to produce new ordering
-- [ ] Integration tests
+- **Unit:** version gating (current in, stale out, missing
+  `NULL`); trend math (rising > flat > falling at equal level);
+  bracket ends (`low` cheapest-above-floor, `think`
+  best-under-cap); `lowest` full-list cheapest; flags fire exactly
+  when defined.
+- **Integration:** fixture AA + rankings bodies → sync → artifact
+  carries versioned scores, brackets, flags; keyless syncs degrade
+  per the fallback table; v9→v10 migration is additive.
+- **Live validation:** one-shot score-vs-legacy routing diff on a
+  real artifact; A/B 10% traffic on error/latency/cost before the
+  default switch.
 
-### Sprint 3 (1-2 days)
-- [ ] Gateway: read new ranking, fallback handling
-- [ ] UI updates
-- [ ] Metrics
+## Open questions
 
-### Sprint 4 (1 day)
-- [ ] Live validation / A/B test
-- [ ] Documentation
-- [ ] Default switch decision
+1. **AA Coding/Agentic retirement:** OpenRouter docs say retired
+   for `task_type`; the AA free shape still lists them. Check live
+   payloads — if retired, the basis chain becomes Intelligence vN
+   (+ Capability Indexes later), and `minindex` follows it.
+2. **Bracket cutoff:** top-N (e.g. 25) + minimum share (e.g. 0.5%
+   of window tokens)? Absolute thresholds beat percentages for
+   debuggability.
+3. **Think max spend:** one `THINK_MAX_COST_TASK` constant (e.g.
+   $0.05/task)? It must live with the ruleset version, not env.
+4. **Trend window:** 7-day recent vs prior 7-day ×3, or 30-day
+   smoothing? Start with 7-day to match the existing fetch.
+5. **`cost_per_task` universality:** if AA lacks it for many top
+   models, keep the catalog-computed cost for v2 and revisit.
 
-## Risks & Mitigations
+## Risks & mitigations
 
 | Risk | Mitigation |
 |------|------------|
-| Coding apps not representative | Allowlist is configurable; can include more apps |
-| Popularity data stale | Daily sync; stale detection + fallback |
-| Long-tail models get poor routing | Min-value fallback ensures always-cheapest |
-| Performance regression | Offline computation; gateway reads single lookup |
+| Activity gaming / bot traffic | Trend + performance floor bound the damage; a pure-popularity spike cannot outrank a scored model |
+| Tokenizer incomparability | Shares are coarse magnitudes; brackets use wide cutoffs, never adjacent-rank decisions |
+| Stale AA version | Version travels in the artifact; gateway/TOP tab warn instead of silently serving |
+| Score churn per rebuild | Bracket cutoffs are wide; stickiness still absorbs per-request flapping |
+| Extra sync fetches | 1/hour/source caps; two sources, small bodies, sync-time only |
 
-## Success Criteria
+## Success criteria
 
-1. **Top 10 coding models** correctly identified with >90% accuracy vs manual review
-2. **Routing latency**: No increase (offline computation)
-3. **Error rates**: Maintain or improve vs current system
-4. **User feedback**: Positive on "right model for the job"
+1. TOP tab lists the top-usage bracket with exact arithmetic and
+   zero unexplained exclusions (every exclusion has a flag).
+2. `low`/`think` route to the bracket ends on a live artifact;
+   `lowest` still serves full-list cheapest.
+3. Routing latency unchanged (offline compute, single lookup).
+4. Error/latency/cost neutral-or-better in A/B before the switch.
 
 ## References
 
-- [OpenRouter Rankings API](https://openrouter.ai/docs/api-reference/overview#rankings)
-- [Current Routing Documentation](docs/routing.md)
-- [Current Popularity Implementation](crates/catalog/src/popular.rs)
-- [Ranking System](crates/catalog/src/rank.rs)
+- [AA Data API reference](https://artificialanalysis.ai/data-api/docs/reference)
+- [OpenRouter Data API](https://openrouter.ai/docs/cookbook/administration/data-api)
+- [value-score proposal](2026-11-12-catalog-ui-value-score.md) (rank-v1 this extends)
+- [AA index ingestion](2026-11-03-artificial-analysis-index.md) (embedded signal)
+- `crates/catalog/src/rank_score.rs` (score), `popular.rs`
+  (activity fetch), `benchmarks.rs` (backfill), `rank.rs`
+  (orientations); `crates/catalog-ui/src/main.rs` (TOP tab).

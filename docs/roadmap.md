@@ -896,51 +896,56 @@ only when pulled forward deliberately.
   plus a catalog overview assertion; full workspace green
   (43 suites). fmt/clippy binaries still absent here, same
   manual-style note as Iter 39.
-## Iter 38 — Coding-app popularity data (planned)
+## Iter 38 — Score data sources (planned)
 
-- Goal: Collect coding-focused popularity data from OpenRouter rankings.
-- Value: The gateway knows which models developers actually use most.
-- Shipped: `CODING_APPS` config, `fetch_coding_popularity()` in
-  popular.rs, store in catalog meta. Test: mock rankings → filter → aggregate.
+- Goal: Fetch AA free API (indexes, version, cost/task, pricing)
+  and OpenRouter Data API (activity trend, app-rankings, task
+  classes) at ≤1 req/hour per source.
+- Value: The score stops depending on embedded payloads alone.
+- Shipped: `aa.rs` fetch + store; extended `popular.rs` /
+  `benchmarks.rs` activity + trend. Test: fixtures → parse →
+  store → read; keyless → empty.
 - Proposal: `docs/proposals/2026-11-18-popularity-first-ranking.md`.
 
-## Iter 39 — Popularity-first ranking orientation (planned)
+## Iter 39 — Catalog score v2 + brackets (planned)
 
-- Goal: A new `RankOrientation::PopularityFirst` that puts coding-popular
-  models first, then price-segments.
-- Value: Routing decisions match what developers actually use.
-- Shipped: `compare()` arm, `rank_catalog()` produces new ordering.
-  Test: popularity beats price; unknown popularity sorts last.
+- Goal: Version-gated `rank-v2` (performance × efficiency ×
+  activity) plus the top-usage bracket with `low`/`think` ends.
+- Value: Routing inputs become inspectable, versioned facts.
+- Shipped: `rank_score.rs` v2, bracket + flags in `process.rs`,
+  TOP rollup. Test: stale excluded; popular-unscored flagged.
 
-## Iter 40 — Gateway: popularity-first routing (planned)
+## Iter 40 — Gateway consumes score (planned)
 
-- Goal: Gateway reads and uses the popularity-first ordering.
-- Value: `openrouter/pair/coding` picks cheapest coding-popular model;
-  `openrouter/pair/coding/think` picks best.
-- Shipped: New virtual IDs, fallback chain. Test: popular routes over
-  unpopular; coding tier picks cheapest popular.
+- Goal: Routing reads the published score/ordering only.
+- Value: `low`/`think` serve the bracket ends from one lookup;
+  `lowest` keeps full-list cheapest. No new virtual IDs.
+- Shipped: Score-ordered legs, fallback chain. Test: score order
+  honored; legacy fallback intact.
 
 ## Iter 41 — Long-tail min-value fallback (planned)
 
-- Goal: For models outside the popularity tiers, route to cheapest
+- Goal: For models outside the bracket, route to cheapest
   eligible offering per type.
 - Value: Rare models still get served at the best possible price.
 - Shipped: `decide_ordered_virtual` falls back to `Price` orientation
-  when no popularity data. Test: rare model → cheapest offering.
+  when the model is out-of-bracket. Test: rare model → cheapest.
 
-## Iter 42 — UI: popularity visibility (planned)
+## Iter 42 — UI: catalog TOP tab (planned)
 
-- Goal: Show popularity data in the debug UI.
-- Value: Operators can see why a model was chosen.
-- Shipped: `/ui` Overview: top 10 coding-popular; Models: popularity
-  column; Inspector: rank in candidate table. Metrics: popularity
-  counters. Test: popularity section + metrics present.
+- Goal: Show the score, its arithmetic, and its flags in the catalog.
+- Value: Operators debug routing inputs without guessing.
+- Shipped: `/models?tab=top` (generic models, arithmetic, flags);
+  overview bracket counts + fetch health; inspector score rank.
+  Test: tab renders; flags present; metrics set.
 
 ## Iter 43 — Default switch + validation (planned)
 
-- Goal: Make popularity-first the default for `low`/`think`, with rollback.
-- Value: The system learns what developers want and routes accordingly.
-- Shipped: `ROUTING_DEFAULT` flag (default: `popularity_first`). A/B
+- Goal: Make the score ordering the default for `low`/`think`,
+  with rollback.
+- Value: The system routes on usage-backed value instead of
+  static tier sorts.
+- Shipped: `ROUTING_DEFAULT` flag (default: `score_first`). A/B
   validation. Rollback path. Test: flag honored; fallback works.
 
 ## After Iter 43
