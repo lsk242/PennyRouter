@@ -1364,7 +1364,7 @@ impl Router {
             let source = if ranking
                 .as_ref()
                 .and_then(|r| r.models.get(&model_id))
-                .is_some_and(|classes| classes.iter().any(|c| &c.class == &class))
+                .is_some_and(|classes| classes.iter().any(|c| c.class == class))
             {
                 "published ranking order"
             } else {
@@ -2078,10 +2078,7 @@ impl Router {
                     "any scored tier",
                 )
             } else {
-                (
-                    "best quality signals (tier, then score, then cost)",
-                    "high",
-                )
+                ("best quality signals (tier, then score, then cost)", "high")
             };
             let reason = format!(
                 "tier '{tier_name}': {rule}; quality floor = {floor}; \
@@ -3007,24 +3004,25 @@ impl Router {
                     // match first, then any offering of the pinned
                     // provider+class (the pick's tag may be gone after
                     // a reload); nothing when the offering vanished.
-                    let live_offering = snapshot
-                        .models
-                        .get(&pin.backend_model)
-                        .and_then(|offerings| {
-                            offerings
-                                .iter()
-                                .find(|o| {
-                                    o.provider_name == pin.provider
-                                        && o.precision_class == pin.precision_class
-                                        && o.tag == pin.tag
-                                })
-                                .or_else(|| {
-                                    offerings.iter().find(|o| {
+                    let live_offering =
+                        snapshot
+                            .models
+                            .get(&pin.backend_model)
+                            .and_then(|offerings| {
+                                offerings
+                                    .iter()
+                                    .find(|o| {
                                         o.provider_name == pin.provider
                                             && o.precision_class == pin.precision_class
+                                            && o.tag == pin.tag
                                     })
-                                })
-                        });
+                                    .or_else(|| {
+                                        offerings.iter().find(|o| {
+                                            o.provider_name == pin.provider
+                                                && o.precision_class == pin.precision_class
+                                        })
+                                    })
+                            });
                     UiSession {
                         key_suffix: pin.key_suffix.clone(),
                         model: model.clone(),
@@ -3052,8 +3050,7 @@ impl Router {
                 })
                 .collect();
             sessions.sort_by(|a, b| {
-                (&a.model, &a.key_suffix, &a.provider)
-                    .cmp(&(&b.model, &b.key_suffix, &b.provider))
+                (&a.model, &a.key_suffix, &a.provider).cmp(&(&b.model, &b.key_suffix, &b.provider))
             });
             sessions
         };
