@@ -1364,7 +1364,7 @@ impl Router {
             let source = if ranking
                 .as_ref()
                 .and_then(|r| r.models.get(&model_id))
-                .is_some_and(|classes| classes.iter().any(|c| &c.class == &class))
+                .is_some_and(|classes| classes.iter().any(|c| c.class == class))
             {
                 "published ranking order"
             } else {
