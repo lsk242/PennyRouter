@@ -7,7 +7,7 @@ one layer, is testable alone, and adds value on its own. Rule for every
 fetch added here: sync-time only, never the request path, at most 1
 request/hour per source (self-imposed; upstream tiers allow more).
 
-## Iter 38 — Score data sources (AA + OpenRouter Data API)
+## Iter 42 — Score data sources (AA + OpenRouter Data API)
 
 **Goal:** Download everything the score needs, versioned and cited.
 
@@ -67,7 +67,7 @@ AA_API_KEY=
 # RANKINGS_API_KEY=  (already exists; unchanged)
 ```
 
-## Iter 39 — Catalog score v2 + brackets
+## Iter 43 — Catalog score v2 + brackets
 
 **Goal:** One versioned score per offering plus the top-usage
 bracket, computed offline in a single transaction.
@@ -107,7 +107,7 @@ ends for `low`/`think`.
 - `lowest` semantics untouched (full-list cheapest, no floor).
 - v9→v10 migration idempotent; unprocessed rows keep `NULL`.
 
-## Iter 40 — Gateway consumes the score
+## Iter 44 — Gateway consumes the score
 
 **Goal:** Routing reads the published score/ordering and stops
 recomputing quality math.
@@ -137,7 +137,7 @@ gateway deploys.
   - Missing score column → legacy ordering (rollback path).
   - Budget/tool/context gates still apply on top of score order.
 
-## Iter 41 — Long-tail min-value fallback
+## Iter 45 — Long-tail min-value fallback
 
 **Goal:** For models outside the bracket, always route to the
 cheapest eligible offering per type.
@@ -160,7 +160,7 @@ cheapest eligible offering per type.
   - `openrouter/pair/model/rare-model` → cheapest offering.
   - Bracket members never take the long-tail path.
 
-## Iter 42 — UI: catalog TOP tab
+## Iter 46 — UI: catalog TOP tab
 
 **Goal:** Show the score, its arithmetic, and its flags where the
 score is made.
@@ -190,7 +190,7 @@ bracket decision is inspectable per model.
   - Overview shows bracket counts + fetch health.
   - Empty/unscored artifact degrades gracefully, no NaN.
 
-## Iter 43 — Default switch + validation
+## Iter 47 — Default switch + validation
 
 **Goal:** Make the score ordering the default for `low`/`think`,
 with rollback.
@@ -216,20 +216,20 @@ static tier sorts.
 ## Dependencies
 
 ```
-Iter 38 (data)
-  └─▶ Iter 39 (score + brackets)
-       └─▶ Iter 40 (gateway consume)
-            ├─▶ Iter 41 (long-tail)
-            └─▶ Iter 42 (TOP tab)
-                 └─▶ Iter 43 (default switch)
+Iter 42 (data)
+  └─▶ Iter 43 (score + brackets)
+       └─▶ Iter 44 (gateway consume)
+            ├─▶ Iter 45 (long-tail)
+            └─▶ Iter 46 (TOP tab)
+                 └─▶ Iter 47 (default switch)
 ```
 
 ## Rollout Plan
 
-1. **Iter 38-39**: Ship data + score. No gateway behavior change.
-2. **Iter 40-41**: Ship consumption. Default stays `legacy`.
-3. **Iter 42**: Ship TOP tab. Operators compare score vs legacy.
-4. **Iter 43**: Switch default. Monitor. Rollback if needed.
+1. **Iter 42-43**: Ship data + score. No gateway behavior change.
+2. **Iter 44-45**: Ship consumption. Default stays `legacy`.
+3. **Iter 46**: Ship TOP tab. Operators compare score vs legacy.
+4. **Iter 47**: Switch default. Monitor. Rollback if needed.
 
 ## Open Decisions
 
@@ -240,5 +240,5 @@ Iter 38 (data)
 3. **Think max spend**: `THINK_MAX_COST_TASK` value (proposal
    suggests $0.05/task), versioned with the ruleset.
 4. **Trend window**: 7-day recent vs 3 priors, or 30-day smoothing?
-5. **`cost_per_task` coverage**: Iter 38 measures it; v2 uses AA
+5. **`cost_per_task` coverage**: Iter 42 measures it; v2 uses AA
    cost only where universal.

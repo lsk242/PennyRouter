@@ -896,7 +896,7 @@ only when pulled forward deliberately.
   plus a catalog overview assertion; full workspace green
   (43 suites). fmt/clippy binaries still absent here, same
   manual-style note as Iter 39.
-## Iter 38 — Score data sources (planned)
+## Iter 42 — Score data sources (planned)
 
 - Goal: Fetch AA free API (indexes, version, cost/task, pricing)
   and OpenRouter Data API (activity trend, app-rankings, task
@@ -907,7 +907,7 @@ only when pulled forward deliberately.
   store → read; keyless → empty.
 - Proposal: `docs/proposals/2026-11-18-popularity-first-ranking.md`.
 
-## Iter 39 — Catalog score v2 + brackets (planned)
+## Iter 43 — Catalog score v2 + brackets (planned)
 
 - Goal: Version-gated `rank-v2` (performance × efficiency ×
   activity) plus the top-usage bracket with `low`/`think` ends.
@@ -915,7 +915,7 @@ only when pulled forward deliberately.
 - Shipped: `rank_score.rs` v2, bracket + flags in `process.rs`,
   TOP rollup. Test: stale excluded; popular-unscored flagged.
 
-## Iter 40 — Gateway consumes score (planned)
+## Iter 44 — Gateway consumes score (planned)
 
 - Goal: Routing reads the published score/ordering only.
 - Value: `low`/`think` serve the bracket ends from one lookup;
@@ -923,7 +923,7 @@ only when pulled forward deliberately.
 - Shipped: Score-ordered legs, fallback chain. Test: score order
   honored; legacy fallback intact.
 
-## Iter 41 — Long-tail min-value fallback (planned)
+## Iter 45 — Long-tail min-value fallback (planned)
 
 - Goal: For models outside the bracket, route to cheapest
   eligible offering per type.
@@ -931,7 +931,7 @@ only when pulled forward deliberately.
 - Shipped: `decide_ordered_virtual` falls back to `Price` orientation
   when the model is out-of-bracket. Test: rare model → cheapest.
 
-## Iter 42 — UI: catalog TOP tab (planned)
+## Iter 46 — UI: catalog TOP tab (planned)
 
 - Goal: Show the score, its arithmetic, and its flags in the catalog.
 - Value: Operators debug routing inputs without guessing.
@@ -939,7 +939,7 @@ only when pulled forward deliberately.
   overview bracket counts + fetch health; inspector score rank.
   Test: tab renders; flags present; metrics set.
 
-## Iter 43 — Default switch + validation (planned)
+## Iter 47 — Default switch + validation (planned)
 
 - Goal: Make the score ordering the default for `low`/`think`,
   with rollback.
@@ -948,4 +948,4 @@ only when pulled forward deliberately.
 - Shipped: `ROUTING_DEFAULT` flag (default: `score_first`). A/B
   validation. Rollback path. Test: flag honored; fallback works.
 
-## After Iter 43
+## After Iter 47
