@@ -313,6 +313,13 @@ cheap judge model, classifier-based routing.
       index to the gateway `/minindex/` filter with an example.
       Test: gateway `ui_shows_smart_and_minindex_examples` +
       catalog overview assertion; full workspace green.
+- [x] **Iter 41 — Adaptive offline tiers.** Each AA index type
+      calibrates its own tertile cutoffs from used models (best
+      vote wins, ties prefer coding); coding falls back to fixed
+      70/40 below 5 used models, intelligence sits out; cutoffs
+      recorded in `score_cutoffs` (`aa-adaptive-v1`). Test: 11
+      scorer units + adaptive processing test; full workspace
+      green.
 - [ ] **Iter 42 — Score data sources.** AA free API (indexes,
       version, cost/task, pricing) + OpenRouter Data API (activity
       trend, app-rankings, task classes); ≤1 req/hour per source.
