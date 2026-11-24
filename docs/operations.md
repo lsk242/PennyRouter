@@ -240,9 +240,12 @@ with an env var — no routes, no background work, no request-path
 code runs when they are off.
 
 - Gateway: `GATEWAY_UI=1` registers `GET /ui` on the gateway port:
-  snapshot version and counts, the virtual menu, per-model
-  offerings with the ranking's default-orientation provider order,
-  free offers, a routing inspector, and the metrics text. Rendered
+  snapshot version and counts, the virtual menu, free offers, the
+  ranking's default-orientation provider order, a Models tab
+  mirroring the catalog UI models page (free/tiers/batch/decision
+  tabs with counts, score ordering, per-row arithmetic behind each
+  rank number; `?models_tab=` selects the tab, `?q=` filters model
+  ids), a routing inspector, and the metrics text. Rendered
   on demand from short read locks; routing never waits on it and it
   never calls upstream. Unset (the default) leaves `/ui` (and
   `/ui/preview`) unregistered — the paths fall through to the

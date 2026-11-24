@@ -105,7 +105,7 @@ pub struct EndpointRank {
 }
 
 /// Per-model signals the value score reads (Iter 34).
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct ModelSignals {
     pub aa_intelligence_index: Option<i64>,
     pub aa_coding_index: Option<i64>,

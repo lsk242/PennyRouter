@@ -944,7 +944,20 @@ fn preview_json(preview: &routing::Preview) -> serde_json::Value {
 /// path.
 const UI_TEMPLATE: &str = include_str!("../templates/ui.html");
 
-async fn ui_page(State(state): State<AppState>) -> Response {
+/// Debug-UI query: the models tab mirrors the catalog UI models page,
+/// so it takes the same tab (`models_tab`: free/tiers/batch/decision,
+/// default tiers) and `q` model-id filter. Tab links carry `#models`
+/// so the page reopens on the tab after the reload.
+#[derive(Debug, Deserialize)]
+struct UiParams {
+    models_tab: Option<String>,
+    q: Option<String>,
+}
+
+async fn ui_page(
+    State(state): State<AppState>,
+    Query(params): Query<UiParams>,
+) -> Response {
     fn esc(text: &str) -> String {
         text.replace('&', "&amp;")
             .replace('<', "&lt;")
@@ -970,6 +983,121 @@ async fn ui_page(State(state): State<AppState>) -> Response {
     fn text(value: &Option<String>) -> String {
         value.as_deref().map(esc).unwrap_or_else(|| "-".to_string())
     }
+    fn num(value: Option<f64>, decimals: usize) -> String {
+        match value {
+            Some(value) => format!("{value:.decimals$}"),
+            None => "-".to_string(),
+        }
+    }
+    fn score_cell(value: Option<f64>) -> String {
+        match value {
+            Some(value) => format!("<strong>{value:.1}</strong>"),
+            None => "<span class=\"muted\">-</span>".to_string(),
+        }
+    }
+    /// Effective cost under the balanced profile — the same blend the
+    /// catalog UI splits its free/tiers tabs on.
+    fn offering_cost(entry: &routing::UiOffering) -> Option<f64> {
+        pennyrouter_catalog::effective_cost(
+            entry.price_prompt,
+            entry.price_completion,
+            entry.price_cache_read,
+            entry.price_cache_write,
+            &pennyrouter_catalog::balanced_profile(),
+            entry.promo_discount.unwrap_or(0.0),
+        )
+    }
+    /// The AA index the score actually used, per `rank_basis`.
+    fn offering_index(entry: &routing::UiOffering) -> Option<i64> {
+        match entry.rank_basis.as_deref() {
+            Some("coding") => entry.signals.aa_coding_index,
+            Some("intel") => entry.signals.aa_intelligence_index,
+            Some("agentic") => entry.signals.aa_agentic_index,
+            _ => None,
+        }
+    }
+    fn rank_key(entry: &routing::UiOffering) -> pennyrouter_catalog::RankKey<'_> {
+        pennyrouter_catalog::RankKey {
+            score: entry.rank_score,
+            throughput_tps: entry.throughput_tps,
+            latency_ms: entry.latency_ms,
+            uptime_pct: entry.uptime_pct,
+            provider: &entry.provider,
+            tag: entry.tag.as_deref(),
+        }
+    }
+    /// The full arithmetic behind one row, from the stored components —
+    /// the same text as the catalog UI models page.
+    fn breakdown(entry: &routing::UiOffering) -> String {
+        let cost = offering_cost(entry);
+        let index = offering_index(entry);
+        let factor = if entry.supports_decisions == Some(true) {
+            1.0
+        } else {
+            pennyrouter_catalog::precision_factor(entry.precision_class.as_deref())
+        };
+        let Some(score) = entry.rank_score else {
+            let why = if cost.is_none() {
+                "no price"
+            } else if index.is_none() {
+                "no AA index"
+            } else {
+                "not processed"
+            };
+            return format!("no score: {why}");
+        };
+        let quality = entry.rank_quality.unwrap_or(0.0);
+        let efficiency = entry.rank_efficiency.unwrap_or(0.0);
+        let popularity = entry.rank_popularity.unwrap_or(0.0);
+        let share = entry.signals.popularity_share.unwrap_or(0.0);
+        let cost_task = cost
+            .map(|cost| cost * pennyrouter_catalog::TASK_TOKENS)
+            .unwrap_or(0.0);
+        let mut lines = vec![
+            format!(
+                "quality    = {} ({}) × {:.2} ({}) = {:.2}",
+                index.unwrap_or(0),
+                entry.rank_basis.as_deref().unwrap_or("-"),
+                factor,
+                entry.precision_class.as_deref().unwrap_or("unknown"),
+                quality
+            ),
+            format!(
+                "cost/task  = {} $/M × {} tokens = ${:.6}",
+                money(cost),
+                pennyrouter_catalog::TASK_TOKENS as u64,
+                cost_task
+            ),
+            format!(
+                "efficiency = {:.2} / ({:.6} + {:.2}) = {:.4}",
+                pennyrouter_catalog::COST_HALF_CREDIT,
+                cost_task,
+                pennyrouter_catalog::COST_HALF_CREDIT,
+                efficiency
+            ),
+            format!(
+                "popularity = (1 + {:.2} × {:.3}) / {:.2} = {:.4}",
+                pennyrouter_catalog::POP_WEIGHT,
+                share,
+                1.0 + pennyrouter_catalog::POP_WEIGHT,
+                popularity
+            ),
+            format!(
+                "rank_score = {:.2} × {:.4} × {:.4} = {:.1}",
+                quality, efficiency, popularity, score
+            ),
+            format!(
+                "tie-breaks = {} tok/s · {} ms · {}% uptime",
+                num(entry.throughput_tps, 0),
+                num(entry.latency_ms, 0),
+                num(entry.uptime_pct, 1)
+            ),
+        ];
+        if let Some(ruleset) = entry.rank_ruleset.as_deref() {
+            lines.push(format!("ruleset    = {ruleset}"));
+        }
+        lines.join("\n")
+    }
     // One buffer per tab panel; each region below shadows `page` to
     // its buffer so the existing builders move over unchanged.
     let mut overview = String::new();
@@ -984,7 +1112,6 @@ async fn ui_page(State(state): State<AppState>) -> Response {
         match router.as_ref() {
             None => {
                 page.push_str("<p>Routing: <strong>off</strong> (no catalog).</p>");
-                models_panel.push_str("<p>Routing off: no catalog loaded.</p>");
             }
             Some(router) => {
                 let summary = router.ui_summary();
@@ -1043,56 +1170,6 @@ async fn ui_page(State(state): State<AppState>) -> Response {
                             .unwrap_or_default(),
                     ));
                 }
-                {
-                    let page = &mut models_panel;
-                    for (model_id, coding, entries) in &summary.models {
-                        let coding = coding.map(|n| format!(" · coding {n}")).unwrap_or_default();
-                        page.push_str(&format!("<h3>{}{}</h3>", esc(model_id), coding));
-                        page.push_str(
-                            "<table><tr><th>provider</th><th>tag</th>\
-                    <th>prompt $/M</th><th>completion $/M</th><th>class</th>\
-                    <th>tier</th><th>score</th></tr>",
-                        );
-                        for entry in entries {
-                            page.push_str(&format!(
-                                "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td>\
-                        <td>{}</td><td>{}</td><td>{}</td></tr>",
-                                esc(&entry.provider),
-                                text(&entry.tag),
-                                money(entry.price_prompt),
-                                money(entry.price_completion),
-                                class(&entry.precision_class),
-                                text(&entry.quality_tier),
-                                entry
-                                    .quality_score
-                                    .map(|s| format!("{s:.3}"))
-                                    .unwrap_or_else(|| "-".to_string()),
-                            ));
-                        }
-                        page.push_str("</table>");
-                        if let Some((_, classes)) =
-                            summary.ranking.iter().find(|(id, _)| id == model_id)
-                        {
-                            page.push_str("<p>Ranking order (default): ");
-                            let orders: Vec<String> = classes
-                                .iter()
-                                .map(|rank| {
-                                    format!(
-                                        "{}: {}",
-                                        rank.class.as_deref().unwrap_or("any"),
-                                        rank.order
-                                            .iter()
-                                            .map(|name| esc(name))
-                                            .collect::<Vec<_>>()
-                                            .join(" &gt; ")
-                                    )
-                                })
-                                .collect();
-                            page.push_str(&orders.join("<br>"));
-                            page.push_str("</p>");
-                        }
-                    }
-                }
                 if !summary.free_offers.is_empty() {
                     page.push_str("<h3>Free offers</h3><table>\
                     <tr><th>model</th><th>provider</th><th>tag</th><th>valid until (unix)</th></tr>");
@@ -1108,6 +1185,203 @@ async fn ui_page(State(state): State<AppState>) -> Response {
                         ));
                     }
                     page.push_str("</table>");
+                }
+                if !summary.ranking.is_empty() {
+                    page.push_str("<h3>Ranking order (default)</h3>");
+                    for (model_id, classes) in &summary.ranking {
+                        let orders: Vec<String> = classes
+                            .iter()
+                            .map(|rank| {
+                                format!(
+                                    "{}: {}",
+                                    rank.class.as_deref().unwrap_or("any"),
+                                    rank.order
+                                        .iter()
+                                        .map(|name| esc(name))
+                                        .collect::<Vec<_>>()
+                                        .join(" &gt; ")
+                                )
+                            })
+                            .collect();
+                        page.push_str(&format!(
+                            "<p><strong>{}</strong>: {}</p>",
+                            esc(model_id),
+                            orders.join("<br>")
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    {
+        // Models tab: the same table as the catalog UI models page —
+        // one row per offering with the score arithmetic — over the
+        // live routing snapshot instead of the artifact on disk. Same
+        // tabs, same split, same ordering, same breakdown text; only
+        // the model cell is plain text (the gateway has no
+        // per-model endpoints page to link to) and an unknown
+        // precision class renders as `-` like the rest of this UI.
+        let page = &mut models_panel;
+        match router.as_ref() {
+            None => {
+                page.push_str("<p>Routing off: no catalog loaded.</p>");
+            }
+            Some(router) => {
+                let summary = router.ui_summary();
+                // Tiers is the default view: it is where most offerings
+                // live, and the free tab is one click away.
+                let tab = params.models_tab.as_deref().unwrap_or("tiers");
+                let tab = match tab {
+                    "free" | "batch" | "decision" => tab,
+                    _ => "tiers",
+                };
+                let search = params.q.as_deref().unwrap_or_default().to_lowercase();
+
+                let mut rows: Vec<(&str, &routing::UiOffering)> = Vec::new();
+                for (model_id, _, entries) in &summary.models {
+                    for entry in entries {
+                        rows.push((model_id.as_str(), entry));
+                    }
+                }
+                let batch_count = rows
+                    .iter()
+                    .filter(|row| row.0.ends_with(":batch"))
+                    .count();
+                let free_count = rows
+                    .iter()
+                    .filter(|(id, entry)| {
+                        !id.ends_with(":batch")
+                            && entry.supports_decisions != Some(true)
+                            && offering_cost(entry) == Some(0.0)
+                    })
+                    .count();
+                let tier_count = rows
+                    .iter()
+                    .filter(|(id, entry)| {
+                        !id.ends_with(":batch")
+                            && entry.supports_decisions != Some(true)
+                            && offering_cost(entry) != Some(0.0)
+                    })
+                    .count();
+                let decision_count = rows
+                    .iter()
+                    .filter(|(id, entry)| {
+                        !id.ends_with(":batch") && entry.supports_decisions == Some(true)
+                    })
+                    .count();
+
+                rows.retain(|(id, entry)| match tab {
+                    "batch" => id.ends_with(":batch"),
+                    "decision" => {
+                        !id.ends_with(":batch") && entry.supports_decisions == Some(true)
+                    }
+                    "tiers" => {
+                        !id.ends_with(":batch")
+                            && entry.supports_decisions != Some(true)
+                            && offering_cost(entry) != Some(0.0)
+                    }
+                    _ => {
+                        !id.ends_with(":batch")
+                            && entry.supports_decisions != Some(true)
+                            && offering_cost(entry) == Some(0.0)
+                    }
+                });
+                if !search.is_empty() {
+                    rows.retain(|(id, _)| id.to_lowercase().contains(&search));
+                }
+                rows.sort_by(|a, b| {
+                    pennyrouter_catalog::compare_rank(&rank_key(a.1), &rank_key(b.1))
+                });
+
+                let tab_link = |name: &str, label: &str, count: usize| {
+                    let active = if name == tab { " class=\"active\"" } else { "" };
+                    format!(
+                        "<a href=\"/ui?models_tab={name}#models\"{active}>{label} ({count})</a>"
+                    )
+                };
+                page.push_str(&format!(
+                    "<nav class=\"subtabs\">{}{}{}{}</nav>\
+                    <form method=\"get\" action=\"/ui#models\">\
+                    <input type=\"hidden\" name=\"models_tab\" value=\"{}\">\
+                    <input type=\"search\" name=\"q\" value=\"{}\" placeholder=\"filter model id\"> \
+                    <button type=\"submit\" class=\"action\">filter</button></form>",
+                    tab_link("free", "free", free_count),
+                    tab_link("tiers", "tiers", tier_count),
+                    tab_link("batch", "batch", batch_count),
+                    tab_link("decision", "decision", decision_count),
+                    esc(tab),
+                    esc(&search),
+                ));
+
+                if rows.is_empty() {
+                    page.push_str("<p>No offerings in this tab.</p>");
+                } else {
+                    page.push_str("<div class=\"table-scroll\">");
+                    page.push_str(
+                        "<table><tr><th>#</th><th>model</th><th>provider</th><th>tag</th>\
+                        <th>precision</th><th>index</th><th>factor</th><th>quality</th>\
+                        <th>in $/M</th><th>out $/M</th><th>cost/task</th><th>efficiency</th>\
+                        <th>popularity</th><th>score</th><th>tok/s</th><th>latency</th>\
+                        <th>uptime</th></tr>",
+                    );
+                    // Data columns above; the breakdown row spans all of them.
+                    const COLUMNS: usize = 17;
+                    for (position, (model_id, entry)) in rows.iter().enumerate() {
+                        let index = match offering_index(entry) {
+                            Some(value) => format!(
+                                "{value} <span class=\"muted\">{}</span>",
+                                esc(entry.rank_basis.as_deref().unwrap_or("-"))
+                            ),
+                            None => "<span class=\"muted\">-</span>".to_string(),
+                        };
+                        let factor = if entry.supports_decisions == Some(true) {
+                            1.0
+                        } else {
+                            pennyrouter_catalog::precision_factor(
+                                entry.precision_class.as_deref(),
+                            )
+                        };
+                        let cost_task = offering_cost(entry)
+                            .map(|cost| cost * pennyrouter_catalog::TASK_TOKENS);
+                        page.push_str(&format!(
+                            "<tr><td><a class=\"ranknum\" href=\"#calc-{}\" title=\"show calculation\">{}</a></td>\
+                            <td>{}</td>\
+                            <td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{:.2}</td>\
+                            <td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td>\
+                            <td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+                            position + 1,
+                            position + 1,
+                            esc(model_id),
+                            esc(&entry.provider),
+                            text(&entry.tag),
+                            class(&entry.precision_class),
+                            index,
+                            factor,
+                            num(entry.rank_quality, 2),
+                            money(entry.price_prompt),
+                            money(entry.price_completion),
+                            cost_task
+                                .map(|cost| format!("${cost:.5}"))
+                                .unwrap_or_else(|| "-".to_string()),
+                            num(entry.rank_efficiency, 3),
+                            num(entry.rank_popularity, 3),
+                            score_cell(entry.rank_score),
+                            num(entry.throughput_tps, 0),
+                            num(entry.latency_ms, 0),
+                            num(entry.uptime_pct, 1),
+                        ));
+                        page.push_str(&format!(
+                            "<tr id=\"calc-{}\" class=\"calc-row\"><td colspan=\"{}\">\
+                            <div class=\"calc\">calc — {} / {}<br>{}</div>\
+                            <a href=\"#\" class=\"muted\">close</a></td></tr>",
+                            position + 1,
+                            COLUMNS,
+                            esc(model_id),
+                            esc(&entry.provider),
+                            esc(&breakdown(entry)).replace('\n', "<br>")
+                        ));
+                    }
+                    page.push_str("</table></div>");
                 }
             }
         }

@@ -6,7 +6,8 @@
 //! the fallback proxy like any unknown path.
 
 use pennyrouter_catalog::{
-    Catalog, EndpointIndex, EndpointRow, EndpointScore, ModelIndex, ModelRow,
+    Catalog, EndpointIndex, EndpointRank, EndpointRow, EndpointScore, EndpointSpeed, ModelIndex,
+    ModelRow,
 };
 use std::{
     net::SocketAddr,
@@ -581,7 +582,8 @@ fn preview_db_inner(test: &str, cheap_price: f64, _tag: &str) -> std::path::Path
 
 /// Display unit is $/M tokens: the priced preview_db fixture (1.0,
 /// 2.0, 3.0 $/tok) renders ×1e6 in the /ui models table; stored class
-/// "unknown" renders as `-`, like missing.
+/// "unknown" renders as `-`, like missing; the scored row shows its
+/// AA index with the basis the score used.
 #[tokio::test]
 async fn ui_prices_render_per_million_tokens() {
     let _guard = lock_env().await;
@@ -620,6 +622,20 @@ async fn ui_prices_render_per_million_tokens() {
                     aa_coding_index: Some(71),
                     aa_agentic_index: None,
                     aa_cost_per_task: None,
+                },
+            )
+            .unwrap();
+        catalog
+            .update_endpoint_rank(
+                cheap.id,
+                &EndpointRank {
+                    rank_score: Some(70.0),
+                    rank_quality: Some(71.0),
+                    rank_efficiency: Some(0.99),
+                    rank_popularity: Some(1.0),
+                    rank_basis: Some("coding".to_string()),
+                    rank_ruleset: Some("rank-v1".to_string()),
+                    ranked_at: Some("t".to_string()),
                 },
             )
             .unwrap();
@@ -662,8 +678,237 @@ async fn ui_prices_render_per_million_tokens() {
         "stored class unknown renders as -, not unknown"
     );
     assert!(
-        body.contains("coding 71"),
-        "AA coding index shows on the model header"
+        body.contains("71 <span class=\"muted\">coding</span>"),
+        "AA coding index shows in the index column with its basis"
+    );
+    assert!(
+        body.contains("<strong>70.0</strong>"),
+        "rank score renders in the score column"
+    );
+}
+
+/// Models tab mirrors the catalog UI models page: the same
+/// free/tiers/batch/decision tabs with counts, the same `q` filter,
+/// score ordering with the same breakdown rows — over the live
+/// snapshot. Assertions scope to the models panel: the inspector
+/// lists the same providers in its own tables.
+fn models_panel(body: &str) -> &str {
+    body.split("id=\"tab-models\"")
+        .nth(1)
+        .and_then(|tail| tail.split("id=\"tab-inspector\"").next())
+        .expect("models panel sits before the inspector panel")
+}
+
+#[tokio::test]
+async fn ui_models_tab_mirrors_catalog_models_page() {
+    let _guard = lock_env().await;
+    std::env::set_var("GATEWAY_UI", "1");
+    let db = preview_db("models-tab", 1.0);
+    {
+        // Score two tiers rows out of provider-alpha order, with a
+        // speed tie-breaker on the winner.
+        let catalog = Catalog::open(&db).unwrap();
+        catalog
+            .update_model_index(
+                "m/code",
+                &ModelIndex {
+                    aa_intelligence_index: None,
+                    aa_coding_index: Some(60),
+                    aa_agentic_index: None,
+                    aa_cost_per_task: None,
+                },
+            )
+            .unwrap();
+        for (provider, score) in [("Cheap", 10.0), ("Exp", 30.0)] {
+            let row = catalog
+                .endpoints_for("m/code")
+                .unwrap()
+                .into_iter()
+                .find(|e| e.provider_name == provider)
+                .unwrap();
+            catalog
+                .update_endpoint_rank(
+                    row.id,
+                    &EndpointRank {
+                        rank_score: Some(score),
+                        rank_quality: Some(60.0),
+                        rank_efficiency: Some(0.5),
+                        rank_popularity: Some(1.0),
+                        rank_basis: Some("coding".to_string()),
+                        rank_ruleset: Some("rank-v1".to_string()),
+                        ranked_at: Some("t".to_string()),
+                    },
+                )
+                .unwrap();
+        }
+        let row = catalog
+            .endpoints_for("m/code")
+            .unwrap()
+            .into_iter()
+            .find(|e| e.provider_name == "Exp")
+            .unwrap();
+        catalog
+            .update_endpoint_speed(
+                row.id,
+                &EndpointSpeed {
+                    latency_ms: Some(200.0),
+                    throughput_tps: Some(50.0),
+                    uptime_pct: Some(99.0),
+                },
+            )
+            .unwrap();
+    }
+    let router = Arc::new(pennyrouter_gateway::routing::Router::load(&db).expect("router loads"));
+    let state =
+        pennyrouter_gateway::AppState::new("http://127.0.0.1:9".to_string()).with_router(router);
+    let app = pennyrouter_gateway::app_with_state(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let gw = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    std::env::remove_var("GATEWAY_UI");
+
+    // Default view is tiers: paid rows only, score-ordered.
+    let body = client()
+        .get(format!("http://{gw}/ui"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    let models = models_panel(&body);
+    for tab in ["free (1)", "tiers (4)", "batch (0)", "decision (1)"] {
+        assert!(models.contains(tab), "tab count {tab} shown");
+    }
+    assert!(
+        models.contains("<a href=\"/ui?models_tab=tiers#models\" class=\"active\">"),
+        "tiers tab marked active"
+    );
+    for provider in ["Cheap", "Mid", "Exp", "PaidP"] {
+        assert!(
+            models.contains(&format!("<td>{provider}</td>")),
+            "{provider} listed in tiers"
+        );
+    }
+    for provider in ["FreeP", "ScoreP"] {
+        assert!(
+            !models.contains(&format!("<td>{provider}</td>")),
+            "{provider} stays out of tiers"
+        );
+    }
+    let exp = models.find("<td>Exp</td>").unwrap();
+    let cheap = models.find("<td>Cheap</td>").unwrap();
+    assert!(exp < cheap, "score 30 sorts before score 10");
+    for header in ["cost/task", "efficiency", "popularity", "tok/s"] {
+        assert!(
+            models.contains(&format!("<th>{header}</th>")),
+            "column {header} present"
+        );
+    }
+    assert!(
+        models.contains("<strong>30.0</strong>"),
+        "score renders in the score column"
+    );
+    assert!(
+        models.contains("60 <span class=\"muted\">coding</span>"),
+        "index column shows the basis the score used"
+    );
+    assert!(
+        models.contains("href=\"#calc-1\""),
+        "rank number links to the calc row"
+    );
+    assert!(
+        models.contains("colspan=\"17\""),
+        "calc row spans the table width"
+    );
+    assert!(
+        models.contains("rank_score = 60.00 × 0.5000 × 1.0000 = 30.0"),
+        "breakdown shows the full arithmetic"
+    );
+    assert!(
+        models.contains("tie-breaks = 50 tok/s"),
+        "speed renders as a tie-breaker"
+    );
+
+    // Free tab: only the zero-cost offering.
+    let body = client()
+        .get(format!("http://{gw}/ui?models_tab=free"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    let models = models_panel(&body);
+    assert!(models.contains("<td>FreeP</td>"), "free offering listed");
+    assert!(
+        !models.contains("<td>Cheap</td>"),
+        "paid offerings stay out of the free tab"
+    );
+
+    // Decision tab: only decisions-capable offerings.
+    let body = client()
+        .get(format!("http://{gw}/ui?models_tab=decision"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    let models = models_panel(&body);
+    assert!(models.contains("<td>ScoreP</td>"), "decision offering listed");
+    assert!(
+        !models.contains("<td>Cheap</td>"),
+        "non-decision offerings stay out of the decision tab"
+    );
+
+    // Batch tab: empty here, like a catalog without batch variants.
+    let body = client()
+        .get(format!("http://{gw}/ui?models_tab=batch"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        models_panel(&body).contains("No offerings in this tab."),
+        "empty tab explains itself"
+    );
+
+    // The `q` filter narrows to matching model ids.
+    let body = client()
+        .get(format!("http://{gw}/ui?models_tab=tiers&q=m/code"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    let models = models_panel(&body);
+    assert!(models.contains("<td>Cheap</td>"), "matching model kept");
+    assert!(
+        !models.contains("<td>PaidP</td>"),
+        "m/free row filtered out by q=m/code"
+    );
+
+    // Unknown tabs fall back to tiers.
+    let body = client()
+        .get(format!("http://{gw}/ui?models_tab=nope"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    let models = models_panel(&body);
+    assert!(
+        models.contains("<td>Cheap</td>"),
+        "unknown tab falls back to tiers"
+    );
+    assert!(
+        models.contains("<a href=\"/ui?models_tab=tiers#models\" class=\"active\">"),
+        "tiers tab marked active on fallback"
     );
 }
 
