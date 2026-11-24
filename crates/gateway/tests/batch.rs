@@ -316,3 +316,183 @@ async fn batch_minindex_floor_scopes_to_indexed_batch_models() {
     let body: serde_json::Value = res.json().await.unwrap();
     assert_eq!(body["error"]["code"], "no_eligible_offering");
 }
+
+/// Trap fixture: the batch variants would win every interactive leg
+/// if they were eligible — TrapB is the cheapest paid offering with
+/// the best quality signals and decisions support, FreeB the best
+/// free one — so each interactive pick below proves the exclusion.
+fn build_db_sneaky(path: &std::path::Path) {
+    let _ = std::fs::remove_file(path);
+    let catalog = Catalog::open(path).unwrap();
+    catalog.init().unwrap();
+    // (model, provider, price, tier, score, decisions)
+    let rows = [
+        ("m/cheap", "Cheap", 5.0, "low", 0.1, None),
+        ("m/good", "Good", 6.0, "high", 0.9, None),
+        ("m/free", "Freebie", 0.0, "standard", 0.4, None),
+        ("m/thinker", "Thinker", 7.0, "high", 0.5, Some(1)),
+        ("m/trap:batch", "TrapB", 1.0, "high", 0.99, Some(1)),
+        ("m/freeloader:batch", "FreeB", 0.0, "high", 0.99, Some(1)),
+    ];
+    for (model, provider, price, tier, score, decisions) in rows {
+        catalog
+            .insert_model(&ModelRow {
+                model_id: model.to_string(),
+                name: model.to_string(),
+                source: "test".to_string(),
+                payload: "{}".to_string(),
+                fetched_at: "t".to_string(),
+            })
+            .unwrap();
+        catalog
+            .insert_endpoint(&EndpointRow {
+                id: 0,
+                model_id: model.to_string(),
+                provider_name: provider.to_string(),
+                payload: "{}".to_string(),
+                fetched_at: "t".to_string(),
+                price_prompt: None,
+                price_completion: None,
+                price_cache_read: None,
+                price_cache_write: None,
+                precision_class: None,
+                quantization: None,
+                promo_discount: None,
+                processed_at: None,
+                supports_tools: None,
+                supports_decisions: None,
+                quality_tier: None,
+                quality_score: None,
+                scored_at: None,
+                score_model: None,
+                score_prompt: None,
+                price_override_tokens: None,
+            })
+            .unwrap();
+        let id = catalog.endpoints_for(model).unwrap()[0].id;
+        catalog
+            .update_endpoint_index(
+                id,
+                &EndpointIndex {
+                    price_prompt: Some(price),
+                    price_completion: Some(price),
+                    price_cache_read: None,
+                    price_cache_write: None,
+                    precision_class: Some("fp16".to_string()),
+                    quantization: None,
+                    promo_discount: None,
+                    processed_at: "t".to_string(),
+                    supports_tools: None,
+                    supports_decisions: decisions,
+                    price_override_tokens: None,
+                },
+            )
+            .unwrap();
+        catalog
+            .update_endpoint_score(
+                id,
+                &EndpointScore {
+                    quality_tier: Some(tier.to_string()),
+                    quality_score: Some(score),
+                    scored_at: "t".to_string(),
+                    score_model: None,
+                    score_prompt: None,
+                },
+            )
+            .unwrap();
+    }
+}
+
+fn provider_of(res: &reqwest::Response) -> String {
+    res.headers()
+        .get("x-pennyrouter-provider")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string()
+}
+
+#[tokio::test]
+async fn interactive_tiers_never_route_to_batch_variants() {
+    let db = scratch_db("sneaky-route");
+    build_db_sneaky(&db);
+    let seen = Arc::new(Mutex::new(Upstream::default()));
+    let mock = spawn_mock(mock_app(seen.clone())).await;
+    let gw = spawn_gateway(mock, &db).await;
+
+    // Each trap would win its leg if batch variants were eligible.
+    for (model, provider) in [
+        ("openrouter/pair/low", "Cheap"),
+        ("openrouter/pair/think", "Good"),
+        ("openrouter/pair/free", "Freebie"),
+        ("openrouter/pair/decision", "Thinker"),
+        ("m/cheap/lowest", "Cheap"),
+    ] {
+        let res = post_chat(gw, model).await;
+        assert_eq!(res.status(), StatusCode::OK, "{model} routes");
+        assert_eq!(provider_of(&res), provider, "{model} skips the batch trap");
+    }
+    // No decisions-capable interactive free offering exists (FreeB is
+    // batch): fail closed instead of serving it.
+    let res = post_chat(gw, "openrouter/pair/decision/free").await;
+    assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body: serde_json::Value = res.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "no_eligible_offering");
+    // The batch tier itself still serves the trap.
+    let res = post_chat(gw, "openrouter/pair/batch").await;
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(provider_of(&res), "TrapB");
+    let guard = seen.lock().unwrap();
+    assert_eq!(
+        guard.hits.get("TrapB"),
+        Some(&1),
+        "TrapB serves the batch leg only: {:?}",
+        guard.hits
+    );
+    assert!(
+        !guard.hits.contains_key("FreeB"),
+        "free batch variant never serves: {:?}",
+        guard.hits
+    );
+    assert!(
+        guard
+            .models
+            .values()
+            .all(|model| !model.ends_with(":batch") || *model == "m/trap:batch"),
+        "upstream rewrites stay interactive except the batch leg: {:?}",
+        guard.models
+    );
+}
+
+#[test]
+fn interactive_previews_never_list_batch_variants() {
+    let db = scratch_db("sneaky-preview");
+    build_db_sneaky(&db);
+    let router = pennyrouter_gateway::routing::Router::load(&db).expect("router loads");
+    for model in [
+        "openrouter/pair/low",
+        "openrouter/pair/think",
+        "openrouter/pair/free",
+        "openrouter/pair/decision",
+        "openrouter/pair/decision/free",
+        "m/cheap/lowest",
+    ] {
+        let preview = router.preview(model, None, 10);
+        assert!(
+            preview
+                .candidates
+                .iter()
+                .all(|c| !c.model_id.ends_with(":batch")),
+            "{model} lists no batch variants: {:?}",
+            preview
+                .candidates
+                .iter()
+                .map(|c| &c.model_id)
+                .collect::<Vec<_>>()
+        );
+    }
+    let low = router.preview("openrouter/pair/low", None, 5);
+    assert_eq!(low.fresh.as_ref().unwrap().provider, "Cheap");
+    let think = router.preview("openrouter/pair/think", None, 5);
+    assert_eq!(think.fresh.as_ref().unwrap().provider, "Good");
+}

@@ -128,7 +128,9 @@ session.
   `free` shares the legacy free path under its own session namespace;
   `low` picks the cheapest priceable known-class offering across
   models; `think` picks the best quality signals across models. Tiers
-  are disjoint: zero-cost serves `free` only. Per-key daily free caps
+  are disjoint: zero-cost serves `free` only, and `:batch` variants
+  serve the `batch` tier only (async pricing can't serve interactive
+  requests, so every interactive leg excludes them). Per-key daily free caps
   live upstream, not here: OpenRouter's `GET /api/v1/key` reports each
   key's `free_model_daily_requests` used/limit/remaining, and an
   exhausted key surfaces as 429s — which the free leg already turns
@@ -154,8 +156,11 @@ session.
   catalog-sync env) nominates such ids for individual fetching.
 - Batch tier: `openrouter/pair/[privacy/]batch` routes to the cheapest
   `:batch`-variant offering (OpenRouter's async batch API pricing,
-  model ids ending in `:batch`). Paid-only keeps tier disjointness
-  (zero-cost serves `free` only); no quality floor and no
+  model ids ending in `:batch`). Batch variants serve this tier
+  exclusively: the interactive tiers (`free`/`low`/`think`/
+  `decision`/`lowest`) exclude them, even zero-cost ones, since async
+  pricing can't serve interactive requests; explicit direct or pinned
+  ids naming a variant still resolve. No quality floor and no
   precision-class requirement — the suffix is the capability match,
   like `decision`. Same tool/budget/throttle/stickiness semantics as
   the other cross-model tiers, same chat path (the body is rewritten

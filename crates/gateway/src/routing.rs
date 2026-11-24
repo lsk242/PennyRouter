@@ -241,10 +241,12 @@ pub const FREE_MODEL: &str = "openrouter/free";
 /// cheapest basic offering, `think` = best-quality offering,
 /// `decision` (Iter 24) = cheapest decisions-capable offering
 /// (behavior-scoring models), `batch` = cheapest `:batch`-variant
-/// offering (async batch API pricing). Tiers compare by the
-/// documented price metric (blended input/output/cache effective
-/// cost) with eligibility before price; FP resolution is a separate
-/// class, never a silent substitute.
+/// offering (async batch API pricing). Batch variants serve the
+/// `batch` tier exclusively — every other cross-model pick excludes
+/// them. Tiers compare by the documented price metric (blended
+/// input/output/cache effective cost) with eligibility before
+/// price; FP resolution is a separate class, never a silent
+/// substitute.
 ///
 /// `smart` (Iter 26) is not a tier but a classifier mode: the gateway
 /// calls a decision model to pick one of `free`/`lowest`/`low`
@@ -622,7 +624,11 @@ fn free_eligible(
 /// Batch-variant model id (OpenRouter `:batch` suffix): the async
 /// batch API's discounted pricing. The `batch` tier matches only
 /// these, the way the `decision` tier matches only
-/// decisions-capable offerings.
+/// decisions-capable offerings — and every interactive leg
+/// (`free`/`low`/`think`/`decision`/`lowest`, routing and preview)
+/// excludes them: async pricing can't serve interactive requests.
+/// Explicit ids (direct model, pinned `model/<id>`) still resolve —
+/// the caller named the variant on purpose.
 fn is_batch_model(model_id: &str) -> bool {
     model_id.ends_with(":batch")
 }
@@ -1956,10 +1962,11 @@ impl Router {
 
     /// Cross-model pick for the `low` (cheapest effective cost) and
     /// `think` (best quality signals) tiers. Eligibility filters
-    /// before price compares: caller restrictions, priceable, and a
+    /// before price compares: caller restrictions, priceable, a
     /// known precision class (unknown-class offerings are not eligible
     /// for tiered routing, so FP resolution never substitutes
-    /// silently).
+    /// silently), and non-batch model ids (`:batch` variants serve
+    /// the `batch` tier only).
     fn decide_ordered_virtual(
         &self,
         snapshot: &Snapshot,
@@ -1985,6 +1992,9 @@ impl Router {
             .flatten()
             .filter(|o| {
                 constraints.allows(&o.provider_name)
+                    // Batch variants serve the `batch` tier only: async
+                    // batch pricing can't serve interactive requests.
+                    && !is_batch_model(&o.model_id)
                     // Tiers are disjoint by design: zero-cost serves `free`
                     // only, never `low`/`think`.
                     && inline_cost(o).is_some_and(|cost| cost > 0.0)
@@ -2110,7 +2120,7 @@ impl Router {
             };
             let reason = format!(
                 "tier '{tier_name}': {rule}; quality floor = {floor}; \
-                 eligible = paid priceable + known precision class + provider allow + tools + context + budget; \
+                 eligible = paid priceable + known precision class + non-batch model + provider allow + tools + context + budget; \
                  throttle-skipped;{} later requests keep this provider (sticky).",
                 minindex_note(minindex),
             );
@@ -2150,6 +2160,8 @@ impl Router {
                     // Paid only: zero-cost serves the free paths.
                     && inline_cost(o).is_some_and(|cost| cost > 0.0)
                     && is_known_precision_class(o.precision_class.as_deref().unwrap_or("unknown"))
+                    // Batch variants serve the `batch` tier only.
+                    && !is_batch_model(&o.model_id)
             })
             .collect();
         if base.is_empty() {
@@ -2222,8 +2234,8 @@ impl Router {
             })?;
         if let Some(key) = key {
             let reason = "cross-model 'lowest' tag: cheapest paid priceable offering with a known \
-                 precision class, no quality floor; eligible = paid + known class + provider allow + \
-                 tools + context + budget; effective cost = balanced prompt/completion/cache blend, \
+                 precision class, no quality floor; eligible = paid + known class + non-batch model + \
+                 provider allow + tools + context + budget; effective cost = balanced prompt/completion/cache blend, \
                  promo applied; tie-break cost, model id, provider; exactly-once; \
                  later requests keep this provider (sticky)."
                 .to_string();
@@ -2268,6 +2280,8 @@ impl Router {
             .filter(|o| {
                 constraints.allows(&o.provider_name)
                     && o.supports_decisions == Some(true)
+                    // Batch variants serve the `batch` tier only.
+                    && !is_batch_model(&o.model_id)
                     // Tiers are disjoint by design, like `low`/`think`:
                     // the bare scope serves paid only, zero-cost serves
                     // the `/free` scope.
@@ -2362,7 +2376,7 @@ impl Router {
             let reason = format!(
                 "tier 'decision': cheapest decisions-capable offering ({cost_scope}); no quality floor, \
                  no precision-class requirement (capability match replaces it); \
-                 eligible = decisions-capable + provider allow + tools + context + budget; \
+                 eligible = decisions-capable + non-batch model + provider allow + tools + context + budget; \
                  effective cost = balanced prompt/completion/cache blend, promo applied; \
                  tie-break cost, model id, provider; throttle-skipped;{} \
                  later requests keep this provider (sticky).",
@@ -2383,14 +2397,15 @@ impl Router {
     }
 
     /// Cross-model pick for the `batch` tier: cheapest `:batch`
-    ///-variant offering (async batch API pricing), paid only — tiers
-    /// are disjoint by design, like `low`/`think`, so a zero-cost
-    /// batch variant (if one ever appears) serves the `free` tier.
-    /// Same shape as [`Router::decide_decision`]: no quality floor
-    /// and no precision-class requirement (the `:batch` suffix is
-    /// the capability match), with the same tool, budget,
-    /// throttle, stickiness, and deterministic tie-breaks as the
-    /// other cross-model picks.
+    ///-variant offering (async batch API pricing), paid only.
+    /// Batch variants serve this tier exclusively — the interactive
+    /// tiers exclude them (even zero-cost ones), since async
+    /// pricing can't serve interactive requests. Same shape as
+    /// [`Router::decide_decision`]: no quality floor and no
+    /// precision-class requirement (the `:batch` suffix is the
+    /// capability match), with the same tool, budget, throttle,
+    /// stickiness, and deterministic tie-breaks as the other
+    /// cross-model picks.
     fn decide_batch(
         &self,
         snapshot: &Snapshot,
@@ -2556,6 +2571,9 @@ impl Router {
                 offerings.iter().filter(|o| {
                     constraints.allows(&o.provider_name)
                         && free_eligible(ranking.as_ref(), model_id, o, now)
+                        // Batch variants serve the `batch` tier only,
+                        // even when zero-cost.
+                        && !is_batch_model(model_id)
                         && meets_minindex(snapshot, model_id, minindex)
                 })
             })
@@ -2656,7 +2674,7 @@ impl Router {
             };
             let reason = format!(
                 "{leg}: zero-cost offering (catalog zeros or unexpired promo window); \
-                 majority precision class '{}'; eligible = provider allow + free-eligible + tools; \
+                 majority precision class '{}'; eligible = provider allow + free-eligible + non-batch model + tools; \
                  order = {order} (effective cost = balanced prompt/completion/cache blend, promo applied); \
                  throttle-skipped;{} pin re-routes if it stops being free, else later requests keep \
                  this provider (sticky).",
@@ -3873,6 +3891,7 @@ impl Router {
                 offerings.iter().filter(|o| {
                     constraints.allows(&o.provider_name)
                         && free_eligible(ranking, model_id, o, now)
+                        && !is_batch_model(model_id)
                         && meets_minindex(snapshot, model_id, minindex)
                 })
             })
@@ -3964,6 +3983,7 @@ impl Router {
                 constraints.allows(&o.provider_name)
                     && inline_cost(o).is_some_and(|cost| cost > 0.0)
                     && is_known_precision_class(o.precision_class.as_deref().unwrap_or("unknown"))
+                    && !is_batch_model(&o.model_id)
                     && meets_minindex(snapshot, &o.model_id, minindex)
             })
             .collect();
@@ -4062,6 +4082,7 @@ impl Router {
                 constraints.allows(&o.provider_name)
                     && inline_cost(o).is_some_and(|cost| cost > 0.0)
                     && is_known_precision_class(o.precision_class.as_deref().unwrap_or("unknown"))
+                    && !is_batch_model(&o.model_id)
             })
             .collect();
         if base.is_empty() {
@@ -4131,6 +4152,7 @@ impl Router {
             .filter(|o| {
                 constraints.allows(&o.provider_name)
                     && o.supports_decisions == Some(true)
+                    && !is_batch_model(&o.model_id)
                     && (free_only || inline_cost(o).is_some_and(|cost| cost > 0.0))
                     && (!free_only || free_eligible(ranking, &o.model_id, o, now))
                     && meets_minindex(snapshot, &o.model_id, minindex)
