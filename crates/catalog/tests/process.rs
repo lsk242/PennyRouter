@@ -560,6 +560,8 @@ fn processing_extracts_decision_support_from_model_payload() {
 /// Iter 32: offline scoring fills tiers from the coding index —
 /// high at 70+, standard at 40+, low below — with the normalized
 /// index as the score. Models without an index stay untiered.
+/// (Iter 41: no usage here, so coding tiers through its fixed
+/// fallback while intelligence sits out.)
 #[test]
 fn processing_scores_offline_tiers_from_coding_index() {
     use pennyrouter_catalog::RULESET_VERSION;
@@ -642,6 +644,94 @@ fn processing_scores_offline_tiers_from_coding_index() {
         catalog.get_meta("score_prompt").unwrap().as_deref(),
         Some(RULESET_VERSION)
     );
+}
+
+/// Iter 41: each index type calibrates its own cutoffs from used
+/// models — six used models with intelligence 10..=60 tier by
+/// tertiles (high 43+, standard 27+), coding absent falls back to
+/// fixed cutoffs with n=0, and the run records both in
+/// `score_cutoffs`.
+#[test]
+fn processing_scores_adaptive_tiers_from_intelligence_and_usage() {
+    let dir = common::scratch("adaptive-tiers");
+    let db = dir.join("work.db");
+    let catalog = Catalog::open(&db).unwrap();
+    catalog.init().unwrap();
+    let model = |id: &str, slug: &str, intel: i64| ModelRow {
+        model_id: id.into(),
+        name: id.into(),
+        source: "openrouter".into(),
+        payload: format!(
+            r#"{{"canonical_slug":"{slug}","benchmarks":{{"artificial_analysis":{{"intelligence_index":{intel}}}}}}}"#
+        ),
+        fetched_at: "t".into(),
+    };
+    let endpoint = |id: &str| EndpointRow {
+        id: 0,
+        model_id: id.into(),
+        provider_name: "p".into(),
+        payload: "{}".into(),
+        fetched_at: "t".into(),
+        price_prompt: None,
+        price_completion: None,
+        price_cache_read: None,
+        price_cache_write: None,
+        precision_class: None,
+        quantization: None,
+        promo_discount: None,
+        processed_at: None,
+        supports_tools: None,
+        supports_decisions: None,
+        quality_tier: None,
+        quality_score: None,
+        scored_at: None,
+        score_model: None,
+        score_prompt: None,
+        price_override_tokens: None,
+    };
+    let mut popular = serde_json::Map::new();
+    for (n, intel) in [60, 50, 40, 30, 20, 10].iter().enumerate() {
+        let id = format!("m/i{n}");
+        let slug = format!("s/i{n}");
+        catalog.insert_model(&model(&id, &slug, *intel)).unwrap();
+        catalog.insert_endpoint(&endpoint(&id)).unwrap();
+        popular.insert(slug, serde_json::Value::from(1000 - n as u64));
+    }
+    catalog
+        .set_meta(
+            "popular_tokens",
+            &serde_json::Value::Object(popular).to_string(),
+        )
+        .unwrap();
+
+    let summary = run_processing(&catalog, PROCESSED_AT).unwrap();
+    assert_eq!(summary.processed, 6);
+    assert_eq!(summary.scored, 6);
+
+    for (n, tier, score) in [
+        (0, "high", 0.6),
+        (1, "high", 0.5),
+        (2, "standard", 0.4),
+        (3, "standard", 0.3),
+        (4, "low", 0.2),
+        (5, "low", 0.1),
+    ] {
+        let ep = &catalog.endpoints_for(&format!("m/i{n}")).unwrap()[0];
+        assert_eq!(ep.quality_tier.as_deref(), Some(tier), "model m/i{n}");
+        assert_eq!(ep.quality_score, Some(score), "model m/i{n}");
+        assert_eq!(ep.score_model.as_deref(), Some("offline"));
+    }
+
+    let cutoffs: serde_json::Value =
+        serde_json::from_str(&catalog.get_meta("score_cutoffs").unwrap().unwrap()).unwrap();
+    assert_eq!(cutoffs["intelligence"]["source"], "adaptive");
+    assert_eq!(cutoffs["intelligence"]["n"], 6);
+    assert_eq!(cutoffs["intelligence"]["high"], 43);
+    assert_eq!(cutoffs["intelligence"]["standard"], 27);
+    assert_eq!(cutoffs["coding"]["source"], "fixed");
+    assert_eq!(cutoffs["coding"]["n"], 0);
+    assert_eq!(cutoffs["coding"]["high"], 70);
+    assert_eq!(cutoffs["coding"]["standard"], 40);
 }
 
 /// Iter 32: an existing tier (e.g. an online verdict) always wins —

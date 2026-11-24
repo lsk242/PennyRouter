@@ -222,19 +222,25 @@ fn run_rank_scoring(
     Ok(ranked)
 }
 
-/// Offline scoring pass (Iter 32): deterministic tiers from the AA
-/// coding index just distilled above — free, no model calls. Only
-/// untiered rows are filled: a tier already on the row (e.g. an
-/// online verdict, when `catalog-process` re-runs processing over a
-/// scored DB) always wins. Models without a coding index stay
-/// untiered for the online scorers.
+/// Offline scoring pass (Iter 32, adaptive since Iter 41):
+/// deterministic tiers from the AA indexes just distilled above —
+/// free, no model calls. Each type calibrates its own cutoffs
+/// from used models (see `OfflineScorer`); only untiered rows are
+/// filled, so a tier already on the row (e.g. an online verdict,
+/// when `catalog-process` re-runs processing over a scored DB)
+/// always wins. Models with no index stay untiered for the online
+/// scorers.
 fn run_offline_scoring(
     catalog: &Catalog,
     endpoints: &[crate::store::EndpointRow],
     processed_at: &str,
 ) -> Result<usize, Error> {
     use crate::score::Scorer;
-    let scorer = OfflineScorer::new(catalog.aa_coding_map()?);
+    let scorer = OfflineScorer::new(
+        catalog.aa_coding_map()?,
+        catalog.aa_intelligence_map()?,
+        catalog.model_popularity_map()?,
+    );
     let identity = scorer.identity();
     let mut scored = 0;
     for ep in endpoints {
@@ -262,7 +268,29 @@ fn run_offline_scoring(
     catalog.set_meta("scored_count", &scored.to_string())?;
     catalog.set_meta("score_model", &identity.model)?;
     catalog.set_meta("score_prompt", &identity.prompt_version)?;
+    catalog.set_meta("score_cutoffs", &cutoff_meta(&scorer))?;
     Ok(scored)
+}
+
+/// `score_cutoffs` audit meta (Iter 41): per index type, the
+/// cutoffs the offline pass tiered with, the calibration size,
+/// and where the cutoffs came from. Skipped types carry no
+/// cutoffs — their models stayed untiered this run.
+fn cutoff_meta(scorer: &OfflineScorer) -> String {
+    fn one(rule: &crate::score_offline::IndexCutoffs) -> Value {
+        let mut fields = serde_json::Map::new();
+        if let Some(cutoffs) = rule.cutoffs {
+            fields.insert("high".to_string(), Value::from(cutoffs.high));
+            fields.insert("standard".to_string(), Value::from(cutoffs.standard));
+        }
+        fields.insert("n".to_string(), Value::from(rule.n as u64));
+        fields.insert("source".to_string(), Value::from(rule.source.as_str()));
+        Value::Object(fields)
+    }
+    let mut meta = serde_json::Map::new();
+    meta.insert("coding".to_string(), one(scorer.coding_cutoffs()));
+    meta.insert("intelligence".to_string(), one(scorer.intel_cutoffs()));
+    Value::Object(meta).to_string()
 }
 
 /// One Artificial Analysis index from a model payload (Iter 31):

@@ -192,10 +192,14 @@ apply. Never commit real values.
 Which model does the scoring is config, not tribal knowledge
 (renamed judging → scoring in Iter 32). Tiers come from two paths:
 
-- Offline (default, Iter 32): every sync derives deterministic
-  tiers from the AA coding index — 70+ `high`, 40+ `standard`,
-  else `low` — free, no model calls. Models without an index
-  stay untiered.
+- Offline (default, Iter 32; adaptive since Iter 41): every
+  sync derives deterministic tiers per AA index type — coding
+  and intelligence each calibrate tertile cutoffs from used
+  models (minimum 5, `:batch` twins excluded), each type votes
+  on its own scale, best vote wins (ties prefer coding) — free,
+  no model calls. Below the minimum, coding falls back to the
+  fixed 70+ `high` / 40+ `standard` / else `low` cutoffs while
+  intelligence sits out. Models without an index stay untiered.
 - Online (on demand): `catalog-process --score-backend
   baseten|modal|openrouter` scores through an LLM leg. An online
   verdict always wins over the offline tier on its row.
@@ -221,8 +225,10 @@ the working directory. Selection rules:
   `score_prompt` columns; `score_backend`, `score_model`,
   `score_prompt`, `score_calls`, `score_spend_usd` in `sync_meta`),
   so a quality tier always traces back to the exact scorer + prompt
-  behind it. Offline rows read `offline` / `aa-coding-v1`. Rows
-  scored before Iter 15 read back `NULL` provenance.
+  behind it. Offline rows read `offline` / `aa-adaptive-v1`
+  (older rows: `aa-coding-v1`); the run's cutoffs sit in the
+  `score_cutoffs` sync meta. Rows scored before Iter 15 read
+  back `NULL` provenance.
 - `--sample-rate`, `--max-calls`, `--max-spend-usd` override the
   file policy. Scorers never run on the request path — this is all
   offline batch, before publish.
@@ -234,9 +240,12 @@ with an env var — no routes, no background work, no request-path
 code runs when they are off.
 
 - Gateway: `GATEWAY_UI=1` registers `GET /ui` on the gateway port:
-  snapshot version and counts, the virtual menu, per-model
-  offerings with the ranking's default-orientation provider order,
-  free offers, a routing inspector, and the metrics text. Rendered
+  snapshot version and counts, the virtual menu, free offers, the
+  ranking's default-orientation provider order, a Models tab
+  mirroring the catalog UI models page (free/tiers/batch/decision
+  tabs with counts, score ordering, per-row arithmetic behind each
+  rank number; `?models_tab=` selects the tab, `?q=` filters model
+  ids), a routing inspector, and the metrics text. Rendered
   on demand from short read locks; routing never waits on it and it
   never calls upstream. Unset (the default) leaves `/ui` (and
   `/ui/preview`) unregistered — the paths fall through to the

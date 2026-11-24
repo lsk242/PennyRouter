@@ -313,3 +313,32 @@ cheap judge model, classifier-based routing.
       index to the gateway `/minindex/` filter with an example.
       Test: gateway `ui_shows_smart_and_minindex_examples` +
       catalog overview assertion; full workspace green.
+- [x] **Iter 41 — Adaptive offline tiers.** Each AA index type
+      calibrates its own tertile cutoffs from used models (best
+      vote wins, ties prefer coding); coding falls back to fixed
+      70/40 below 5 used models, intelligence sits out; cutoffs
+      recorded in `score_cutoffs` (`aa-adaptive-v1`). Test: 11
+      scorer units + adaptive processing test; full workspace
+      green.
+- [ ] **Iter 42 — Score data sources.** AA free API (indexes,
+      version, cost/task, pricing) + OpenRouter Data API (activity
+      trend, app-rankings, task classes); ≤1 req/hour per source.
+      Test: fixtures → parse → store → read; keyless → empty.
+- [ ] **Iter 43 — Catalog score v2 + brackets.** Activity/trend in
+      rank_score; latest-version gating + missing-score flags;
+      low/think popular brackets; model-level TOP rollup. Test:
+      stale excluded; popular-unscored flagged; bracket ends right.
+- [ ] **Iter 44 — Gateway consumes score.** Routing reads published
+      score/ordering only; low/think brackets; `lowest` full-list
+      cheapest. No new virtual IDs. Test: score order honored;
+      legacy fallback intact.
+- [ ] **Iter 45 — Long-tail min-value fallback.** Unknown models →
+      cheapest provider per type. Test: rare model → cheapest offering.
+- [ ] **Iter 46 — UI: catalog TOP tab.** Generic-model TOP list with
+      score arithmetic, activity/trend, flags; inspector shows
+      score rank. Test: tab renders; flags present; metrics set.
+- [ ] **Iter 47 — Default switch + validation.** `ROUTING_DEFAULT`
+      flag (default: `score_first`). A/B validation. Rollback
+      path. Test: flag honored; fallback to legacy.
+
+## After Iter 47

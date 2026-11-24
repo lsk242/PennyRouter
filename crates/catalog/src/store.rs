@@ -105,7 +105,7 @@ pub struct EndpointRank {
 }
 
 /// Per-model signals the value score reads (Iter 34).
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct ModelSignals {
     pub aa_intelligence_index: Option<i64>,
     pub aa_coding_index: Option<i64>,
@@ -381,6 +381,35 @@ impl Catalog {
             let id: String = r.get(0)?;
             let index: i64 = r.get(1)?;
             Ok((id, index))
+        })?;
+        rows.collect::<Result<HashMap<_, _>, _>>()
+            .map_err(Error::from)
+    }
+
+    /// Intelligence index per model where known, for offline tiers.
+    pub fn aa_intelligence_map(&self) -> Result<HashMap<String, i64>, Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT model_id, aa_intelligence_index FROM models WHERE aa_intelligence_index IS NOT NULL",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            let id: String = r.get(0)?;
+            let index: i64 = r.get(1)?;
+            Ok((id, index))
+        })?;
+        rows.collect::<Result<HashMap<_, _>, _>>()
+            .map_err(Error::from)
+    }
+
+    /// Trailing-window token counts per model where known, for
+    /// tier calibration.
+    pub fn model_popularity_map(&self) -> Result<HashMap<String, i64>, Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT model_id, popularity_tokens FROM models WHERE popularity_tokens IS NOT NULL",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            let id: String = r.get(0)?;
+            let tokens: i64 = r.get(1)?;
+            Ok((id, tokens))
         })?;
         rows.collect::<Result<HashMap<_, _>, _>>()
             .map_err(Error::from)

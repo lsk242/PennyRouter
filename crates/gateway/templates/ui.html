@@ -97,10 +97,25 @@
     background: #0a0d1c; border: 3px solid var(--line); box-shadow: 6px 6px 0 #000;
     padding: 1rem; overflow: auto; font-size: 0.8rem; max-width: 70rem; color: var(--ink);
   }
-  input[type="text"], input[type="password"], input:not([type]) {
+  input[type="text"], input[type="password"], input[type="search"], input:not([type]) {
     font: inherit; font-size: 0.9rem; padding: 0.45rem 0.6rem;
     border: 2px solid var(--cyan); background: #0a0d1c; color: var(--ink);
   }
+  /* Models tab: same inner tab bar + expandable score arithmetic as
+     the catalog UI models page. */
+  nav.subtabs { display: flex; gap: 0.5rem; flex-wrap: wrap; margin: 1em 0; }
+  nav.subtabs a {
+    font-size: 0.85rem; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase;
+    text-decoration: none; color: var(--muted); background: var(--bg);
+    border: 2px solid var(--line); box-shadow: 3px 3px 0 #000; padding: 0.5em 0.9em;
+  }
+  nav.subtabs a:hover { color: var(--ink); border-color: var(--cyan); }
+  nav.subtabs a.active { color: var(--bg); background: var(--cyan); border-color: var(--cyan); }
+  .muted { color: var(--muted); }
+  .ranknum { font-weight: 700; }
+  .calc { font-size: 0.8em; color: var(--muted); white-space: pre-wrap; padding: 0.4em 0; }
+  .calc-row { display: none; }
+  .calc-row:target { display: table-row; }
   button.action {
     font: inherit; font-size: 0.85rem; font-weight: 700; letter-spacing: 0.06em; cursor: pointer;
     padding: 0.45rem 0.9rem; border: 2px solid var(--green); box-shadow: 3px 3px 0 #000;

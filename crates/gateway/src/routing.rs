@@ -31,8 +31,9 @@
 //!   fails a request.
 
 use pennyrouter_catalog::{
-    compare_signals, endpoint_tag, load_ranking_doc, verify_ranking, Catalog, EndpointRow,
-    RankOrientation, RankingDocument, Signals, SCHEMA_VERSION,
+    compare_signals, endpoint_tag, load_ranking_doc, verify_ranking, Catalog, EndpointRank,
+    EndpointRow, EndpointSpeed, ModelSignals, RankOrientation, RankingDocument, Signals,
+    SCHEMA_VERSION,
 };
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -75,6 +76,19 @@ pub struct Offering {
     /// base price. `None` means no tier (or an old catalog) — the
     /// offering always fits.
     pub price_override_tokens: Option<u64>,
+    /// Value-score components (Iter 34): carried so the debug UI
+    /// mirrors the catalog models table. Routing ignores them until
+    /// the score-first switch lands.
+    pub rank_score: Option<f64>,
+    pub rank_quality: Option<f64>,
+    pub rank_efficiency: Option<f64>,
+    pub rank_popularity: Option<f64>,
+    pub rank_basis: Option<String>,
+    pub rank_ruleset: Option<String>,
+    /// Speed/availability tie-breakers (Iter 34), display-only.
+    pub throughput_tps: Option<f64>,
+    pub latency_ms: Option<f64>,
+    pub uptime_pct: Option<f64>,
 }
 
 /// In-memory routing snapshot: model id to its offerings in load order.
@@ -85,6 +99,9 @@ pub struct Snapshot {
     /// (Iter 31): loaded for display and future filters; routing
     /// ignores it until a consumer lands.
     pub aa_coding_index: HashMap<String, i64>,
+    /// Per-model signals the value score reads (Iter 34): AA indexes
+    /// + popularity share. Display-only for the debug UI models tab.
+    pub model_signals: HashMap<String, ModelSignals>,
     pub artifact_version: Option<String>,
     /// Pinned popular slugs (`openrouter/<slug>` menu ids) from the
     /// catalog's Data API fetch; empty on old/keyless artifacts.
@@ -1060,15 +1077,22 @@ impl Router {
                 )));
             }
         }
+        let ranks = catalog
+            .endpoint_ranks()
+            .map_err(|e| RouteError(e.to_string()))?;
+        let speeds = catalog
+            .endpoint_speeds()
+            .map_err(|e| RouteError(e.to_string()))?;
         let mut models: HashMap<String, Vec<Offering>> = HashMap::new();
         for ep in catalog
             .all_endpoints()
             .map_err(|e| RouteError(e.to_string()))?
         {
+            let offering = offering_from(&ep, ranks.get(&ep.id), speeds.get(&ep.id));
             models
                 .entry(ep.model_id.clone())
                 .or_default()
-                .push(offering_from(&ep));
+                .push(offering);
         }
         // Popularity pins ride the same artifact (empty on old or
         // keyless syncs); the menu and `/ui` read them from here.
@@ -1077,9 +1101,13 @@ impl Router {
         let aa_coding_index = catalog
             .aa_coding_map()
             .map_err(|e| RouteError(e.to_string()))?;
+        let model_signals = catalog
+            .model_signals()
+            .map_err(|e| RouteError(e.to_string()))?;
         Ok(Snapshot {
             models,
             aa_coding_index,
+            model_signals,
             artifact_version,
             popular_models,
             popular_apps,
@@ -2863,9 +2891,25 @@ pub struct UiOffering {
     pub tag: Option<String>,
     pub price_prompt: Option<f64>,
     pub price_completion: Option<f64>,
+    pub price_cache_read: Option<f64>,
+    pub price_cache_write: Option<f64>,
+    pub promo_discount: Option<f64>,
     pub precision_class: Option<String>,
     pub quality_tier: Option<String>,
     pub quality_score: Option<f64>,
+    pub supports_decisions: Option<bool>,
+    pub rank_score: Option<f64>,
+    pub rank_quality: Option<f64>,
+    pub rank_efficiency: Option<f64>,
+    pub rank_popularity: Option<f64>,
+    pub rank_basis: Option<String>,
+    pub rank_ruleset: Option<String>,
+    pub throughput_tps: Option<f64>,
+    pub latency_ms: Option<f64>,
+    pub uptime_pct: Option<f64>,
+    /// The parent model's signals (AA indexes + popularity share);
+    /// default (all `None`) when the model row is missing.
+    pub signals: ModelSignals,
 }
 
 /// Session pin info for debug UI (Iter 37; Iter 39 adds the exact
@@ -2935,6 +2979,11 @@ impl Router {
             .iter()
             .map(|(model_id, offerings)| {
                 let coding = snapshot.aa_coding_index.get(model_id).copied();
+                let signals = snapshot
+                    .model_signals
+                    .get(model_id)
+                    .cloned()
+                    .unwrap_or_default();
                 let mut entries: Vec<UiOffering> = offerings
                     .iter()
                     .map(|o| UiOffering {
@@ -2942,9 +2991,23 @@ impl Router {
                         tag: o.tag.clone(),
                         price_prompt: o.price_prompt,
                         price_completion: o.price_completion,
+                        price_cache_read: o.price_cache_read,
+                        price_cache_write: o.price_cache_write,
+                        promo_discount: o.promo_discount,
                         precision_class: o.precision_class.clone(),
                         quality_tier: o.quality_tier.clone(),
                         quality_score: o.quality_score,
+                        supports_decisions: o.supports_decisions,
+                        rank_score: o.rank_score,
+                        rank_quality: o.rank_quality,
+                        rank_efficiency: o.rank_efficiency,
+                        rank_popularity: o.rank_popularity,
+                        rank_basis: o.rank_basis.clone(),
+                        rank_ruleset: o.rank_ruleset.clone(),
+                        throughput_tps: o.throughput_tps,
+                        latency_ms: o.latency_ms,
+                        uptime_pct: o.uptime_pct,
+                        signals: signals.clone(),
                     })
                     .collect();
                 entries.sort_by(|a, b| a.provider.cmp(&b.provider));
@@ -4471,7 +4534,11 @@ fn resolve_manifest(manifest_path: &Path) -> Result<(PathBuf, Option<String>), R
     Ok((dir.join(&manifest.db_file), Some(manifest.version.clone())))
 }
 
-fn offering_from(ep: &EndpointRow) -> Offering {
+fn offering_from(
+    ep: &EndpointRow,
+    rank: Option<&EndpointRank>,
+    speed: Option<&EndpointSpeed>,
+) -> Offering {
     let tag = serde_json::from_str(&ep.payload)
         .ok()
         .and_then(|v: serde_json::Value| endpoint_tag(&v).map(str::to_string));
@@ -4491,6 +4558,15 @@ fn offering_from(ep: &EndpointRow) -> Offering {
         supports_tools: ep.supports_tools.map(|v| v != 0),
         supports_decisions: ep.supports_decisions.map(|v| v != 0),
         price_override_tokens: ep.price_override_tokens.map(|v| v.max(0) as u64),
+        rank_score: rank.and_then(|rank| rank.rank_score),
+        rank_quality: rank.and_then(|rank| rank.rank_quality),
+        rank_efficiency: rank.and_then(|rank| rank.rank_efficiency),
+        rank_popularity: rank.and_then(|rank| rank.rank_popularity),
+        rank_basis: rank.and_then(|rank| rank.rank_basis.clone()),
+        rank_ruleset: rank.and_then(|rank| rank.rank_ruleset.clone()),
+        throughput_tps: speed.and_then(|speed| speed.throughput_tps),
+        latency_ms: speed.and_then(|speed| speed.latency_ms),
+        uptime_pct: speed.and_then(|speed| speed.uptime_pct),
     }
 }
 
@@ -4773,6 +4849,15 @@ mod tests {
             supports_tools: None,
             supports_decisions: None,
             price_override_tokens: None,
+            rank_score: None,
+            rank_quality: None,
+            rank_efficiency: None,
+            rank_popularity: None,
+            rank_basis: None,
+            rank_ruleset: None,
+            throughput_tps: None,
+            latency_ms: None,
+            uptime_pct: None,
         }
     }
 
@@ -4800,6 +4885,7 @@ mod tests {
             ]),
             artifact_version: None,
             aa_coding_index: HashMap::new(),
+            model_signals: HashMap::new(),
             popular_models: Vec::new(),
             popular_apps: Vec::new(),
             popular_as_of: None,
@@ -4919,6 +5005,7 @@ mod tests {
             ]),
             artifact_version: None,
             aa_coding_index: HashMap::new(),
+            model_signals: HashMap::new(),
             popular_models: Vec::new(),
             popular_apps: Vec::new(),
             popular_as_of: None,
@@ -4956,6 +5043,7 @@ mod tests {
             ]),
             artifact_version: None,
             aa_coding_index: HashMap::new(),
+            model_signals: HashMap::new(),
             popular_models: Vec::new(),
             popular_apps: Vec::new(),
             popular_as_of: None,
@@ -4991,6 +5079,7 @@ mod tests {
             )]),
             artifact_version: None,
             aa_coding_index: HashMap::new(),
+            model_signals: HashMap::new(),
             popular_models: Vec::new(),
             popular_apps: Vec::new(),
             popular_as_of: None,
@@ -5096,6 +5185,7 @@ mod tests {
             )]),
             artifact_version: None,
             aa_coding_index: HashMap::new(),
+            model_signals: HashMap::new(),
             popular_models: Vec::new(),
             popular_apps: Vec::new(),
             popular_as_of: None,
@@ -5124,6 +5214,7 @@ mod tests {
                 ]),
                 artifact_version: None,
                 aa_coding_index: HashMap::new(),
+                model_signals: HashMap::new(),
                 popular_models: Vec::new(),
                 popular_apps: Vec::new(),
                 popular_as_of: None,
@@ -5158,6 +5249,7 @@ mod tests {
                     )]),
                     artifact_version: None,
                     aa_coding_index: HashMap::new(),
+                    model_signals: HashMap::new(),
                     popular_models: Vec::new(),
                     popular_apps: Vec::new(),
                     popular_as_of: None,
@@ -5207,6 +5299,7 @@ mod tests {
                 )]),
                 artifact_version: None,
                 aa_coding_index: HashMap::new(),
+                model_signals: HashMap::new(),
                 popular_models: Vec::new(),
                 popular_apps: Vec::new(),
                 popular_as_of: None,
@@ -5239,6 +5332,7 @@ mod tests {
                 )]),
                 artifact_version: None,
                 aa_coding_index: HashMap::new(),
+                model_signals: HashMap::new(),
                 popular_models: Vec::new(),
                 popular_apps: Vec::new(),
                 popular_as_of: None,
@@ -5262,6 +5356,7 @@ mod tests {
             )]),
             artifact_version: None,
             aa_coding_index: HashMap::new(),
+            model_signals: HashMap::new(),
             popular_models: Vec::new(),
             popular_apps: Vec::new(),
             popular_as_of: None,
@@ -5290,6 +5385,7 @@ mod tests {
             )]),
             artifact_version: None,
             aa_coding_index: HashMap::new(),
+            model_signals: HashMap::new(),
             popular_models: Vec::new(),
             popular_apps: Vec::new(),
             popular_as_of: None,
@@ -5320,6 +5416,7 @@ mod tests {
             )]),
             artifact_version: None,
             aa_coding_index: HashMap::new(),
+            model_signals: HashMap::new(),
             popular_models: Vec::new(),
             popular_apps: Vec::new(),
             popular_as_of: None,
@@ -5463,6 +5560,7 @@ mod tests {
         router_with(Snapshot {
             models: HashMap::from([("m/q".to_string(), vec![o])]),
             aa_coding_index: HashMap::new(),
+            model_signals: HashMap::new(),
             artifact_version: None,
             popular_models: Vec::new(),
             popular_apps: Vec::new(),
@@ -5784,6 +5882,7 @@ mod tests {
                 ]),
                 artifact_version: None,
                 aa_coding_index: HashMap::new(),
+                model_signals: HashMap::new(),
                 popular_models: Vec::new(),
                 popular_apps: Vec::new(),
                 popular_as_of: None,
@@ -5887,6 +5986,7 @@ mod tests {
                 ]),
                 artifact_version: None,
                 aa_coding_index: HashMap::new(),
+                model_signals: HashMap::new(),
                 popular_models: Vec::new(),
                 popular_apps: Vec::new(),
                 popular_as_of: None,
@@ -5956,6 +6056,7 @@ mod tests {
                 )]),
                 artifact_version: None,
                 aa_coding_index: HashMap::new(),
+                model_signals: HashMap::new(),
                 popular_models: Vec::new(),
                 popular_apps: Vec::new(),
                 popular_as_of: None,
@@ -6007,6 +6108,7 @@ mod tests {
                 ]),
                 artifact_version: None,
                 aa_coding_index: HashMap::new(),
+                model_signals: HashMap::new(),
                 popular_models: Vec::new(),
                 popular_apps: Vec::new(),
                 popular_as_of: None,
@@ -6058,6 +6160,7 @@ mod tests {
                 models: HashMap::from([("m/a".to_string(), vec![priced("m/a", "A", 2.0, None)])]),
                 artifact_version: None,
                 aa_coding_index: HashMap::new(),
+                model_signals: HashMap::new(),
                 popular_models: Vec::new(),
                 popular_apps: Vec::new(),
                 popular_as_of: None,
@@ -6085,6 +6188,7 @@ mod tests {
                 models: HashMap::from([("m/a".to_string(), vec![priced("m/a", "A", 2.0, None)])]),
                 artifact_version: None,
                 aa_coding_index: HashMap::new(),
+                model_signals: HashMap::new(),
                 popular_models: Vec::new(),
                 popular_apps: Vec::new(),
                 popular_as_of: None,
@@ -6287,6 +6391,7 @@ mod tests {
             ]),
             artifact_version: None,
             aa_coding_index: HashMap::from([("m/low".to_string(), 30), ("m/high".to_string(), 60)]),
+            model_signals: HashMap::new(),
             popular_models: Vec::new(),
             popular_apps: Vec::new(),
             popular_as_of: None,

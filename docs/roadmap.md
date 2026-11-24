@@ -896,3 +896,89 @@ only when pulled forward deliberately.
   plus a catalog overview assertion; full workspace green
   (43 suites). fmt/clippy binaries still absent here, same
   manual-style note as Iter 39.
+
+## After Iter 40
+## Iter 41 — Adaptive offline tiers (done)
+
+- Goal: survive the upstream loss of `coding_index` — OpenRouter's
+  AA feed nulled it (and `agentic_index`) for every model on
+  Nov 18, so the fixed-cutoff scorer tiered zero rows and the
+  `low`/`think` floors rejected everything with
+  `quality_floor_unmet`. Tiers now calibrate per index type from
+  usage instead of trusting one index's fixed scale.
+- Value: the paid tiers serve again with no LLM spend and no
+  gateway change. Each type judges on its own scale (coding and
+  intelligence values are never compared), so the next upstream
+  rescale moves the cutoffs instead of emptying the tiers.
+- Shipped: `OfflineScorer` calibrates tertile cutoffs per type
+  over used, non-batch models carrying that index (minimum 5;
+  `:batch` rows share their base's usage and would double-vote).
+  Each type votes a tier on its own scale; the model takes the
+  best vote (ties prefer coding, the historical signal) with the
+  winning value as its score. Below the minimum, coding falls
+  back to the fixed Iter 32 cutoffs (70/40 — fixtures tier
+  byte-identically) while intelligence sits out; models with no
+  index stay untiered for the online scorers. Cutoffs, set
+  sizes, and sources land in the `score_cutoffs` sync meta;
+  ruleset `aa-adaptive-v1`.
+- Test: 11 scorer units (tertiles, cross-scale merge, tie rule,
+  batch/usage exclusion, fallback, degenerate sets) plus a
+  processing test (adaptive tiers + `score_cutoffs` meta over
+  six used models); existing fallback tests pass unchanged;
+  full workspace green. fmt/clippy binaries still absent here,
+  same manual-style note as Iter 39 — CI runs the gates.
+
+## After Iter 41
+## Iter 42 — Score data sources (planned)
+
+- Goal: Fetch AA free API (indexes, version, cost/task, pricing)
+  and OpenRouter Data API (activity trend, app-rankings, task
+  classes) at ≤1 req/hour per source.
+- Value: The score stops depending on embedded payloads alone.
+- Shipped: `aa.rs` fetch + store; extended `popular.rs` /
+  `benchmarks.rs` activity + trend. Test: fixtures → parse →
+  store → read; keyless → empty.
+- Proposal: `docs/proposals/2026-11-18-popularity-first-ranking.md`.
+
+## Iter 43 — Catalog score v2 + brackets (planned)
+
+- Goal: Version-gated `rank-v2` (performance × efficiency ×
+  activity) plus the top-usage bracket with `low`/`think` ends.
+- Value: Routing inputs become inspectable, versioned facts.
+- Shipped: `rank_score.rs` v2, bracket + flags in `process.rs`,
+  TOP rollup. Test: stale excluded; popular-unscored flagged.
+
+## Iter 44 — Gateway consumes score (planned)
+
+- Goal: Routing reads the published score/ordering only.
+- Value: `low`/`think` serve the bracket ends from one lookup;
+  `lowest` keeps full-list cheapest. No new virtual IDs.
+- Shipped: Score-ordered legs, fallback chain. Test: score order
+  honored; legacy fallback intact.
+
+## Iter 45 — Long-tail min-value fallback (planned)
+
+- Goal: For models outside the bracket, route to cheapest
+  eligible offering per type.
+- Value: Rare models still get served at the best possible price.
+- Shipped: `decide_ordered_virtual` falls back to `Price` orientation
+  when the model is out-of-bracket. Test: rare model → cheapest.
+
+## Iter 46 — UI: catalog TOP tab (planned)
+
+- Goal: Show the score, its arithmetic, and its flags in the catalog.
+- Value: Operators debug routing inputs without guessing.
+- Shipped: `/models?tab=top` (generic models, arithmetic, flags);
+  overview bracket counts + fetch health; inspector score rank.
+  Test: tab renders; flags present; metrics set.
+
+## Iter 47 — Default switch + validation (planned)
+
+- Goal: Make the score ordering the default for `low`/`think`,
+  with rollback.
+- Value: The system routes on usage-backed value instead of
+  static tier sorts.
+- Shipped: `ROUTING_DEFAULT` flag (default: `score_first`). A/B
+  validation. Rollback path. Test: flag honored; fallback works.
+
+## After Iter 47
