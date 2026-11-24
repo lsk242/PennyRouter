@@ -856,7 +856,10 @@ async fn ui_models_tab_mirrors_catalog_models_page() {
         .await
         .unwrap();
     let models = models_panel(&body);
-    assert!(models.contains("<td>ScoreP</td>"), "decision offering listed");
+    assert!(
+        models.contains("<td>ScoreP</td>"),
+        "decision offering listed"
+    );
     assert!(
         !models.contains("<td>Cheap</td>"),
         "non-decision offerings stay out of the decision tab"

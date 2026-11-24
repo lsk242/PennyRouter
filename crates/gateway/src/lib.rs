@@ -954,10 +954,7 @@ struct UiParams {
     q: Option<String>,
 }
 
-async fn ui_page(
-    State(state): State<AppState>,
-    Query(params): Query<UiParams>,
-) -> Response {
+async fn ui_page(State(state): State<AppState>, Query(params): Query<UiParams>) -> Response {
     fn esc(text: &str) -> String {
         text.replace('&', "&amp;")
             .replace('<', "&lt;")
@@ -1243,10 +1240,7 @@ async fn ui_page(
                         rows.push((model_id.as_str(), entry));
                     }
                 }
-                let batch_count = rows
-                    .iter()
-                    .filter(|row| row.0.ends_with(":batch"))
-                    .count();
+                let batch_count = rows.iter().filter(|row| row.0.ends_with(":batch")).count();
                 let free_count = rows
                     .iter()
                     .filter(|(id, entry)| {
@@ -1272,9 +1266,7 @@ async fn ui_page(
 
                 rows.retain(|(id, entry)| match tab {
                     "batch" => id.ends_with(":batch"),
-                    "decision" => {
-                        !id.ends_with(":batch") && entry.supports_decisions == Some(true)
-                    }
+                    "decision" => !id.ends_with(":batch") && entry.supports_decisions == Some(true),
                     "tiers" => {
                         !id.ends_with(":batch")
                             && entry.supports_decisions != Some(true)
@@ -1337,9 +1329,7 @@ async fn ui_page(
                         let factor = if entry.supports_decisions == Some(true) {
                             1.0
                         } else {
-                            pennyrouter_catalog::precision_factor(
-                                entry.precision_class.as_deref(),
-                            )
+                            pennyrouter_catalog::precision_factor(entry.precision_class.as_deref())
                         };
                         let cost_task = offering_cost(entry)
                             .map(|cost| cost * pennyrouter_catalog::TASK_TOKENS);

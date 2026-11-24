@@ -184,8 +184,7 @@ fn tertiles(sorted: &[i64]) -> Cutoffs {
         let rank = p * (sorted.len() - 1) as f64;
         let lo = rank.floor() as usize;
         let hi = rank.ceil() as usize;
-        let value =
-            sorted[lo] as f64 + (rank - lo as f64) * (sorted[hi] - sorted[lo]) as f64;
+        let value = sorted[lo] as f64 + (rank - lo as f64) * (sorted[hi] - sorted[lo]) as f64;
         value.round() as i64
     };
     Cutoffs {
@@ -256,7 +255,11 @@ mod tests {
         coding: &[(&str, i64)],
         intel: &[(&str, i64)],
         popular: &[&str],
-    ) -> (HashMap<String, i64>, HashMap<String, i64>, HashMap<String, i64>) {
+    ) -> (
+        HashMap<String, i64>,
+        HashMap<String, i64>,
+        HashMap<String, i64>,
+    ) {
         let coding = coding
             .iter()
             .map(|(id, index)| (id.to_string(), *index))
@@ -273,11 +276,7 @@ mod tests {
         (coding, intel, popularity)
     }
 
-    fn scorer(
-        coding: &[(&str, i64)],
-        intel: &[(&str, i64)],
-        popular: &[&str],
-    ) -> OfflineScorer {
+    fn scorer(coding: &[(&str, i64)], intel: &[(&str, i64)], popular: &[&str]) -> OfflineScorer {
         let (coding, intel, popularity) = maps(coding, intel, popular);
         OfflineScorer::new(coding, intel, popularity)
     }
@@ -449,9 +448,7 @@ mod tests {
         let high = scorer.score("m/hi", "p", &json!({})).unwrap();
         assert_eq!(high.quality_tier.as_deref(), Some("high"));
         assert_eq!(high.quality_score, Some(0.71));
-        let low = scorer
-            .score("m/lo", "other", &json!({"tag": "t"}))
-            .unwrap();
+        let low = scorer.score("m/lo", "other", &json!({"tag": "t"})).unwrap();
         assert_eq!(low.quality_tier.as_deref(), Some("low"));
         assert_eq!(low.quality_score, Some(0.05));
     }

@@ -722,10 +722,8 @@ fn processing_scores_adaptive_tiers_from_intelligence_and_usage() {
         assert_eq!(ep.score_model.as_deref(), Some("offline"));
     }
 
-    let cutoffs: serde_json::Value = serde_json::from_str(
-        &catalog.get_meta("score_cutoffs").unwrap().unwrap(),
-    )
-    .unwrap();
+    let cutoffs: serde_json::Value =
+        serde_json::from_str(&catalog.get_meta("score_cutoffs").unwrap().unwrap()).unwrap();
     assert_eq!(cutoffs["intelligence"]["source"], "adaptive");
     assert_eq!(cutoffs["intelligence"]["n"], 6);
     assert_eq!(cutoffs["intelligence"]["high"], 43);

@@ -1089,7 +1089,10 @@ impl Router {
             .map_err(|e| RouteError(e.to_string()))?
         {
             let offering = offering_from(&ep, ranks.get(&ep.id), speeds.get(&ep.id));
-            models.entry(ep.model_id.clone()).or_default().push(offering);
+            models
+                .entry(ep.model_id.clone())
+                .or_default()
+                .push(offering);
         }
         // Popularity pins ride the same artifact (empty on old or
         // keyless syncs); the menu and `/ui` read them from here.
