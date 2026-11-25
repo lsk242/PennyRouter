@@ -62,11 +62,12 @@ configuration exists for now.
 
 The `model` field carries the OpenRouter model plus optional suffix filters
 (see [routing.md](routing.md)). Unknown or absent filters fall back to the
-default route — never an error. The `lowest` filter instead rewrites to
-the cheapest paid offering catalog-wide (no quality floor) and fails
-closed when none is eligible. `openrouter/pair/free/fallback/<tier>`
+default route — never an error. The `lowest` filter was retired in
+Iter 52: ids carrying it fail closed with `invalid_model` naming
+`openrouter/pair/low`, which owns the cheapest-paid pick now.
+`openrouter/pair/free/fallback/<tier>`
 serves free first, then exactly one pick from the named tier
-(`low|think|agent|lowest|decision`; unknown targets fail closed with
+(`low|think|agent|coding|decision|batch`; unknown targets fail closed with
 `no_eligible_offering`) when free is exhausted. An optional
 `/mintel/<0..=100>` suffix (Iter 33, renamed Iter 50) keeps only
 models whose AA intelligence index meets the floor — e.g.
@@ -86,7 +87,8 @@ From Iter 7, `openrouter/free` routes to any free offering (rewritten
 to its backend id) or passes through untouched when nothing is free.
 From Iter 13, the virtual catalog `openrouter/pair/[privacy/]<free|low|think>`
 is the stable menu (see [routing.md](routing.md)): `free` = zero-cost,
-`low` = cheapest basic, `think` = best quality, `agent` (Iter 49) =
+`low` = cheapest basic, `think` = highest intelligence under
+$0.20/M in + $0.50/M out, `agent` (Iter 49) =
 cheapest across the usage top-20, `decision` =
 cheapest decisions-capable (plus a `decision/free` zero-cost scope);
 `openrouter/pair/model/<model-id>` (Iter 28) pins to one specific

@@ -6,7 +6,9 @@
 //! away from recently rate-limited providers.
 
 use axum::{body::Bytes, http::StatusCode, routing::post, Router};
-use pennyrouter_catalog::{Catalog, EndpointIndex, EndpointRow, EndpointScore, ModelRow};
+use pennyrouter_catalog::{
+    Catalog, EndpointIndex, EndpointRow, EndpointScore, ModelIndex, ModelRow,
+};
 use std::{
     collections::HashMap,
     net::SocketAddr,
@@ -15,16 +17,17 @@ use std::{
 
 const API_KEY: &str = "Bearer [REDACTED]";
 
-/// Models: m/cheap (Cheap 1.0/low), m/dear (Dear 9.0/high),
-/// m/free (Freebie 0.0/standard). All fp16.
+/// Models: m/cheap (Cheap $0.10/low), m/dear (Dear $0.15/high),
+/// m/free (Freebie 0.0/standard) — per-M list prices. Intel: Dear
+/// 60, Cheap 30. All fp16.
 fn build_db(path: &std::path::Path) {
     let _ = std::fs::remove_file(path);
     let catalog = Catalog::open(path).unwrap();
     catalog.init().unwrap();
-    for (model, provider, price, tier) in [
-        ("m/cheap", "Cheap", 1.0, "low"),
-        ("m/dear", "Dear", 9.0, "high"),
-        ("m/free", "Freebie", 0.0, "standard"),
+    for (model, provider, price, tier, intel) in [
+        ("m/cheap", "Cheap", 1e-7, "low", Some(30)),
+        ("m/dear", "Dear", 1.5e-7, "high", Some(60)),
+        ("m/free", "Freebie", 0.0, "standard", None),
     ] {
         catalog
             .insert_model(&ModelRow {
@@ -91,6 +94,19 @@ fn build_db(path: &std::path::Path) {
                 },
             )
             .unwrap();
+        if let Some(intel) = intel {
+            catalog
+                .update_model_index(
+                    model,
+                    &ModelIndex {
+                        aa_intelligence_index: Some(intel),
+                        aa_coding_index: None,
+                        aa_agentic_index: None,
+                        aa_cost_per_task: None,
+                    },
+                )
+                .unwrap();
+        }
     }
 }
 
@@ -254,6 +270,7 @@ async fn models_menu_lists_exactly_the_virtual_ids() {
             "openrouter/pair/agent",
             "openrouter/pair/batch",
             "openrouter/pair/coding",
+            "openrouter/pair/coding/task",
             "openrouter/pair/decision",
             "openrouter/pair/decision/free",
             "openrouter/pair/free",
@@ -261,6 +278,7 @@ async fn models_menu_lists_exactly_the_virtual_ids() {
             "openrouter/pair/privacy/agent",
             "openrouter/pair/privacy/batch",
             "openrouter/pair/privacy/coding",
+            "openrouter/pair/privacy/coding/task",
             "openrouter/pair/privacy/decision",
             "openrouter/pair/privacy/decision/free",
             "openrouter/pair/privacy/free",
@@ -441,8 +459,8 @@ async fn throttled_providers_are_avoided_and_counted() {
             .update_endpoint_index(
                 id,
                 &EndpointIndex {
-                    price_prompt: Some(3.0),
-                    price_completion: Some(3.0),
+                    price_prompt: Some(1.2e-7),
+                    price_completion: Some(1.2e-7),
                     price_cache_read: None,
                     price_cache_write: None,
                     precision_class: Some("fp16".to_string()),
@@ -522,11 +540,11 @@ async fn over_budget_virtual_fails_closed() {
     let mock = spawn_mock(mock_app(seen.clone(), vec![], vec![])).await;
     let gw = spawn_gateway(mock, &db).await;
 
-    // Cheapest priced offering is 1.0/1.0: a 0.5 cap fits nothing.
+    // Cheapest priced offering is 1e-7/1e-7: a 5e-8 cap fits nothing.
     let res = post_body(
         gw,
         "/v1/chat/completions",
-        r#"{"model":"openrouter/pair/low","messages":[],"provider":{"max_price":{"prompt":0.5,"completion":0.5}}}"#,
+        r#"{"model":"openrouter/pair/low","messages":[],"provider":{"max_price":{"prompt":5e-8,"completion":5e-8}}}"#,
     )
     .await;
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
@@ -534,28 +552,6 @@ async fn over_budget_virtual_fails_closed() {
     assert_eq!(body["error"]["code"], "budget_exceeded");
     assert_eq!(body["error"]["type"], "invalid_request_error");
     // Fail-closed means the upstream never saw the request.
-    assert!(seen.lock().unwrap().hits.is_empty());
-}
-
-#[tokio::test]
-async fn think_floor_unmet_without_high_tier() {
-    let db = scratch_db("floor");
-    build_db(&db);
-    let seen = Arc::new(Mutex::new(Upstream::default()));
-    let mock = spawn_mock(mock_app(seen.clone(), vec![], vec![])).await;
-    let gw = spawn_gateway(mock, &db).await;
-
-    // `think` needs a `high` tier; restricting to Cheap (`low`) leaves
-    // the floor unmet instead of serving below the promise.
-    let res = post_body(
-        gw,
-        "/v1/chat/completions",
-        r#"{"model":"openrouter/pair/think","messages":[],"provider":{"only":["Cheap"]}}"#,
-    )
-    .await;
-    assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
-    let body: serde_json::Value = res.json().await.unwrap();
-    assert_eq!(body["error"]["code"], "quality_floor_unmet");
     assert!(seen.lock().unwrap().hits.is_empty());
 }
 
@@ -606,11 +602,11 @@ async fn affinity_sticks_then_policy_change_reroutes() {
     .await;
     assert_eq!(res.status(), StatusCode::OK);
     assert_eq!(res.headers().get("x-pennyrouter-provider").unwrap(), "Dear");
-    // A new budget cap overrides affinity too: nothing fits 0.5.
+    // A new budget cap overrides affinity too: nothing fits 5e-8.
     let res = post_body(
         gw,
         "/v1/chat/completions",
-        r#"{"model":"openrouter/pair/low","messages":[],"provider":{"max_price":{"prompt":0.5,"completion":0.5}}}"#,
+        r#"{"model":"openrouter/pair/low","messages":[],"provider":{"max_price":{"prompt":5e-8,"completion":5e-8}}}"#,
     )
     .await;
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
@@ -646,16 +642,17 @@ async fn responses_routes_virtual_ids_like_chat() {
         );
     }
 
-    // Rejections apply on Responses too.
+    // Rejections apply on Responses too: the mintel floor leaves
+    // nothing eligible.
     let res = post_body(
         gw,
         "/v1/responses",
-        r#"{"model":"openrouter/pair/think","input":"hi","provider":{"only":["Cheap"]}}"#,
+        r#"{"model":"openrouter/pair/think/mintel/95","input":"hi"}"#,
     )
     .await;
     assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
     let body: serde_json::Value = res.json().await.unwrap();
-    assert_eq!(body["error"]["code"], "quality_floor_unmet");
+    assert_eq!(body["error"]["code"], "no_eligible_offering");
 }
 
 #[tokio::test]
@@ -761,7 +758,7 @@ async fn free_fallback_serves_paid_after_free_429() {
 }
 
 /// I10(d): the fallback dispatch serves every tier target, not just
-/// `low` — think (best quality), lowest (cheapest paid), decision
+/// `low` — think (best quality), low (cheapest paid), decision
 /// (decisions-capable only), batch (`:batch` variants only).
 #[tokio::test]
 async fn free_fallback_serves_each_tier_target() {
@@ -848,7 +845,7 @@ async fn free_fallback_serves_each_tier_target() {
     // each POST below takes its own fresh fallback pick.
     for (target, provider, model) in [
         ("think", "Dear", "m/dear"),
-        ("lowest", "Cheap", "m/cheap"),
+        ("low", "Cheap", "m/cheap"),
         ("decision", "Decider", "m/score"),
         ("batch", "Batcher", "m/deferred:batch"),
     ] {
@@ -1431,6 +1428,8 @@ async fn menu_lists_virtual_popular_and_configured_providers() {
         "openrouter/pair/privacy/agent",
         "openrouter/pair/coding",
         "openrouter/pair/privacy/coding",
+        "openrouter/pair/coding/task",
+        "openrouter/pair/privacy/coding/task",
         "openrouter/pair/think",
         "openrouter/pair/privacy/think",
         "openrouter/pair/decision",

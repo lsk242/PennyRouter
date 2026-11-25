@@ -179,9 +179,12 @@ pub fn score(inputs: &RankInputs) -> Option<RankScore> {
         precision_factor(inputs.precision_class)
     };
     let quality = index.clamp(0, 100) as f64 * factor;
+    // AA zero costs fall back to the blend (Iter 54): a $0.00/task
+    // figure against nonzero provider prices is missing data, not a
+    // free model — trusting it mints efficiency 1.0 out of nothing.
     let cost_task = inputs
         .aa_cost_per_task
-        .filter(|c| c.is_finite() && *c >= 0.0)
+        .filter(|c| c.is_finite() && *c > 0.0)
         .or_else(|| cost_per_task(inputs.cost_per_token))?;
     let efficiency = efficiency(Some(cost_task))?;
     let activity = activity_factor(inputs.activity_level, inputs.activity_trend);
@@ -348,6 +351,9 @@ mod tests {
         input.aa_cost_per_task = Some(-1.0);
         assert!((score(&input).unwrap().cost_task - 0.012825).abs() < 1e-9);
         input.aa_cost_per_task = Some(f64::NAN);
+        assert!((score(&input).unwrap().cost_task - 0.012825).abs() < 1e-9);
+        // Zero is missing data, not a free model (Iter 54).
+        input.aa_cost_per_task = Some(0.0);
         assert!((score(&input).unwrap().cost_task - 0.012825).abs() < 1e-9);
     }
 

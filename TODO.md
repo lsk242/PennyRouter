@@ -375,5 +375,26 @@ cheap judge model, classifier-based routing.
       fixed inspector combos render top-5 server- and client-side.
       Test: drop asserts (parse/menu/preview) + full workspace
       green (453 passed).
+- [x] **Iter 52 — `low` replaces `lowest`.** `low` = cheapest paid
+      offering, no floor, skipping known-low uptime (<90%) and
+      known-zero throughput (unknown passes); the `lowest` tag,
+      fallback target, classifier tier, and metric slots are
+      retired with fail-closed notices; smart domain is
+      free/low[/think]. Test: `low_tier.rs` + repointed
+      score/smart/virtual/batch suites; full workspace green
+      (446 passed).
+- [x] **Iter 53 — `think` by max intelligence.** `think` = highest
+      AA index under $0.20/M in + $0.50/M out (both hard, unknown
+      excluded, cheapest breaks ties); score-first path, `OrderMode`
+      / `ROUTING_DEFAULT`, and cross-model long-tail removed;
+      fixtures rescaled to per-M prices with intel. Test:
+      `think_tier.rs`; full workspace green (437 passed).
+- [x] **Iter 54 — `coding/task` + AA zero-cost fix.** New
+      `openrouter/pair/coding/task` (+ `privacy/`): cheapest
+      cost-per-task over the usage bracket, intelligence 28+
+      fixed; AA $0.00/task figures now fall back to the catalog
+      blend instead of minting efficiency 1.0. Test: score unit
+      + extended `coding_tiers.rs`; full workspace green
+      (441 passed).
 
-## After Iter 51
+## After Iter 54

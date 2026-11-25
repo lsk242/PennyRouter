@@ -28,12 +28,13 @@ Initial tag vocabulary (grows with the index): price orientations,
 `privacy` (zero data retention); latency / throughput orientations
 and region hints parse but are currently ignored — the index carries
 no live signal for them (see §Status).
-`lowest` (Iter 19) is the cross-model cheapest-paid pick: it rewrites
-to whatever paid offering costs least catalog-wide, with no quality
-floor — the fallback when free turns run out.
+`low` (Iter 52, replacing the retired `lowest` tag) is the
+cross-model cheapest-paid pick: whatever paid offering costs least
+catalog-wide, minus providers with known-low uptime — the fallback
+when free turns run out, with no quality floor.
 `openrouter/pair/free/fallback/<tier>` (Iter 21) chains them: serves
 free while any free offering is eligible, else exactly one pick from
-the named tier (`low`, `think`, `lowest`, `decision`, `batch` —
+the named tier (`low`, `think`, `agent`, `coding`, `decision`, `batch` —
 resolved through the shared tier dispatch, so future tiers plug in
 automatically). Unknown tier names fail closed with
 `no_eligible_offering` at request time (parse accepts any non-empty
@@ -72,21 +73,14 @@ session.
   signals — as are unknown tags.
 - Default: best quality tier, then cheapest prompt price, within the
   model's most common precision class.
-- `lowest` (Iter 19): cheapest paid priceable offering with a known
-  precision class across all models — same paid-only filter, budget,
-  throttle skip, stickiness (under the full tagged id namespace),
-  and deterministic tie-breaks as the `low` tier, minus its
-  scored-tier floor. Full list, bracket or not; activity level
-  breaks price ties (Iter 44), then model id, provider. An
-  optional `/mintel/<n>` tag segment floors the pool, failing
-  closed on malformed values like the virtual suffix. Fails closed
-  like virtual ids (`no_eligible_offering` 503, `budget_exceeded`
-  400) instead of leaking the tagged id upstream; exactly-once
-  (tags never retry). Unknown base models still pass through
-  untouched, and first recognized orientation wins (`price/lowest`
-  stays same-model).
+- `lowest` tag (Iter 19, retired in Iter 52): any id carrying a
+  `lowest` tag segment fails closed with `invalid_model` (400)
+  naming the retirement — use `openrouter/pair/low`, which owns
+  the cheapest-paid pick now. Unknown base models still pass
+  through untouched (nothing matched). The `free/fallback/lowest`
+  target answers the same notice with `no_eligible_offering` (503).
 - Free-fallback chains (Iter 21): `openrouter/pair/free/fallback/<tier>`
-  (`low` | `think` | `lowest` | `decision` | `batch`). Free leg first with existing free
+  (`low` | `think` | `agent` | `coding` | `decision` | `batch`). Free leg first with existing free
   semantics; on free exhaustion (`no_eligible_offering`) or upstream
   429/502/503/504 after the single virtual retry, one fallback pick
   that skips the just-failed provider. Session pins under the full
@@ -129,17 +123,15 @@ session.
   longest-prefix split never sees them. Only the `openrouter`
   provider exists; other providers and unknown tiers pass through.
   `free` shares the legacy free path under its own session namespace;
-  `low` picks the cheapest priceable known-class offering across
-  models; `think` picks the best quality signals across models. When
-  the artifact carries a usage bracket and v2 scores (Iter 44),
-  both switch to score-first: `low` takes the cheapest in-bracket
-  offering at/above the performance floor, `think` the best
-  in-bracket performance under the spend cap, from the stored
-  components (unmeetable floor/cap rejects; tools, budget, context,
-  and throttle gates still apply). Missing score data falls back
-  to the legacy ordering, which serves in-bracket models first
-  and falls back to cheapest out-of-bracket with no tier floor
-  (Iter 45 long-tail). Tiers are disjoint: zero-cost serves
+  `low` (Iter 52) picks the cheapest paid priceable known-class
+  offering across models, skipping providers with known uptime
+  below 90% or known-zero throughput (unknown telemetry passes);
+  no quality floor, no bracket, no score math. `think` (Iter 53)
+  picks the highest AA intelligence index under $0.20/M prompt
+  and $0.50/M completion (list prices, both caps hard, unknown
+  index excluded), cheapest first on ties; unmeetable caps reject,
+  and tools, budget, context, and throttle gates still apply.
+  Tiers are disjoint: zero-cost serves
   `free` only, and `:batch` variants serve the `batch` tier only
   (async pricing can't serve interactive requests, so every
   interactive leg excludes them). Per-key daily free caps
@@ -170,7 +162,7 @@ session.
   `:batch`-variant offering (OpenRouter's async batch API pricing,
   model ids ending in `:batch`). Batch variants serve this tier
   exclusively: the interactive tiers (`free`/`low`/`think`/
-  `decision`/`lowest`) exclude them, even zero-cost ones, since async
+  `agent`/`coding`/`decision`) exclude them, even zero-cost ones, since async
   pricing can't serve interactive requests; explicit direct or pinned
   ids naming a variant still resolve. No quality floor and no
   precision-class requirement — the suffix is the capability match,
@@ -181,13 +173,20 @@ session.
   latency tradeoff, so `batch` stays out of the smart classifier's
   tier domain.
 - Coding tier (Iter 48; `coding/think` dropped in Iter 51):
-  `openrouter/pair/[privacy/]coding` runs the `low` legacy ordering
-  (cheapest, same floor) scoped to the most-used (top-usage
-  bracket) models — a popularity-first pick alongside the
-  score-first `low`/`think`. No bracket data means no pool, so it
+  `openrouter/pair/[privacy/]coding` runs the cheapest ordering
+  with the scored-tier floor, scoped to the most-used (top-usage
+  bracket) models — a popularity-first pick alongside `low` and
+  `think`. No bracket data means no pool, so it
   fails closed instead of silently serving the full list. `mintel`
   composes; valid `/fallback/` target; no `/fallback/` suffix of
   its own, like `low`/`think`.
+- Coding/task tier (Iter 54): `openrouter/pair/[privacy/]coding/task`
+  serves the cheapest cost-per-task across the same bracket with
+  a fixed intelligence floor of 28 (unindexed models and models
+  below 28 never win; cheapest effective cost breaks ties). No
+  bracket data means no picks, so it fails closed. `mintel`
+  composes above the fixed floor; valid `/fallback/` target; no
+  `/fallback/` suffix of its own.
 - Agent tier (Iter 49): `openrouter/pair/[privacy/]agent` serves
   the cheapest paid offering across the usage top-20 pool — the
   20 most-used ranking slugs (`:free` variants excluded),
@@ -229,7 +228,7 @@ session.
   `free`, `model/<id>`, `smart`) keeps only models whose catalog
   `aa_intelligence_index` is at or above the floor. It sits after the core
   id and before `/fallback/`:
-  `openrouter/pair/privacy/think/mintel/40/fallback/low`. The floor
+  `openrouter/pair/privacy/think/mintel/30/fallback/low`. The floor
   is the first eligibility gate — a cheaper model below it (or with
   no index at all) never wins, and `mintel/0` means "must have any
   index". It scopes the primary leg only; the fallback tier runs
@@ -245,16 +244,16 @@ session.
   applied; unpriceable offerings sort last. The `openrouter/free`
   meta-model routes to any zero-cost offering and rewrites to its
   backend id, re-routing pins that stopped being free.
-- Quality floors (Iter 14): each virtual tier promises a minimum
-  scored quality — `low` needs any scored tier, `think` needs `high`
-  (`free` needs none). A tier whose candidates all sit below its
-  floor rejects with `quality_floor_unmet` (503) instead of serving
-  below the promise.
+- Quality floors (Iter 14): only `coding` still promises a minimum
+  scored quality (any scored tier; `free`, `low`, `agent`, and
+  `think` need none). A tier whose candidates all sit below its
+  floor rejects with `quality_floor_unmet` (503) instead of
+  serving below the promise.
 - Tool-aware routing (Iter 22): the catalog indexes per-endpoint tool
   support (`supported_parameters` containing `"tools"`, schema v4;
   unknown on older catalogs). A request with a non-empty `tools`
   array matches only `Some(true)` endpoints — across `free`, `low`,
-  `think`, `lowest`, direct-model, and fallback legs — so the gateway
+  `think`, `agent`, `coding`, direct-model, and fallback legs — so the gateway
   never pins a provider the upstream would 404 with "No endpoints
   found that support tool use". Tool-bearing requests starved while
   plain ones would serve fail closed with `tools_unsupported` (400):
@@ -324,7 +323,7 @@ low-entropy.
 
 ## Smart classifier (Iter 26)
 
-`openrouter/pair/smart` (tiers `free`/`lowest`/`low`),
+`openrouter/pair/smart` (tiers `free`/`low`),
 `openrouter/pair/smart/max` (plus `think`), and the `privacy/`
 variants call a decision model on the request path to pick the
 cheapest tier that can answer well. This is the one explicit,
@@ -353,9 +352,10 @@ local lookup with no network on the routing path.
 - Failures: `CLASSIFIER_MODEL` unset → `classifier_not_configured`
   (503, fail closed, no guess); classifier 401/403 →
   `classifier_auth_error` (502); timeout/429/5xx/bad verdict/empty
-  input → serve the one `CLASSIFIER_FALLBACK_TIER` (`low`|`lowest`,
-  default `low`), marked with `x-pennyrouter-classifier-fallback:
-  true`. The classifier leg itself never retries.
+  input → serve the one `CLASSIFIER_FALLBACK_TIER` (`low`; anything
+  else warns and uses `low`), marked with
+  `x-pennyrouter-classifier-fallback: true`. The classifier leg
+  itself never retries.
 - Auth (Q08, BYOK-only): no stored key, ever. The leg uses the
   incoming `Authorization` header, optionally overridden per-request
   by `x-pennyrouter-classifier-key`, else no auth. A foreign

@@ -325,16 +325,42 @@ fn build_db_sneaky(path: &std::path::Path) {
     let _ = std::fs::remove_file(path);
     let catalog = Catalog::open(path).unwrap();
     catalog.init().unwrap();
-    // (model, provider, price, tier, score, decisions)
+    // (model, provider, price, tier, score, decisions, intel) — per-M
+    // list prices. TrapB carries the top index to prove `:batch`
+    // never wins an interactive leg.
     let rows = [
-        ("m/cheap", "Cheap", 5.0, "low", 0.1, None),
-        ("m/good", "Good", 6.0, "high", 0.9, None),
-        ("m/free", "Freebie", 0.0, "standard", 0.4, None),
-        ("m/thinker", "Thinker", 7.0, "high", 0.5, Some(1)),
-        ("m/trap:batch", "TrapB", 1.0, "high", 0.99, Some(1)),
-        ("m/freeloader:batch", "FreeB", 0.0, "high", 0.99, Some(1)),
+        ("m/cheap", "Cheap", 5e-8, "low", 0.1, None, Some(30)),
+        ("m/good", "Good", 1e-7, "high", 0.9, None, Some(70)),
+        ("m/free", "Freebie", 0.0, "standard", 0.4, None, None),
+        (
+            "m/thinker",
+            "Thinker",
+            1.5e-7,
+            "high",
+            0.5,
+            Some(1),
+            Some(60),
+        ),
+        (
+            "m/trap:batch",
+            "TrapB",
+            1e-8,
+            "high",
+            0.99,
+            Some(1),
+            Some(99),
+        ),
+        (
+            "m/freeloader:batch",
+            "FreeB",
+            0.0,
+            "high",
+            0.99,
+            Some(1),
+            None,
+        ),
     ];
-    for (model, provider, price, tier, score, decisions) in rows {
+    for (model, provider, price, tier, score, decisions, intel) in rows {
         catalog
             .insert_model(&ModelRow {
                 model_id: model.to_string(),
@@ -400,6 +426,19 @@ fn build_db_sneaky(path: &std::path::Path) {
                 },
             )
             .unwrap();
+        if let Some(intel) = intel {
+            catalog
+                .update_model_index(
+                    model,
+                    &ModelIndex {
+                        aa_intelligence_index: Some(intel),
+                        aa_coding_index: None,
+                        aa_agentic_index: None,
+                        aa_cost_per_task: None,
+                    },
+                )
+                .unwrap();
+        }
     }
 }
 
@@ -421,12 +460,13 @@ async fn interactive_tiers_never_route_to_batch_variants() {
     let gw = spawn_gateway(mock, &db).await;
 
     // Each trap would win its leg if batch variants were eligible.
+    // (Iter 52 retired the `lowest` tag; its coverage moved to
+    // `low_tier.rs`.)
     for (model, provider) in [
         ("openrouter/pair/low", "Cheap"),
         ("openrouter/pair/think", "Good"),
         ("openrouter/pair/free", "Freebie"),
         ("openrouter/pair/decision", "Thinker"),
-        ("m/cheap/lowest", "Cheap"),
     ] {
         let res = post_chat(gw, model).await;
         assert_eq!(res.status(), StatusCode::OK, "{model} routes");
@@ -475,7 +515,6 @@ fn interactive_previews_never_list_batch_variants() {
         "openrouter/pair/free",
         "openrouter/pair/decision",
         "openrouter/pair/decision/free",
-        "m/cheap/lowest",
     ] {
         let preview = router.preview(model, None, 10);
         assert!(

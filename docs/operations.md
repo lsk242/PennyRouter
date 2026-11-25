@@ -362,26 +362,13 @@ full path, and key suffix (see [api.md](api.md)). Later,
 readiness/snapshot health may complement `/health` without changing
 its liveness contract.
 
-## Score ordering rollout (Iter 47)
+## Score ordering rollout (Iter 47, retired in Iter 53)
 
-`low`/`think` route score-first by default
-(`ROUTING_DEFAULT=score_first`), with `legacy` forcing the pre-score
-ordering over the full pool. Anything else fails closed at startup
-(the gateway refuses to serve on a silently-wrong ordering).
-Rollback is one variable: set `ROUTING_DEFAULT=legacy` and restart.
-
-A/B canary before promoting fleet-wide:
-
-1. Ship one instance (about 10% of traffic) on the new default and
-   leave the rest on `legacy`.
-2. Compare per instance, over the same window: success rate (log
-   `outcome` / `status`), latency p50/p95 (the request histogram),
-   and cost per task (upstream bills — no gateway-side cost
-   counter exists yet).
-3. `pennyrouter_routing_order_total{ordering,tier}` shows which
-   ordering served each pick (`score` vs `legacy` vs `longtail`),
-   so a score-first instance still reports its legacy-fallback
-   volume for comparison.
-4. Promote only on neutral-or-better across all three; otherwise
-   the canary flips back to `legacy` with the same one-variable
-   change.
+Score-first routing, the `legacy` mode, and `ROUTING_DEFAULT` were
+removed in Iter 53: `low`/`think`/`agent` now serve fixed rules
+(cheapest, max-intelligence-under-caps, cheapest-of-top-20), so
+there is nothing to roll out or roll back. The
+`pennyrouter_routing_order_total{ordering,tier}` counter stays as a
+per-tier pick counter — `ordering` now names the serving tier path
+(`low`, `think`, `agent`, `legacy` for `coding`, plus the
+single-purpose legs).

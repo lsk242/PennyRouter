@@ -1106,4 +1106,60 @@ only when pulled forward deliberately.
   (453 passed). fmt + clippy `-D warnings` via the extracted
   toolchain, clean.
 
-## After Iter 51
+## Iter 52 — `low` replaces `lowest` (done)
+
+- Goal: `low` becomes the cheapest-paid pick with no quality
+  floor, minus flaky providers; the `lowest` tag goes away.
+- Value: the kimi-on-top score-first logic is gone from `low`;
+  one cheapest id instead of two overlapping ones.
+- Shipped: `decide_low_ordered` (cheapest effective cost, paid +
+  known-precision + non-batch + mintel/tools/context/budget/
+  throttle/sticky stages, availability gate at 90% uptime /
+  zero-throughput exclusion, ordering `low`); `low` bypasses the
+  score path and preview shortlist; `Orientation::Lowest`,
+  `decide_lowest`, `preview_lowest_list`, the `lowest` fallback
+  target, classifier tier + prompt line, `CLASSIFIER_FALLBACK_TIER`
+  value, and metric slots removed (retired tag/target fail closed
+  naming `openrouter/pair/low`); smart domain is free/low[/think];
+  mintel fixed examples now 20/30.
+- Test: `low_tier.rs` (route/gate/mintel/privacy/fallback/
+  retired-tag/preview) + repointed score/smart/virtual/batch
+  suites; full workspace green (446 passed). fmt + clippy `-D
+  warnings` via the extracted toolchain, clean.
+
+## Iter 53 — `think` by max intelligence (done)
+
+- Goal: `think` picks the highest intelligence index under fixed
+  price caps; the score-first machinery goes away.
+- Value: think stops serving nothing (the $0.05/task cap vs
+  dollar-scale AA costs) and stops needing the score to route.
+- Shipped: `decide_think_ordered` (caps $0.20/M in + $0.50/M out
+  on list prices, known index required, cheapest tie-break,
+  ordering `think`) + preview parity; deleted the scored path,
+  `OrderMode`/`ROUTING_DEFAULT`, the cross-model long-tail, and
+  `score_routing.rs`/`longtail.rs` (pinned-model long-tail stays);
+  shared fixtures rescaled to per-M prices with intel; catalog
+  score columns stay display-only.
+- Test: `think_tier.rs` (route/caps/tie/mintel/privacy/fallback/
+  gates/preview) + rescaled suites; full workspace green
+  (437 passed). fmt + clippy `-D warnings` via the extracted
+  toolchain, clean.
+
+## Iter 54 — `coding/task` + AA zero-cost fix (done)
+
+- Goal: a third coding id ordered by price-per-task with a fixed
+  intelligence floor; stop trusting AA $0.00/task figures.
+- Value: long-session coding pick (cheapest task cost among
+  capable popular models); the command-a-plus-style efficiency-1.0
+  artifact can no longer top any ordering.
+- Shipped: `CodingTask` tier (bracket pool + intel 28+ floor +
+  priced-per-task required, cheapest task cost first, ordering
+  `coding/task`); menu (22 ids) + inspector (18 combos) list it;
+  valid fallback target; `score()` treats AA cost ≤ 0 as missing
+  (blend wins).
+- Test: score unit (zero falls back) + extended `coding_tiers.rs`
+  (route/floor/empty/privacy/mintel/fallback/preview/menu);
+  full workspace green (441 passed). fmt + clippy `-D warnings`
+  via the extracted toolchain, clean.
+
+## After Iter 54

@@ -13,7 +13,9 @@ use axum::{
     routing::post,
     Router,
 };
-use pennyrouter_catalog::{Catalog, EndpointIndex, EndpointRow, EndpointScore, ModelRow};
+use pennyrouter_catalog::{
+    Catalog, EndpointIndex, EndpointRow, EndpointScore, ModelIndex, ModelRow,
+};
 use pennyrouter_gateway::{ClassifierConfig, Metrics};
 use std::{
     collections::HashMap,
@@ -25,18 +27,20 @@ use std::{
 const API_KEY: &str = "Bearer test-key";
 const CLASSIFIER_MODEL: &str = "test-classifier";
 
-/// Catalog: m/cheap (Cheap 1.0/low), m/dear (Dear 9.0/high), m/free
-/// (Freebie 0.0/standard), m/raw (Raw 0.5/unscored). All fp16, none
-/// tool-capable — so tool-bearing requests starve by construction.
+/// Catalog: m/cheap (Cheap $0.10/low), m/dear (Dear $0.15/high),
+/// m/free (Freebie 0.0/standard), m/raw (Raw $0.05/unscored) — per-M
+/// list prices, all under the think caps. Intel: Dear 80, Raw 40,
+/// Cheap 30. All fp16, none tool-capable — so tool-bearing requests
+/// starve by construction.
 fn build_db(path: &std::path::Path) {
     let _ = std::fs::remove_file(path);
     let catalog = Catalog::open(path).unwrap();
     catalog.init().unwrap();
-    for (model, provider, price, tier) in [
-        ("m/cheap", "Cheap", 1.0, Some("low")),
-        ("m/dear", "Dear", 9.0, Some("high")),
-        ("m/free", "Freebie", 0.0, Some("standard")),
-        ("m/raw", "Raw", 0.5, None),
+    for (model, provider, price, tier, intel) in [
+        ("m/cheap", "Cheap", 1e-7, Some("low"), Some(30)),
+        ("m/dear", "Dear", 1.5e-7, Some("high"), Some(80)),
+        ("m/free", "Freebie", 0.0, Some("standard"), None),
+        ("m/raw", "Raw", 5e-8, None, Some(40)),
     ] {
         catalog
             .insert_model(&ModelRow {
@@ -101,6 +105,19 @@ fn build_db(path: &std::path::Path) {
                         scored_at: "t".to_string(),
                         score_model: None,
                         score_prompt: None,
+                    },
+                )
+                .unwrap();
+        }
+        if let Some(intel) = intel {
+            catalog
+                .update_model_index(
+                    model,
+                    &ModelIndex {
+                        aa_intelligence_index: Some(intel),
+                        aa_coding_index: None,
+                        aa_agentic_index: None,
+                        aa_cost_per_task: None,
                     },
                 )
                 .unwrap();
@@ -363,9 +380,9 @@ async fn smart_serves_the_classified_tier() {
     assert_eq!(headers["x-pennyrouter-classifier-confidence"], "0.86");
     assert!(headers.contains_key("x-pennyrouter-classifier-latency-ms"));
     assert!(!headers.contains_key("x-pennyrouter-classifier-fallback"));
-    assert_eq!(headers["x-pennyrouter-provider"], "Cheap");
+    assert_eq!(headers["x-pennyrouter-provider"], "Raw");
     let seen = seen.lock().unwrap();
-    assert_eq!(seen.models["Cheap"], "m/cheap");
+    assert_eq!(seen.models["Raw"], "m/raw");
     let rendered = metrics.render();
     assert!(rendered.contains("pennyrouter_classifier_total{result=\"ok\",tier=\"low\"} 1"));
 }
@@ -405,22 +422,23 @@ async fn smart_rejects_out_of_domain_tier_and_falls_back() {
     assert_eq!(res.status(), StatusCode::OK);
     assert_eq!(res.headers()["x-pennyrouter-smart-tier"], "low");
     assert_eq!(res.headers()["x-pennyrouter-classifier-fallback"], "true");
-    assert_eq!(res.headers()["x-pennyrouter-provider"], "Cheap");
+    assert_eq!(res.headers()["x-pennyrouter-provider"], "Raw");
     let rendered = metrics.render();
     assert!(rendered.contains("pennyrouter_classifier_total{result=\"invalid\",tier=\"none\"} 1"));
     assert!(rendered.contains("pennyrouter_smart_fallback_total{tier=\"low\"} 1"));
 }
 
 #[tokio::test]
-async fn smart_lowest_has_no_quality_floor() {
-    // Cheapest paid is the unscored Raw pick: `lowest` takes it while
-    // `low` (scored floor) would take Cheap.
+async fn smart_retired_lowest_verdict_falls_back_to_low() {
+    // Iter 52: `lowest` left the classifier domain — the verdict is
+    // out-of-domain, so the configured fallback tier serves.
     let mock = verdict_mock(r#"{"tier":"lowest"}"#);
     let (gw, _, _) = setup("lowest", mock, vec![]).await;
 
     let res = post_chat(gw, chat_body("openrouter/pair/smart")).await;
     assert_eq!(res.status(), StatusCode::OK);
-    assert_eq!(res.headers()["x-pennyrouter-smart-tier"], "lowest");
+    assert_eq!(res.headers()["x-pennyrouter-smart-tier"], "low");
+    assert_eq!(res.headers()["x-pennyrouter-classifier-fallback"], "true");
     assert_eq!(res.headers()["x-pennyrouter-provider"], "Raw");
 }
 
@@ -471,7 +489,7 @@ async fn smart_timeout_falls_back() {
     assert_eq!(res.status(), StatusCode::OK);
     assert_eq!(res.headers()["x-pennyrouter-smart-tier"], "low");
     assert_eq!(res.headers()["x-pennyrouter-classifier-fallback"], "true");
-    assert_eq!(res.headers()["x-pennyrouter-provider"], "Cheap");
+    assert_eq!(res.headers()["x-pennyrouter-provider"], "Raw");
     let rendered = metrics.render();
     assert!(rendered.contains("pennyrouter_classifier_total{result=\"timeout\",tier=\"none\"} 1"));
 }
@@ -489,7 +507,7 @@ async fn smart_invalid_reply_falls_back() {
     let res = post_chat(gw, chat_body("openrouter/pair/smart")).await;
     assert_eq!(res.status(), StatusCode::OK);
     assert_eq!(res.headers()["x-pennyrouter-classifier-fallback"], "true");
-    assert_eq!(res.headers()["x-pennyrouter-provider"], "Cheap");
+    assert_eq!(res.headers()["x-pennyrouter-provider"], "Raw");
 }
 
 #[tokio::test]
@@ -547,7 +565,7 @@ async fn smart_classifier_does_not_bypass_budget() {
         serde_json::json!({
             "model": "openrouter/pair/smart",
             "messages": [{"role": "user", "content": "hi"}],
-            "provider": {"max_price": {"prompt": 0.001, "completion": 0.001}},
+            "provider": {"max_price": {"prompt": 1e-8, "completion": 1e-8}},
         }),
     )
     .await;
@@ -592,9 +610,9 @@ async fn smart_privacy_marks_both_legs() {
     );
     // Completion leg: same privacy fields on the forced provider object.
     let seen_up = seen.lock().unwrap();
-    assert_eq!(seen_up.providers["Cheap"]["zdr"], serde_json::json!(true));
+    assert_eq!(seen_up.providers["Raw"]["zdr"], serde_json::json!(true));
     assert_eq!(
-        seen_up.providers["Cheap"]["data_collection"],
+        seen_up.providers["Raw"]["data_collection"],
         serde_json::json!("deny")
     );
 }
@@ -602,13 +620,13 @@ async fn smart_privacy_marks_both_legs() {
 #[tokio::test]
 async fn smart_retry_stays_inside_the_classified_tier() {
     let mock = verdict_mock(r#"{"tier":"low"}"#);
-    let (gw, _, _) = setup("retry", mock, vec!["Cheap"]).await;
+    let (gw, _, _) = setup("retry", mock, vec!["Raw"]).await;
 
     let res = post_chat(gw, chat_body("openrouter/pair/smart")).await;
     assert_eq!(res.status(), StatusCode::OK);
-    // Cheap 503'd once: the retry stays in `low` (Dear), never
+    // Raw 503'd once: the retry stays in `low` (Cheap), never
     // re-classifies into another tier.
-    assert_eq!(res.headers()["x-pennyrouter-provider"], "Dear");
+    assert_eq!(res.headers()["x-pennyrouter-provider"], "Cheap");
     assert_eq!(res.headers()["x-pennyrouter-smart-tier"], "low");
     assert!(!res
         .headers()
@@ -630,8 +648,8 @@ async fn smart_serves_the_responses_endpoint() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
     assert_eq!(res.headers()["x-pennyrouter-smart-tier"], "low");
-    assert_eq!(res.headers()["x-pennyrouter-provider"], "Cheap");
-    assert_eq!(seen.lock().unwrap().models["Cheap"], "m/cheap");
+    assert_eq!(res.headers()["x-pennyrouter-provider"], "Raw");
+    assert_eq!(seen.lock().unwrap().models["Raw"], "m/raw");
     // The classifier saw the responses `input`, not chat messages.
     let seen_clf = mock.seen.lock().unwrap();
     let user = seen_clf[0].body["messages"][1]["content"].as_str().unwrap();
@@ -651,14 +669,18 @@ async fn smart_fallback_suffix_is_rejected() {
 }
 
 #[tokio::test]
-async fn smart_fallback_tier_is_configurable() {
+async fn smart_unknown_fallback_tier_rejection_stands() {
+    // Iter 52: only `low` is a legal fallback tier. A config that
+    // names anything else (here the retired `lowest`, set past env
+    // validation) rejects the fallback leg, and the rejection
+    // stands — the fallback is a value, not a chain.
     let mock = Arc::new(ClassifierMock {
         status: 500,
         body: "boom".to_string(),
         delay_ms: 0,
         seen: Mutex::new(Vec::new()),
     });
-    let db = scratch_db("fallback-lowest");
+    let db = scratch_db("fallback-retired");
     build_db(&db);
     let clf = spawn_mock(
         Router::new()
@@ -673,12 +695,20 @@ async fn smart_fallback_tier_is_configurable() {
     let (gw, metrics) = spawn_gateway(upstream, &db, Some(config)).await;
 
     let res = post_chat(gw, chat_body("openrouter/pair/smart")).await;
-    assert_eq!(res.status(), StatusCode::OK);
-    assert_eq!(res.headers()["x-pennyrouter-smart-tier"], "lowest");
-    assert_eq!(res.headers()["x-pennyrouter-classifier-fallback"], "true");
-    assert_eq!(res.headers()["x-pennyrouter-provider"], "Raw");
+    assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body: serde_json::Value = res.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "no_eligible_offering");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("retired"),
+        "retired notice, got: {}",
+        body["error"]["message"]
+    );
+    // The attempt still counts (the metric fires before the leg).
     let rendered = metrics.render();
-    assert!(rendered.contains("pennyrouter_smart_fallback_total{tier=\"lowest\"} 1"));
+    assert!(rendered.contains("pennyrouter_smart_fallback_total{tier=\"low\"} 1"));
 }
 
 #[tokio::test]
@@ -699,9 +729,9 @@ async fn smart_id_on_native_alias_forwards_stripped_path() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
     assert_eq!(res.headers()["x-pennyrouter-smart-tier"], "low");
-    assert_eq!(res.headers()["x-pennyrouter-provider"], "Cheap");
+    assert_eq!(res.headers()["x-pennyrouter-provider"], "Raw");
     let seen = seen.lock().unwrap();
-    assert_eq!(seen.hits.get("Cheap"), Some(&1));
+    assert_eq!(seen.hits.get("Raw"), Some(&1));
 }
 
 #[tokio::test]
@@ -795,7 +825,7 @@ fn classifier_config_from_env() {
     assert_eq!(config.max_input_chars, 32_000);
 
     std::env::set_var("CLASSIFIER_BASE_URL", "https://foreign.example/v1/");
-    std::env::set_var("CLASSIFIER_FALLBACK_TIER", "lowest");
+    std::env::set_var("CLASSIFIER_FALLBACK_TIER", "low");
     std::env::set_var("CLASSIFIER_TIMEOUT_MS", "100");
     std::env::set_var("CLASSIFIER_MAX_TOKENS", "8");
     std::env::set_var("CLASSIFIER_MAX_INPUT_CHARS", "512");
@@ -803,18 +833,21 @@ fn classifier_config_from_env() {
     std::env::set_var("CLASSIFIER_API_KEY", "op-key");
     let config = ClassifierConfig::from_env("https://openrouter.ai/api").unwrap();
     assert_eq!(config.base_url, "https://foreign.example/v1");
-    assert_eq!(config.fallback_tier, "lowest");
+    assert_eq!(config.fallback_tier, "low");
     assert_eq!(config.timeout, Duration::from_millis(100));
     assert_eq!(config.max_tokens, 8);
     assert_eq!(config.max_input_chars, 512);
 
     // Unknown tier degrades to low; unparsable numerics fall back to
-    // defaults.
+    // defaults. The retired `lowest` degrades the same way.
     std::env::set_var("CLASSIFIER_FALLBACK_TIER", "bogus");
     std::env::set_var("CLASSIFIER_TIMEOUT_MS", "bogus");
     let config = ClassifierConfig::from_env("https://openrouter.ai/api").unwrap();
     assert_eq!(config.fallback_tier, "low");
     assert_eq!(config.timeout, Duration::from_millis(8000));
+    std::env::set_var("CLASSIFIER_FALLBACK_TIER", "lowest");
+    let config = ClassifierConfig::from_env("https://openrouter.ai/api").unwrap();
+    assert_eq!(config.fallback_tier, "low");
 
     clear_classifier_env();
 }

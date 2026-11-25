@@ -186,7 +186,6 @@ impl ClassifierResult {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ClassifierTier {
     Free,
-    Lowest,
     Low,
     Think,
     None,
@@ -196,7 +195,6 @@ impl ClassifierTier {
     pub fn of(tier: &str) -> Self {
         match tier {
             "free" => Self::Free,
-            "lowest" => Self::Lowest,
             "low" => Self::Low,
             "think" => Self::Think,
             _ => Self::None,
@@ -206,7 +204,6 @@ impl ClassifierTier {
     fn label(self) -> &'static str {
         match self {
             Self::Free => "free",
-            Self::Lowest => "lowest",
             Self::Low => "low",
             Self::Think => "think",
             Self::None => "none",
@@ -216,16 +213,15 @@ impl ClassifierTier {
     fn index(self) -> usize {
         match self {
             Self::Free => 0,
-            Self::Lowest => 1,
-            Self::Low => 2,
-            Self::Think => 3,
-            Self::None => 4,
+            Self::Low => 1,
+            Self::Think => 2,
+            Self::None => 3,
         }
     }
 }
 
 const CLASSIFIER_RESULTS: usize = 7;
-const CLASSIFIER_TIERS: usize = 5;
+const CLASSIFIER_TIERS: usize = 4;
 
 /// One read-only snapshot of classifier state for `GET /ui` (Iter 26):
 /// counts only, no prompts or verdicts.
@@ -234,7 +230,6 @@ pub struct ClassifierSummary {
     pub latency_count: u64,
     pub latency_sum_ms: f64,
     pub fallback_low: u64,
-    pub fallback_lowest: u64,
     pub last_error: String,
 }
 
@@ -252,7 +247,7 @@ pub struct Metrics {
     classifier_buckets: [AtomicU64; 14],
     classifier_sum_micros: AtomicU64,
     classifier_count: AtomicU64,
-    smart_fallback: [AtomicU64; 2],
+    smart_fallback: AtomicU64,
     /// Floored requests (Iter 33): (floor, tier, result) → count.
     /// Bounded: 101 floors × 6 tiers × 3 results.
     mintel: Mutex<HashMap<(u8, &'static str, &'static str), u64>>,
@@ -293,7 +288,7 @@ impl Metrics {
             classifier_buckets: [const { AtomicU64::new(0) }; 14],
             classifier_sum_micros: AtomicU64::new(0),
             classifier_count: AtomicU64::new(0),
-            smart_fallback: [const { AtomicU64::new(0) }; 2],
+            smart_fallback: AtomicU64::new(0),
             mintel: Mutex::new(HashMap::new()),
             classifier_last_error: Mutex::new(String::new()),
             score_models: Mutex::new(HashMap::new()),
@@ -399,11 +394,10 @@ impl Metrics {
         self.classifier_count.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Count one fallback to the configured tier after a classifier
-    /// failure. Only `low`/`lowest` are legal fallback tiers, so the
-    /// slot is a single bit.
-    pub fn smart_fallback(&self, lowest: bool) {
-        self.smart_fallback[usize::from(lowest)].fetch_add(1, Ordering::Relaxed);
+    /// Count one fallback to `low` after a classifier failure
+    /// (Iter 52: the only legal fallback tier).
+    pub fn smart_fallback(&self) {
+        self.smart_fallback.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Count one floored request (Iter 33). Labels are bounded: the
@@ -437,7 +431,6 @@ impl Metrics {
         ] {
             for tier in [
                 ClassifierTier::Free,
-                ClassifierTier::Lowest,
                 ClassifierTier::Low,
                 ClassifierTier::Think,
                 ClassifierTier::None,
@@ -454,8 +447,7 @@ impl Metrics {
             counts,
             latency_count: self.classifier_count.load(Ordering::Relaxed),
             latency_sum_ms: self.classifier_sum_micros.load(Ordering::Relaxed) as f64 / 1000.0,
-            fallback_low: self.smart_fallback[0].load(Ordering::Relaxed),
-            fallback_lowest: self.smart_fallback[1].load(Ordering::Relaxed),
+            fallback_low: self.smart_fallback.load(Ordering::Relaxed),
             last_error: self
                 .classifier_last_error
                 .lock()
@@ -605,7 +597,6 @@ impl Metrics {
         ] {
             for tier in [
                 ClassifierTier::Free,
-                ClassifierTier::Lowest,
                 ClassifierTier::Low,
                 ClassifierTier::Think,
                 ClassifierTier::None,
@@ -639,11 +630,7 @@ impl Metrics {
         out.push_str("# TYPE pennyrouter_smart_fallback_total counter\n");
         out.push_str(&format!(
             "pennyrouter_smart_fallback_total{{tier=\"low\"}} {}\n",
-            self.smart_fallback[0].load(Ordering::Relaxed)
-        ));
-        out.push_str(&format!(
-            "pennyrouter_smart_fallback_total{{tier=\"lowest\"}} {}\n",
-            self.smart_fallback[1].load(Ordering::Relaxed)
+            self.smart_fallback.load(Ordering::Relaxed)
         ));
         out.push_str(
             "# HELP pennyrouter_mintel_requests_total Floored requests by floor, tier, result.\n",

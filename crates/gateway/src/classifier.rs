@@ -10,16 +10,16 @@
 
 /// Pinned system prompt. Tests pin this text: changing it changes what
 /// the decision model optimizes for, so edits here are deliberate.
-pub const SYSTEM_PROMPT: &str = "You are a routing classifier. Given the full chat history, pick the cheapest tier that can answer well. Reply exactly one JSON object with no other text.\n\nsmart modes: {\"tier\": \"free\"|\"lowest\"|\"low\"}\nsmart/max modes: {\"tier\": \"free\"|\"lowest\"|\"low\"|\"think\"}\n\ntiers:\n  free   - trivial chat, greetings, reformatting, facts answerable by small models.\n  lowest - general help where lowest paid cost wins (no judged floor).\n  low    - cheapest judged offering (known quality floor).\n  think  - needs frontier quality/deep reasoning (best judged signals).\n\nConsider: prompt length, multi-step reasoning, factual risk, need for recency, ambiguity.\nOptional: {\"confidence\": 0.0..1.0, \"reasoning\": \"one short sentence\"} - never shown to user, logged.";
+pub const SYSTEM_PROMPT: &str = "You are a routing classifier. Given the full chat history, pick the cheapest tier that can answer well. Reply exactly one JSON object with no other text.\n\nsmart modes: {\"tier\": \"free\"|\"low\"}\nsmart/max modes: {\"tier\": \"free\"|\"low\"|\"think\"}\n\ntiers:\n  free   - trivial chat, greetings, reformatting, facts answerable by small models.\n  low    - general help where lowest paid cost wins (no quality floor).\n  think  - hardest reasoning: highest intelligence index within price caps.\n\nConsider: prompt length, multi-step reasoning, factual risk, need for recency, ambiguity.\nOptional: {\"confidence\": 0.0..1.0, \"reasoning\": \"one short sentence\"} - never shown to user, logged.";
 
 /// Classifier output domain. `smart` is always the 3-tier set;
 /// `smart/max` always adds `think`. There is no env alias that widens
 /// `smart`: the id on the wire is the whole contract.
 pub fn tier_set(smart_max: bool) -> Vec<&'static str> {
     if smart_max {
-        vec!["free", "lowest", "low", "think"]
+        vec!["free", "low", "think"]
     } else {
-        vec!["free", "lowest", "low"]
+        vec!["free", "low"]
     }
 }
 
@@ -210,8 +210,8 @@ mod tests {
 
     #[test]
     fn tier_sets_are_fixed() {
-        assert_eq!(tier_set(false), vec!["free", "lowest", "low"]);
-        assert_eq!(tier_set(true), vec!["free", "lowest", "low", "think"]);
+        assert_eq!(tier_set(false), vec!["free", "low"]);
+        assert_eq!(tier_set(true), vec!["free", "low", "think"]);
     }
 
     #[test]
@@ -379,7 +379,7 @@ mod tests {
         let envelope: serde_json::Value = serde_json::from_str(user).unwrap();
         assert_eq!(
             envelope["tier_set"],
-            serde_json::json!(["free", "lowest", "low", "think"])
+            serde_json::json!(["free", "low", "think"])
         );
         let plain = build_request("clf", &tier_set(false), &serde_json::json!("hi"), 64, false);
         assert!(plain.get("provider").is_none());

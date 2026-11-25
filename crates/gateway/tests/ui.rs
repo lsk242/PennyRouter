@@ -1222,14 +1222,20 @@ fn preview_low_top_matches_decide_and_shows_columns() {
 }
 
 #[test]
-fn preview_think_disagrees_with_low_and_free_picks_free() {
+fn preview_think_needs_intel_under_caps_and_free_picks_free() {
     let db = preview_db("unit-tiers", 1.0);
     let router = pennyrouter_gateway::routing::Router::load(&db).unwrap();
     let low = router.preview("openrouter/pair/low", None, 3);
-    let think = router.preview("openrouter/pair/think", None, 3);
     assert_eq!(low.fresh.as_ref().unwrap().provider, "Cheap");
-    // Best quality (high 0.95) beats cheapest here.
-    assert_eq!(think.fresh.as_ref().unwrap().provider, "ScoreP");
+    // Iter 53: the fixture has no intelligence data under the price
+    // caps, so think fails closed instead of guessing by quality.
+    let think = router.preview("openrouter/pair/think", None, 3);
+    assert!(think.fresh.is_none());
+    assert!(think.candidates.is_empty());
+    assert_eq!(
+        think.rejection.as_ref().unwrap().code,
+        "no_eligible_offering"
+    );
     let free = router.preview("openrouter/pair/free", None, 3);
     assert_eq!(free.fresh.as_ref().unwrap().provider, "FreeP");
     assert!(free.candidates.iter().all(|c| c.free_eligible));
@@ -1516,7 +1522,7 @@ async fn ui_shows_smart_and_mintel_examples() {
         "menu mintel example, got: {body}"
     );
     assert!(
-        body.contains("openrouter/pair/privacy/think/mintel/40/fallback/low"),
+        body.contains("openrouter/pair/privacy/think/mintel/30/fallback/low"),
         "menu full-chain example, got: {body}"
     );
 }

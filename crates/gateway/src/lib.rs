@@ -268,7 +268,7 @@ pub struct ClassifierConfig {
     pub model: String,
     pub base_url: String,
     pub timeout: Duration,
-    /// Tier served when the classifier leg fails: `low` or `lowest`.
+    /// Tier served when the classifier leg fails: `low`.
     pub fallback_tier: String,
     pub max_tokens: u32,
     /// Classifier input budget in serialized-JSON characters.
@@ -324,11 +324,12 @@ impl ClassifierConfig {
             .ok()
             .filter(|url| !url.is_empty())
             .unwrap_or_else(|| openrouter_default.to_string());
+        // Only `low` is a legal fallback tier (Iter 52 retired
+        // `lowest`); anything else warns and uses `low`.
         let fallback_tier = match std::env::var("CLASSIFIER_FALLBACK_TIER")
             .as_deref()
             .unwrap_or("low")
         {
-            "lowest" => "lowest".to_string(),
             "low" => "low".to_string(),
             other => {
                 eprintln!("gateway: unknown CLASSIFIER_FALLBACK_TIER {other:?}, using \"low\"");
@@ -524,10 +525,6 @@ impl AppState {
     /// `UPSTREAM_MAX_QUEUED`, defaulting to the compiled defaults on
     /// missing or unparsable values.
     pub fn from_env() -> Self {
-        // Ordering default (Iter 47): invalid values fail closed at
-        // startup (panic before serving anything) instead of routing
-        // on a silently-wrong ordering.
-        let ordering = routing::ordering_from_env().unwrap_or_else(|e| panic!("gateway: {e}"));
         let base = std::env::var("OPENROUTER_BASE_URL")
             .unwrap_or_else(|_| "https://openrouter.ai/api".to_string());
         let limits = ConcurrencyLimits {
@@ -587,12 +584,10 @@ impl AppState {
         match std::env::var("CATALOG_DB") {
             Err(_) => state,
             Ok(path) => match routing::Router::load(&path) {
-                Ok(router) => state.with_router(Arc::new(router.with_ordering(ordering))),
+                Ok(router) => state.with_router(Arc::new(router)),
                 Err(e) => {
                     eprintln!("gateway: routing standby ({e}), passing through until reload heals");
-                    state.with_router(Arc::new(
-                        routing::Router::standby(&path).with_ordering(ordering),
-                    ))
+                    state.with_router(Arc::new(routing::Router::standby(&path)))
                 }
             },
         }
@@ -1372,7 +1367,7 @@ async fn ui_page(State(state): State<AppState>, Query(params): Query<UiParams>) 
                     (e.g. <code>openrouter/pair/low/mintel/20</code>); pinned-model form \
                     <code>openrouter/pair/model/&lt;id&gt;</code>; fallback form \
                     <code>openrouter/pair/free/fallback/low</code> \
-                    (full chain: <code>openrouter/pair/privacy/think/mintel/40/fallback/low</code>).</p>",
+                    (full chain: <code>openrouter/pair/privacy/think/mintel/30/fallback/low</code>).</p>",
                 );
                 // Popularity pins: top OpenRouter models (menu pins, served
                 // passthrough) and hot apps, with the citation timestamp.
@@ -1847,15 +1842,15 @@ async fn ui_page(State(state): State<AppState>, Query(params): Query<UiParams>) 
         catch(e){}}}\
         document.getElementById('inspector-refresh').onclick=async function(){\
         await insRefreshGroup('fixed',['openrouter/pair/free','openrouter/pair/low','openrouter/pair/think',\
-        'openrouter/pair/agent','openrouter/pair/coding',\
+        'openrouter/pair/agent','openrouter/pair/coding','openrouter/pair/coding/task',\
         'openrouter/pair/decision','openrouter/pair/decision/free','openrouter/pair/batch',\
         'openrouter/pair/privacy/free',\
         'openrouter/pair/privacy/low','openrouter/pair/privacy/think',\
-        'openrouter/pair/privacy/agent','openrouter/pair/privacy/coding',\
+        'openrouter/pair/privacy/agent','openrouter/pair/privacy/coding','openrouter/pair/privacy/coding/task',\
         'openrouter/pair/privacy/decision',\
         'openrouter/pair/privacy/decision/free','openrouter/pair/privacy/batch']);\
         await insRefreshGroup('mintel',['openrouter/pair/low/mintel/20',\
-        'openrouter/pair/privacy/think/mintel/40']);};\
+        'openrouter/pair/privacy/think/mintel/30']);};\
         </script>",
     );
     }
@@ -1878,10 +1873,10 @@ async fn ui_page(State(state): State<AppState>, Query(params): Query<UiParams>) 
         page.push_str(
             "<h3>Example ids</h3><ul>\
             <li><code>openrouter/pair/smart</code> — the classifier picks \
-            <code>free</code>, <code>lowest</code>, or <code>low</code> per request</li>\
+            <code>free</code> or <code>low</code> per request</li>\
             <li><code>openrouter/pair/smart/max</code> — the classifier may also pick \
             <code>think</code></li>\
-            <li><code>openrouter/pair/privacy/smart/max/mintel/40</code> — privacy fields \
+            <li><code>openrouter/pair/privacy/smart/max/mintel/30</code> — privacy fields \
             plus an intelligence-index floor compose; a <code>/fallback/</code> suffix never does \
             (<code>smart/.../fallback/...</code> is rejected)</li>\
             </ul>\
@@ -1909,8 +1904,8 @@ async fn ui_page(State(state): State<AppState>, Query(params): Query<UiParams>) 
                 0.0
             };
             page.push_str(&format!(
-                "<p>Legs: {} (avg {avg_ms:.1} ms) — fallbacks: low {} / lowest {}.</p>",
-                summary.latency_count, summary.fallback_low, summary.fallback_lowest,
+                "<p>Legs: {} (avg {avg_ms:.1} ms) — fallbacks to low: {}.</p>",
+                summary.latency_count, summary.fallback_low,
             ));
             if !summary.last_error.is_empty() {
                 page.push_str(&format!("<p>Last error: {}</p>", esc(&summary.last_error)));
@@ -2225,8 +2220,8 @@ async fn routed_decisions(
         || model
             .as_deref()
             .is_some_and(|model| routing::invalid_virtual(model).is_some());
-    // `lowest`-tag rewrites fail closed like virtual ids (Iter 44):
-    // the rewritten id would 404 opaquely upstream. Retry stays
+    // Retired `lowest` tags fail closed like virtual ids (Iter 52):
+    // the tagged id would 404 opaquely upstream. Retry stays
     // virtual-only (tags are exactly-once), so this flag feeds
     // only the rejection arm below.
     let fail_closed = is_virtual
@@ -2234,7 +2229,7 @@ async fn routed_decisions(
             state
                 .router
                 .as_ref()
-                .is_some_and(|router| router.is_lowest_rewrite(model))
+                .is_some_and(|router| router.is_retired_lowest_tag(model))
         });
     // Q06-B: privacy virtual ids fail closed on the decisions route.
     // The decisions API has no verified zero-retention field, so
@@ -2472,8 +2467,8 @@ async fn routed_completion(
         || model
             .as_deref()
             .is_some_and(|model| routing::invalid_virtual(model).is_some());
-    // `lowest`-tag rewrites fail closed like virtual ids (Iter 44):
-    // the rewritten id would 404 opaquely upstream. Retry stays
+    // Retired `lowest` tags fail closed like virtual ids (Iter 52):
+    // the tagged id would 404 opaquely upstream. Retry stays
     // virtual-only (tags are exactly-once), so this flag feeds
     // only the rejection arm below.
     let fail_closed = is_virtual
@@ -2481,7 +2476,7 @@ async fn routed_completion(
             state
                 .router
                 .as_ref()
-                .is_some_and(|router| router.is_lowest_rewrite(model))
+                .is_some_and(|router| router.is_retired_lowest_tag(model))
         });
     // Free-fallback chains (Iter 21) resolve here: (original model id,
     // fallback tier) for the post-retry leg below.
@@ -3066,7 +3061,7 @@ async fn smart_completion(
             // tier. If that tier itself rejects, the rejection stands —
             // the fallback is a value, not a chain.
             let fallback = config.fallback_tier.clone();
-            state.metrics.smart_fallback(fallback == "lowest");
+            state.metrics.smart_fallback();
             let ctx = SmartCtx::new(
                 fallback.clone(),
                 &config,
