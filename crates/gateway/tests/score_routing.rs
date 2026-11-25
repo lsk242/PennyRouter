@@ -1,6 +1,6 @@
 //! Iter 44: routing reads the published score/ordering only.
 //! `low`/`think` serve the bracket ends from the stored v2
-//! components; `lowest` stays full-list cheapest with `/minindex/`
+//! components; `lowest` stays full-list cheapest with `/mintel/`
 //! filtering and activity tie-breaks; missing score data falls back
 //! to the legacy ordering.
 
@@ -154,7 +154,7 @@ fn build_db_lowest(path: &std::path::Path) {
     let _ = std::fs::remove_file(path);
     let catalog = Catalog::open(path).unwrap();
     catalog.init().unwrap();
-    for (model, provider, price, coding, level) in [
+    for (model, provider, price, intel, level) in [
         ("m/tie-a", "TieA", 1e-7, 50, Some(0.9)),
         ("m/tie-b", "TieB", 1e-7, 50, Some(0.1)),
         ("m/dear", "Dear", 5e-7, 90, Some(0.5)),
@@ -166,8 +166,8 @@ fn build_db_lowest(path: &std::path::Path) {
             .update_model_index(
                 model,
                 &ModelIndex {
-                    aa_intelligence_index: None,
-                    aa_coding_index: Some(coding),
+                    aa_intelligence_index: Some(intel),
+                    aa_coding_index: None,
                     aa_agentic_index: None,
                     aa_cost_per_task: None,
                 },
@@ -371,7 +371,7 @@ async fn lowest_stays_full_list_cheapest() {
 }
 
 #[tokio::test]
-async fn lowest_minindex_filters_and_activity_breaks_ties() {
+async fn lowest_mintel_filters_and_activity_breaks_ties() {
     let db = scratch_db("lowest-floor");
     build_db_lowest(&db);
     let mock = spawn_mock(mock_app(Arc::new(Mutex::new(Upstream::default())))).await;
@@ -379,25 +379,25 @@ async fn lowest_minindex_filters_and_activity_breaks_ties() {
 
     // Floor 40 drops Cheapster (30): the 1e-7 tie breaks toward the
     // higher activity level.
-    let res = post_chat(gw, "m/tie-a/lowest/minindex/40").await;
+    let res = post_chat(gw, "m/tie-a/lowest/mintel/40").await;
     assert_eq!(res.status(), StatusCode::OK);
     assert_eq!(provider_of(&res), "TieA");
     assert_eq!(
-        res.headers().get("x-pennyrouter-minindex").unwrap(),
+        res.headers().get("x-pennyrouter-mintel").unwrap(),
         "40",
         "floor echoed back"
     );
     // Floor 85 leaves Dear (90) alone.
-    let res = post_chat(gw, "m/tie-a/lowest/minindex/85").await;
+    let res = post_chat(gw, "m/tie-a/lowest/mintel/85").await;
     assert_eq!(res.status(), StatusCode::OK);
     assert_eq!(provider_of(&res), "Dear");
     // Nothing indexed that high: fail closed.
-    let res = post_chat(gw, "m/tie-a/lowest/minindex/100").await;
+    let res = post_chat(gw, "m/tie-a/lowest/mintel/100").await;
     assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
     let body: serde_json::Value = res.json().await.unwrap();
     assert_eq!(body["error"]["code"], "no_eligible_offering");
     // Malformed floors fail closed like the virtual suffix.
-    let res = post_chat(gw, "m/tie-a/lowest/minindex/abc").await;
+    let res = post_chat(gw, "m/tie-a/lowest/mintel/abc").await;
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     let body: serde_json::Value = res.json().await.unwrap();
     assert_eq!(body["error"]["code"], "invalid_model");
@@ -443,10 +443,10 @@ fn previews_match_score_routing() {
     let db = scratch_db("preview-lowest");
     build_db_lowest(&db);
     let router = pennyrouter_gateway::routing::Router::load(&db).expect("router loads");
-    let lowest = router.preview("m/tie-a/lowest/minindex/40", None, 5);
+    let lowest = router.preview("m/tie-a/lowest/mintel/40", None, 5);
     assert!(lowest.rejection.is_none(), "{:?}", lowest.rejection);
     assert_eq!(lowest.fresh.as_ref().unwrap().provider, "TieA");
-    let bad = router.preview("m/tie-a/lowest/minindex/abc", None, 5);
+    let bad = router.preview("m/tie-a/lowest/mintel/abc", None, 5);
     assert_eq!(bad.rejection.as_ref().unwrap().code, "invalid_model");
 }
 

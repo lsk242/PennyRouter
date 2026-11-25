@@ -1,6 +1,6 @@
-//! Iter 33: the `minindex` suffix filter against a mock backend.
+//! Iter 33: the `mintel` suffix filter against a mock backend.
 //!
-//! Two catalog models with different AA coding indexes: the floor must
+//! Two catalog models with different AA intelligence indexes: the floor must
 //! pick the eligible one, echo the floor, and fail closed on an
 //! unusable or unsatisfiable suffix.
 
@@ -114,13 +114,13 @@ fn build_db(path: &std::path::Path) {
             .unwrap();
         catalog.update_endpoint_score(endpoint.id, &score).unwrap();
     }
-    for (model_id, coding) in [("acme/weak", 30), ("acme/strong", 60)] {
+    for (model_id, intel) in [("acme/weak", 30), ("acme/strong", 60)] {
         catalog
             .update_model_index(
                 model_id,
                 &ModelIndex {
-                    aa_intelligence_index: None,
-                    aa_coding_index: Some(coding),
+                    aa_intelligence_index: Some(intel),
+                    aa_coding_index: None,
                     aa_agentic_index: None,
                     aa_cost_per_task: None,
                 },
@@ -130,7 +130,7 @@ fn build_db(path: &std::path::Path) {
 }
 
 fn scratch_db(test: &str) -> std::path::PathBuf {
-    std::env::temp_dir().join(format!("gateway-minindex-{test}-{}.db", std::process::id()))
+    std::env::temp_dir().join(format!("gateway-mintel-{test}-{}.db", std::process::id()))
 }
 
 async fn spawn_gateway(
@@ -174,14 +174,14 @@ fn upstream_model(body: &[u8]) -> String {
 }
 
 #[tokio::test]
-async fn minindex_picks_the_eligible_model_and_echoes_the_floor() {
+async fn mintel_picks_the_eligible_model_and_echoes_the_floor() {
     let (addr, seen) = setup("route").await;
-    let response = post_chat(addr, "openrouter/pair/low/minindex/50").await;
+    let response = post_chat(addr, "openrouter/pair/low/mintel/50").await;
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
         response
             .headers()
-            .get("x-pennyrouter-minindex")
+            .get("x-pennyrouter-mintel")
             .and_then(|v| v.to_str().ok()),
         Some("50")
     );
@@ -190,18 +190,38 @@ async fn minindex_picks_the_eligible_model_and_echoes_the_floor() {
 }
 
 #[tokio::test]
-async fn minindex_invalid_suffix_is_a_400() {
+async fn mintel_invalid_suffix_is_a_400() {
     let (addr, _seen) = setup("invalid").await;
-    let response = post_chat(addr, "openrouter/pair/low/minindex/abc").await;
+    let response = post_chat(addr, "openrouter/pair/low/mintel/abc").await;
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body: serde_json::Value = response.json().await.unwrap();
     assert_eq!(body["error"]["code"], "invalid_model");
 }
 
+/// Iter 50: the retired `/minindex/` segment fails closed with the
+/// rename notice instead of leaking upstream.
 #[tokio::test]
-async fn minindex_unsatisfiable_floor_is_a_503() {
+async fn retired_minindex_segment_names_the_rename() {
+    let (addr, seen) = setup("retired").await;
+    let response = post_chat(addr, "openrouter/pair/low/minindex/50").await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "invalid_model");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("renamed to /mintel/"),
+        "rename notice, got: {}",
+        body["error"]["message"]
+    );
+    assert!(seen.lock().unwrap().bodies.is_empty());
+}
+
+#[tokio::test]
+async fn mintel_unsatisfiable_floor_is_a_503() {
     let (addr, _seen) = setup("unsatisfiable").await;
-    let response = post_chat(addr, "openrouter/pair/low/minindex/90").await;
+    let response = post_chat(addr, "openrouter/pair/low/mintel/90").await;
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(
         response
@@ -215,10 +235,10 @@ async fn minindex_unsatisfiable_floor_is_a_503() {
 }
 
 #[tokio::test]
-async fn minindex_requests_are_counted() {
+async fn mintel_requests_are_counted() {
     let (addr, _seen) = setup("metrics").await;
     assert_eq!(
-        post_chat(addr, "openrouter/pair/low/minindex/50")
+        post_chat(addr, "openrouter/pair/low/mintel/50")
             .await
             .status(),
         StatusCode::OK
@@ -230,9 +250,8 @@ async fn minindex_requests_are_counted() {
         .await
         .unwrap();
     assert!(
-        metrics.contains(
-            r#"pennyrouter_minindex_requests_total{minindex="50",tier="low",result="ok"} 1"#
-        ),
+        metrics
+            .contains(r#"pennyrouter_mintel_requests_total{mintel="50",tier="low",result="ok"} 1"#),
         "{metrics}"
     );
 }

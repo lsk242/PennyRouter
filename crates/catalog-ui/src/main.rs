@@ -719,10 +719,10 @@ async fn index(
     ));
 
     body.push_str(
-        "<p>Gateway filter: the coding index powers the gateway's \
-        <code>/minindex/&lt;n&gt;</code> suffix — e.g. \
-        <code>openrouter/pair/low/minindex/50</code> keeps only models with coding \
-        at or above 50 (models with no index never pass).</p>",
+        "<p>Gateway filter: the intelligence index powers the gateway's \
+        <code>/mintel/&lt;n&gt;</code> suffix — e.g. \
+        <code>openrouter/pair/low/mintel/20</code> keeps only models with intelligence \
+        at or above 20 (models with no index never pass).</p>",
     );
 
     body.push_str("<h2>Precision classes</h2><table><tr><th>class</th><th>offerings</th></tr>");

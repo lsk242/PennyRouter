@@ -1,7 +1,8 @@
-//! Iter 48: `openrouter/pair/coding[/think]` (+ `privacy/`) run
-//! the `low`/`think` legacy orderings scoped to the most-used
-//! (top-usage bracket) models. No bracket data means no pool — they
-//! fail closed instead of silently serving the full list.
+//! Iter 48: `openrouter/pair/coding` (+ `privacy/`) runs the
+//! `low` legacy ordering scoped to the most-used (top-usage
+//! bracket) models. No bracket data means no pool — it fails
+//! closed instead of silently serving the full list. (Iter 51
+//! dropped the `coding/think` sibling.)
 
 use axum::{body::Bytes, http::StatusCode, routing::post, Router};
 use pennyrouter_catalog::{
@@ -23,8 +24,8 @@ fn build_db(path: &std::path::Path, bracket: bool) {
     let _ = std::fs::remove_file(path);
     let catalog = Catalog::open(path).unwrap();
     catalog.init().unwrap();
-    // (model, provider, price, tier, score, coding)
-    for (model, provider, price, tier, score, coding) in [
+    // (model, provider, price, tier, score, intel)
+    for (model, provider, price, tier, score, intel) in [
         ("m/pop-cheap", "Cheap", 5e-7, "low", 0.1, 60),
         ("m/pop-best", "Best", 1e-6, "high", 0.9, 90),
         ("m/obscure", "Sneaky", 1e-7, "standard", 0.5, 95),
@@ -98,8 +99,8 @@ fn build_db(path: &std::path::Path, bracket: bool) {
             .update_model_index(
                 model,
                 &ModelIndex {
-                    aa_intelligence_index: None,
-                    aa_coding_index: Some(coding),
+                    aa_intelligence_index: Some(intel),
+                    aa_coding_index: None,
                     aa_agentic_index: None,
                     aa_cost_per_task: None,
                 },
@@ -206,24 +207,6 @@ async fn coding_routes_cheapest_in_bracket() {
 }
 
 #[tokio::test]
-async fn coding_think_routes_best_quality_in_bracket() {
-    let db = scratch_db("think");
-    build_db(&db, true);
-    let seen = Arc::new(Mutex::new(Upstream::default()));
-    let mock = spawn_mock(mock_app(seen.clone())).await;
-    let gw = spawn_gateway(mock, &db).await;
-
-    let res = post_chat(gw, "openrouter/pair/coding/think").await;
-    assert_eq!(res.status(), StatusCode::OK);
-    assert_eq!(provider_of(&res), "Best");
-    let guard = seen.lock().unwrap();
-    assert_eq!(
-        guard.models.get("Best").map(String::as_str),
-        Some("m/pop-best")
-    );
-}
-
-#[tokio::test]
 async fn coding_without_bracket_fails_closed() {
     let db = scratch_db("empty");
     build_db(&db, false);
@@ -231,7 +214,7 @@ async fn coding_without_bracket_fails_closed() {
     let mock = spawn_mock(mock_app(seen.clone())).await;
     let gw = spawn_gateway(mock, &db).await;
 
-    for model in ["openrouter/pair/coding", "openrouter/pair/coding/think"] {
+    for model in ["openrouter/pair/coding", "openrouter/pair/privacy/coding"] {
         let res = post_chat(gw, model).await;
         assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE, "{model}");
         let body: serde_json::Value = res.json().await.unwrap();
@@ -241,7 +224,7 @@ async fn coding_without_bracket_fails_closed() {
 }
 
 #[tokio::test]
-async fn coding_privacy_and_minindex_and_fallback_target() {
+async fn coding_privacy_and_mintel_and_fallback_target() {
     let db = scratch_db("variants");
     build_db(&db, true);
     let seen = Arc::new(Mutex::new(Upstream::default()));
@@ -259,8 +242,8 @@ async fn coding_privacy_and_minindex_and_fallback_target() {
         assert_eq!(provider["data_collection"], serde_json::json!("deny"));
     }
 
-    // Minindex floor 85 drops Cheap (60): Best (90) serves.
-    let res = post_chat(gw, "openrouter/pair/coding/minindex/85").await;
+    // Mintel floor 85 drops Cheap (60): Best (90) serves.
+    let res = post_chat(gw, "openrouter/pair/coding/mintel/85").await;
     assert_eq!(res.status(), StatusCode::OK);
     assert_eq!(provider_of(&res), "Best");
 
@@ -288,8 +271,12 @@ fn coding_previews_list_bracket_only() {
             .map(|c| &c.model_id)
             .collect::<Vec<_>>()
     );
-    let think = router.preview("openrouter/pair/coding/think", None, 5);
-    assert_eq!(think.fresh.as_ref().unwrap().provider, "Best");
+    // Iter 51: `coding/think` is dropped — unknown ids preview
+    // passthrough, never a candidate list.
+    let dropped = router.preview("openrouter/pair/coding/think", None, 5);
+    assert!(dropped.fresh.is_none());
+    assert!(dropped.candidates.is_empty());
+    assert!(dropped.rejection.is_none());
     // No bracket data: the preview fails closed like routing.
     let db = scratch_db("preview-empty");
     build_db(&db, false);
@@ -323,12 +310,13 @@ async fn menu_lists_coding_ids() {
         .iter()
         .filter_map(|m| m["id"].as_str())
         .collect();
+    for id in ["openrouter/pair/coding", "openrouter/pair/privacy/coding"] {
+        assert!(ids.contains(&id), "{id} listed");
+    }
     for id in [
-        "openrouter/pair/coding",
-        "openrouter/pair/privacy/coding",
         "openrouter/pair/coding/think",
         "openrouter/pair/privacy/coding/think",
     ] {
-        assert!(ids.contains(&id), "{id} listed");
+        assert!(!ids.contains(&id), "{id} dropped in Iter 51");
     }
 }

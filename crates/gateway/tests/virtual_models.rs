@@ -222,7 +222,7 @@ fn mock_app(
 }
 
 #[tokio::test]
-async fn models_menu_lists_exactly_the_twenty_virtual_ids() {
+async fn models_menu_lists_exactly_the_virtual_ids() {
     let db = scratch_db("menu");
     build_db(&db);
     let mock = spawn_mock(mock_app(
@@ -251,16 +251,16 @@ async fn models_menu_lists_exactly_the_twenty_virtual_ids() {
     assert_eq!(
         ids,
         [
+            "openrouter/pair/agent",
             "openrouter/pair/batch",
             "openrouter/pair/coding",
-            "openrouter/pair/coding/think",
             "openrouter/pair/decision",
             "openrouter/pair/decision/free",
             "openrouter/pair/free",
             "openrouter/pair/low",
+            "openrouter/pair/privacy/agent",
             "openrouter/pair/privacy/batch",
             "openrouter/pair/privacy/coding",
-            "openrouter/pair/privacy/coding/think",
             "openrouter/pair/privacy/decision",
             "openrouter/pair/privacy/decision/free",
             "openrouter/pair/privacy/free",
@@ -1427,12 +1427,12 @@ async fn menu_lists_virtual_popular_and_configured_providers() {
         "openrouter/pair/privacy/free",
         "openrouter/pair/low",
         "openrouter/pair/privacy/low",
+        "openrouter/pair/agent",
+        "openrouter/pair/privacy/agent",
         "openrouter/pair/coding",
         "openrouter/pair/privacy/coding",
         "openrouter/pair/think",
         "openrouter/pair/privacy/think",
-        "openrouter/pair/coding/think",
-        "openrouter/pair/privacy/coding/think",
         "openrouter/pair/decision",
         "openrouter/pair/privacy/decision",
         "openrouter/pair/decision/free",

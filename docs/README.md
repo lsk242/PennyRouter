@@ -33,4 +33,5 @@ All product documentation lives here, Markdown only.
 - [proposals/2026-11-03-minindex-filter.md](proposals/2026-11-03-minindex-filter.md) — proposal: `openrouter/pair/.../minindex/[number]` suffix filter on AA coding index.
 - [proposals/2026-11-12-catalog-ui-value-score.md](proposals/2026-11-12-catalog-ui-value-score.md) — proposal: deterministic catalog rank score (AA index × precision × price efficiency × popularity) + catalog UI overview and models tabs.
 - [proposals/2026-11-18-popularity-first-ranking.md](proposals/2026-11-18-popularity-first-ranking.md) — proposal: catalog score + popularity-first ranking (usage brackets, version-gated performance, TOP tab).
+- [proposals/2026-11-25-catalog-rebuild.md](proposals/2026-11-25-catalog-rebuild.md) — proposal: catalog rebuild from scratch (three sources, use columns, filter+order tiers, drop list).
 - [popularity-first-plan.md](popularity-first-plan.md) — implementation plan for catalog score + popularity-first ranking (Iter 42-47).

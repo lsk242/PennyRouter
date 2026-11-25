@@ -42,6 +42,10 @@ pub const RANKINGS_WINDOW_DAYS: i64 = 7;
 pub const RANKINGS_SPAN_DAYS: i64 = 28;
 /// Pinned `openrouter/<slug>` menu ids.
 pub const POPULAR_MODELS_TOP_N: usize = 10;
+/// Agent pool (Iter 49): top slugs by recent-window tokens, `:free`
+/// variants excluded. The `agent` tier serves the cheapest offering
+/// across the resolved models.
+pub const AGENT_TOP_N: usize = 20;
 /// Hot apps shown on `/ui` (the API publishes no per-app models).
 pub const POPULAR_APPS_TOP_N: usize = 10;
 

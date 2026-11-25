@@ -357,5 +357,23 @@ cheap judge model, classifier-based routing.
       data; `minindex` composes; fallback targets; menu + inspector
       list them. Test: parse + `coding_tiers.rs`; full workspace
       green (431 passed).
+- [x] **Iter 49 — Agent tier.** `openrouter/pair/agent`
+      (+ `privacy/`): cheapest paid offering across the usage
+      top-20 pool (`:free` excluded, no floor); catalog publishes
+      the ranked pool from the rankings window; fail closed without
+      pool data; `minindex` composes; fallback target; menu (22 ids)
+      + inspector (18 combos) list it. Test: pool build/resolution
+      + `agent.rs`; full workspace green (453 passed).
+- [x] **Iter 50 — `mintel` rename.** `/minindex/` → `/mintel/`
+      rebased on the AA intelligence index (new snapshot map;
+      header/metric/parse/fields renamed; retired segment fails
+      closed naming the rename); fixed examples 20/40. Test:
+      `mintel.rs` (route/400/503/metric/retired) + rebased unit
+      and fixture gates; full workspace green (454 passed).
+- [x] **Iter 51 — Drop `coding/think` + top-5 inspector.** The
+      `coding/think` tier is removed (parse/menu/preview/fallback);
+      fixed inspector combos render top-5 server- and client-side.
+      Test: drop asserts (parse/menu/preview) + full workspace
+      green (453 passed).
 
-## After Iter 48
+## After Iter 51

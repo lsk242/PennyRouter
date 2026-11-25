@@ -98,9 +98,12 @@ pub struct Offering {
 pub struct Snapshot {
     pub models: HashMap<String, Vec<Offering>>,
     /// Artificial Analysis coding index per model where known
-    /// (Iter 31): loaded for display and future filters; routing
-    /// ignores it until a consumer lands.
+    /// (Iter 31): display-only for the debug UI model headers.
     pub aa_coding_index: HashMap<String, i64>,
+    /// Artificial Analysis intelligence index per model where known
+    /// (Iter 50): the `/mintel/` floor reads this map. Unknown
+    /// models never meet a floor.
+    pub aa_intelligence_index: HashMap<String, i64>,
     /// Per-model signals the value score reads (Iter 34): AA indexes
     /// + popularity share. Display-only for the debug UI models tab.
     pub model_signals: HashMap<String, ModelSignals>,
@@ -108,6 +111,10 @@ pub struct Snapshot {
     /// the bracket ends when this is non-empty, legacy ordering
     /// otherwise. Empty on old/keyless artifacts.
     pub bracket: HashSet<String>,
+    /// Ranked agent-pool model ids (Iter 49): top-20 usage excluding
+    /// free variants. The `agent` tier serves the cheapest offering
+    /// across this pool and fails closed when it is empty.
+    pub agent_top20: HashSet<String>,
     /// Model-level TOP rollup (Iter 46): best score + components +
     /// flags per generic model. Display + metrics only; routing
     /// reads the bracket set above.
@@ -148,9 +155,9 @@ pub struct Decision {
     pub orientation: Orientation,
     /// True when stickiness kept a previously pinned provider.
     pub sticky: bool,
-    /// AA coding-index floor this pick had to satisfy (Iter 33);
-    /// echoed as `x-pennyrouter-minindex` when present.
-    pub minindex: Option<u8>,
+    /// AA intelligence-index floor this pick had to satisfy (Iter 33);
+    /// echoed as `x-pennyrouter-mintel` when present.
+    pub mintel: Option<u8>,
     /// Ordering that served this pick (Iter 47): `score` /
     /// `legacy` / `longtail` for the ordered tiers, the leg name
     /// elsewhere. Counted per pick for A/B comparison.
@@ -193,10 +200,10 @@ impl Pin {
     }
 }
 
-/// `minindex` tail for pin reasons (Iter 39): empty without a floor.
-fn minindex_note(minindex: Option<u8>) -> String {
-    minindex.map_or_else(String::new, |floor| {
-        format!(" minindex/{floor} floor applied first (models below it, or unindexed, never win).")
+/// `mintel` tail for pin reasons (Iter 39): empty without a floor.
+fn mintel_note(mintel: Option<u8>) -> String {
+    mintel.map_or_else(String::new, |floor| {
+        format!(" mintel/{floor} floor applied first (models below it, or unindexed, never win).")
     })
 }
 
@@ -223,9 +230,9 @@ const SESSION_TTL: Duration = Duration::from_secs(30 * 60);
 /// Header carrying the chosen provider on routed responses.
 pub const PROVIDER_HEADER: &str = "x-pennyrouter-provider";
 
-/// Header echoing the AA coding-index floor a routed request carried
-/// (Iter 33); absent when the id had no `/minindex/` suffix.
-pub const MININDEX_HEADER: &str = "x-pennyrouter-minindex";
+/// Header echoing the AA intelligence-index floor a routed request carried
+/// (Iter 33); absent when the id had no `/mintel/` suffix.
+pub const MINTEL_HEADER: &str = "x-pennyrouter-mintel";
 
 /// Precision classes eligible for tier routing: a coarse grouping
 /// key, never a wire value (since Iter 36 the exact raw
@@ -265,12 +272,16 @@ pub const FREE_MODEL: &str = "openrouter/free";
 /// price; FP resolution is a separate class, never a silent
 /// substitute.
 ///
-/// `coding`/`coding/think` (Iter 48) = the `low`/`think` legacy
-/// orderings (cheapest / best quality signals) scoped to the
-/// most-used (top-usage bracket) models — popularity-first picks
+/// `coding` (Iter 48; the `coding/think` sibling was dropped in
+/// Iter 51) = the `low` legacy ordering (cheapest) scoped to the
+/// most-used (top-usage bracket) models — a popularity-first pick
 /// alongside the score-first `low`/`think`. No bracket data means
-/// no pool, so they fail closed instead of silently serving the
+/// no pool, so it fails closed instead of silently serving the
 /// full list.
+///
+/// `agent` (Iter 49) = cheapest paid offering across the usage
+/// top-20 pool (`:free` variants excluded), no quality floor.
+/// No pool data means no picks — it fails closed.
 ///
 /// `smart` (Iter 26) is not a tier but a classifier mode: the gateway
 /// calls a decision model to pick one of `free`/`lowest`/`low`
@@ -283,8 +294,8 @@ pub enum VirtualTier {
     Free,
     Low,
     Think,
+    Agent,
     Coding,
-    CodingThink,
     Decision,
     Batch,
     Smart,
@@ -292,7 +303,7 @@ pub enum VirtualTier {
 }
 
 /// A virtual model id: `<provider>/pair/[privacy/]<free|low|think|\
-/// decision|batch|smart|smart/max>` with an optional `/free` cost
+/// agent|decision|batch|smart|smart/max>` with an optional `/free` cost
 /// scope on `decision`, plus the fallback form
 /// `<provider>/pair/[privacy/]<free|decision/free>/fallback/<tier>`
 /// (Iter 21). The provider
@@ -322,11 +333,12 @@ pub struct VirtualModel {
     /// skip, budget, tool filter, and fallback all scope to that
     /// model's offerings — cross-model tiers are not consulted.
     pub pinned_model: Option<String>,
-    /// Minimum AA coding index floor (Iter 33), from an optional
-    /// `/minindex/<n>` suffix (`n` in 0..=100). Scopes the primary
-    /// leg only: models without a known index are excluded when a
-    /// floor is present. Fallback legs run without the floor.
-    pub minindex: Option<u8>,
+    /// Minimum AA intelligence index floor (Iter 33, `/mintel/`
+    /// since Iter 50), from an optional `/mintel/<n>` suffix (`n`
+    /// in 0..=100). Scopes the primary leg only: models without a
+    /// known index are excluded when a floor is present. Fallback
+    /// legs run without the floor.
+    pub mintel: Option<u8>,
 }
 
 /// Body rewrite applied after a pick (Iter 27): chat injects
@@ -334,13 +346,19 @@ pub struct VirtualModel {
 /// only.
 type BodyFinish = fn(&str, serde_json::Value, Decision) -> Option<(Vec<u8>, Decision)>;
 
-/// Suffix introducing the minimum AA coding index (Iter 33):
-/// `/minindex/<0..=100>`.
-const MININDEX_SEGMENT: &str = "/minindex/";
+/// Suffix introducing the minimum AA intelligence index (Iter 33,
+/// renamed Iter 50): `/mintel/<0..=100>`.
+const MINTEL_SEGMENT: &str = "/mintel/";
 
-/// Parse one `minindex` value: digits only, `0..=100` (leading zeros
+/// Retired-segment notice (Iter 50): the old `/minindex/` floor was
+/// renamed to `/mintel/` and rebased on the intelligence index.
+/// Returned instead of routing, so stale callers get a 400 naming
+/// the fix rather than an opaque upstream 404.
+const MINTEL_RENAMED: &str = "/minindex/ was renamed to /mintel/ in Iter 50; use /mintel/<0..=100>";
+
+/// Parse one `mintel` value: digits only, `0..=100` (leading zeros
 /// allowed, e.g. `050` == 50). Signs, decimals, and empty values fail.
-fn parse_minindex_value(value: &str) -> Option<u8> {
+fn parse_mintel_value(value: &str) -> Option<u8> {
     if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
@@ -350,33 +368,42 @@ fn parse_minindex_value(value: &str) -> Option<u8> {
     }
 }
 
-/// `minindex` floor from `lowest`-tag segments (Iter 44): the value
-/// after the first `minindex` tag (`<model>/lowest/minindex/<n>`).
+/// `mintel` floor from `lowest`-tag segments (Iter 44): the value
+/// after the first `mintel` tag (`<model>/lowest/mintel/<n>`).
 /// Absent means no floor; malformed fails closed like the virtual
-/// suffix — a `lowest` rewrite is gateway-owned either way.
-fn lowest_minindex(tags: &[String]) -> Result<Option<u8>, String> {
-    let Some(pos) = tags.iter().position(|tag| tag == "minindex") else {
+/// suffix — a `lowest` rewrite is gateway-owned either way. The
+/// retired `/minindex/` tag fails closed with the rename notice,
+/// never routes unfiltered.
+fn lowest_mintel(tags: &[String]) -> Result<Option<u8>, String> {
+    if tags.iter().any(|tag| tag == "minindex") {
+        return Err(MINTEL_RENAMED.to_string());
+    }
+    let Some(pos) = tags.iter().position(|tag| tag == "mintel") else {
         return Ok(None);
     };
     let value = tags.get(pos + 1).map(String::as_str).unwrap_or("");
-    parse_minindex_value(value)
+    parse_mintel_value(value)
         .map(Some)
-        .ok_or_else(|| format!("minindex must be an integer 0..100, got {value:?}"))
+        .ok_or_else(|| format!("mintel must be an integer 0..100, got {value:?}"))
 }
 
-/// Split an optional `/minindex/<n>` suffix off a virtual core. An
+/// Split an optional `/mintel/<n>` suffix off a virtual core. An
 /// unusable segment (empty, non-numeric, out of range, or duplicated)
 /// is an error, never a silent ignore: the gateway owns this id space,
 /// so the request must fail closed instead of passing the id upstream.
-fn split_minindex(rest: &str) -> Result<(&str, Option<u8>), String> {
-    let Some((core, value)) = rest.rsplit_once(MININDEX_SEGMENT) else {
+/// The retired `/minindex/` segment errors the same way (Iter 50).
+fn split_mintel(rest: &str) -> Result<(&str, Option<u8>), String> {
+    if rest.contains("/minindex/") {
+        return Err(MINTEL_RENAMED.to_string());
+    }
+    let Some((core, value)) = rest.rsplit_once(MINTEL_SEGMENT) else {
         return Ok((rest, None));
     };
-    if core.contains(MININDEX_SEGMENT) {
-        return Err(format!("duplicate minindex suffix in {rest:?}"));
+    if core.contains(MINTEL_SEGMENT) {
+        return Err(format!("duplicate mintel suffix in {rest:?}"));
     }
-    let Some(index) = parse_minindex_value(value) else {
-        return Err(format!("minindex must be an integer 0..100, got {value:?}"));
+    let Some(index) = parse_mintel_value(value) else {
+        return Err(format!("mintel must be an integer 0..100, got {value:?}"));
     };
     Ok((core, Some(index)))
 }
@@ -386,8 +413,8 @@ fn split_minindex(rest: &str) -> Result<(&str, Option<u8>), String> {
 enum VirtualParseError {
     /// Not a virtual id: forward untouched, as before.
     NotVirtual,
-    /// A virtual id whose `minindex` suffix is unusable: fail closed.
-    InvalidMinindex(String),
+    /// A virtual id whose `mintel` suffix is unusable: fail closed.
+    InvalidMintel(String),
 }
 
 fn parse_virtual_checked(model_field: &str) -> Result<VirtualModel, VirtualParseError> {
@@ -404,7 +431,7 @@ fn parse_virtual_checked(model_field: &str) -> Result<VirtualModel, VirtualParse
         Some((head, target)) => (head, Some(target.to_string())),
         None => (rest, None),
     };
-    let (core, minindex) = split_minindex(head).map_err(VirtualParseError::InvalidMinindex)?;
+    let (core, mintel) = split_mintel(head).map_err(VirtualParseError::InvalidMintel)?;
     if let Some(model_id) = core.strip_prefix("model/") {
         if model_id.is_empty() || fallback.as_deref() == Some("") {
             return Err(VirtualParseError::NotVirtual);
@@ -415,7 +442,7 @@ fn parse_virtual_checked(model_field: &str) -> Result<VirtualModel, VirtualParse
             free_only: false,
             fallback,
             pinned_model: Some(model_id.to_string()),
-            minindex,
+            mintel,
         });
     }
     // Fallback stays restricted to `free` and `decision/free` ids plus
@@ -425,8 +452,8 @@ fn parse_virtual_checked(model_field: &str) -> Result<VirtualModel, VirtualParse
         "decision/free" => (VirtualTier::Decision, true),
         "low" if fallback.is_none() => (VirtualTier::Low, false),
         "think" if fallback.is_none() => (VirtualTier::Think, false),
+        "agent" if fallback.is_none() => (VirtualTier::Agent, false),
         "coding" if fallback.is_none() => (VirtualTier::Coding, false),
-        "coding/think" if fallback.is_none() => (VirtualTier::CodingThink, false),
         "decision" if fallback.is_none() => (VirtualTier::Decision, false),
         "batch" if fallback.is_none() => (VirtualTier::Batch, false),
         "smart" if fallback.is_none() => (VirtualTier::Smart, false),
@@ -439,12 +466,12 @@ fn parse_virtual_checked(model_field: &str) -> Result<VirtualModel, VirtualParse
         free_only,
         fallback,
         pinned_model: None,
-        minindex,
+        mintel,
     })
 }
 
 /// Parse a virtual model id. Anything else (including unknown
-/// providers, tiers, or an unusable `minindex`) returns `None` and
+/// providers, tiers, or an unusable `mintel`) returns `None` and
 /// passes through untouched; HTTP callers use [`invalid_virtual`] to
 /// fail closed on the latter.
 pub fn parse_virtual(model_field: &str) -> Option<VirtualModel> {
@@ -456,7 +483,7 @@ pub fn parse_virtual(model_field: &str) -> Option<VirtualModel> {
 /// `invalid_model` when this answers.
 pub fn invalid_virtual(model_field: &str) -> Option<String> {
     match parse_virtual_checked(model_field) {
-        Err(VirtualParseError::InvalidMinindex(message)) => Some(message),
+        Err(VirtualParseError::InvalidMintel(message)) => Some(message),
         _ => None,
     }
 }
@@ -473,12 +500,12 @@ pub const VIRTUAL_MODELS: [&str; 20] = [
     "openrouter/pair/privacy/free",
     "openrouter/pair/low",
     "openrouter/pair/privacy/low",
+    "openrouter/pair/agent",
+    "openrouter/pair/privacy/agent",
     "openrouter/pair/coding",
     "openrouter/pair/privacy/coding",
     "openrouter/pair/think",
     "openrouter/pair/privacy/think",
-    "openrouter/pair/coding/think",
-    "openrouter/pair/privacy/coding/think",
     "openrouter/pair/decision",
     "openrouter/pair/privacy/decision",
     "openrouter/pair/decision/free",
@@ -499,9 +526,9 @@ pub struct SmartId {
     /// True for `smart/max` (the classifier may also pick `think`).
     pub max: bool,
     pub privacy: bool,
-    /// Optional AA coding-index floor (Iter 33) applied to whichever
+    /// Optional AA intelligence-index floor (Iter 33) applied to whichever
     /// tier the classifier picks.
-    pub minindex: Option<u8>,
+    pub mintel: Option<u8>,
 }
 
 /// Parse a smart classifier id. Anything else — including the plain
@@ -512,17 +539,17 @@ pub fn parse_smart(model_field: &str) -> Option<SmartId> {
         Some(rest) => (true, rest),
         None => (false, rest),
     };
-    let (core, minindex) = split_minindex(rest).ok()?;
+    let (core, mintel) = split_mintel(rest).ok()?;
     match core {
         "smart" => Some(SmartId {
             max: false,
             privacy,
-            minindex,
+            mintel,
         }),
         "smart/max" => Some(SmartId {
             max: true,
             privacy,
-            minindex,
+            mintel,
         }),
         _ => None,
     }
@@ -544,7 +571,7 @@ pub fn is_smart_fallback(model_field: &str) -> bool {
     if target.is_empty() {
         return false;
     }
-    let core = split_minindex(head).map_or(head, |(core, _)| core);
+    let core = split_mintel(head).map_or(head, |(core, _)| core);
     matches!(core, "smart" | "smart/max")
 }
 
@@ -679,22 +706,22 @@ fn is_batch_model(model_id: &str) -> bool {
     model_id.ends_with(":batch")
 }
 
-/// Minimum AA coding index gate (Iter 33): `None` admits every model;
-/// otherwise the model must carry a known index at or above the floor.
-/// Null or absent indexes are excluded — an unknown score cannot be
-/// said to meet a floor.
-fn meets_minindex(snapshot: &Snapshot, model_id: &str, minindex: Option<u8>) -> bool {
-    minindex.is_none_or(|floor| {
+/// Minimum AA intelligence index gate (Iter 33, rebased Iter 50):
+/// `None` admits every model; otherwise the model must carry a
+/// known index at or above the floor. Null or absent indexes are
+/// excluded — an unknown score cannot be said to meet a floor.
+fn meets_mintel(snapshot: &Snapshot, model_id: &str, mintel: Option<u8>) -> bool {
+    mintel.is_none_or(|floor| {
         snapshot
-            .aa_coding_index
+            .aa_intelligence_index
             .get(model_id)
             .is_some_and(|index| *index >= i64::from(floor))
     })
 }
 
-/// The AA coding-index floor a model id carries, if any (Iter 33).
-pub fn minindex_of(model_field: &str) -> Option<u8> {
-    parse_virtual(model_field).and_then(|virtual_model| virtual_model.minindex)
+/// The AA intelligence-index floor a model id carries, if any (Iter 33).
+pub fn mintel_of(model_field: &str) -> Option<u8> {
+    parse_virtual(model_field).and_then(|virtual_model| virtual_model.mintel)
 }
 
 /// Bounded tier label for metrics (Iter 33).
@@ -703,8 +730,8 @@ pub fn tier_label(model_field: &str) -> &'static str {
         Some(VirtualTier::Free) => "free",
         Some(VirtualTier::Low) => "low",
         Some(VirtualTier::Think) => "think",
+        Some(VirtualTier::Agent) => "agent",
         Some(VirtualTier::Coding) => "coding",
-        Some(VirtualTier::CodingThink) => "coding/think",
         Some(VirtualTier::Decision) => "decision",
         Some(VirtualTier::Batch) => "batch",
         Some(VirtualTier::Smart | VirtualTier::SmartMax) => "smart",
@@ -1227,17 +1254,25 @@ impl Router {
         let aa_coding_index = catalog
             .aa_coding_map()
             .map_err(|e| RouteError(e.to_string()))?;
+        let aa_intelligence_index = catalog
+            .aa_intelligence_map()
+            .map_err(|e| RouteError(e.to_string()))?;
         let model_signals = catalog
             .model_signals()
             .map_err(|e| RouteError(e.to_string()))?;
         let bracket = pennyrouter_catalog::read_bracket_members(&catalog);
+        let agent_top20 = pennyrouter_catalog::read_agent_top20(&catalog)
+            .into_iter()
+            .collect();
         let top_models = pennyrouter_catalog::read_top_models(&catalog);
         let fetch_health = pennyrouter_catalog::read_fetch_health(&catalog);
         Ok(Snapshot {
             models,
             aa_coding_index,
+            aa_intelligence_index,
             model_signals,
             bracket,
+            agent_top20,
             top_models,
             fetch_health,
             artifact_version,
@@ -1440,7 +1475,7 @@ impl Router {
             // Tolerant path (mirrors `parse_virtual().ok()`):
             // malformed floors decay to absent here; route_inner
             // fails them closed.
-            let floor = lowest_minindex(&tags).unwrap_or(None);
+            let floor = lowest_mintel(&tags).unwrap_or(None);
             return self
                 .decide_lowest(&snapshot, authorization, constraints, model_field, floor)
                 .ok();
@@ -1491,7 +1526,7 @@ impl Router {
                                 orientation,
                                 sticky: true,
                                 ordering: "direct",
-                                minindex: None,
+                                mintel: None,
                             });
                         }
                     }
@@ -1561,7 +1596,7 @@ impl Router {
             orientation,
             sticky: false,
             ordering: "direct",
-            minindex: None,
+            mintel: None,
         })
     }
 
@@ -1576,7 +1611,7 @@ impl Router {
     /// alternatives exist.
     /// Shared tier dispatch for fallback targets (Iter 21): one
     /// match to extend when a new tier lands. Unknown names fail
-    /// closed rather than leaking upstream. `minindex` is the optional
+    /// closed rather than leaking upstream. `mintel` is the optional
     /// AA coding floor (Iter 33): fallback legs pass `None`, smart
     /// classification passes the floor carried by its id.
     fn decide_tier(
@@ -1586,7 +1621,7 @@ impl Router {
         model_field: &str,
         authorization: Option<&str>,
         constraints: &ProviderConstraints,
-        minindex: Option<u8>,
+        mintel: Option<u8>,
     ) -> Result<Decision, RouteRejection> {
         match tier {
             "low" => self.decide_ordered_virtual(
@@ -1595,7 +1630,7 @@ impl Router {
                 constraints,
                 model_field,
                 VirtualTier::Low,
-                minindex,
+                mintel,
             ),
             "think" => self.decide_ordered_virtual(
                 snapshot,
@@ -1603,7 +1638,15 @@ impl Router {
                 constraints,
                 model_field,
                 VirtualTier::Think,
-                minindex,
+                mintel,
+            ),
+            "agent" => self.decide_ordered_virtual(
+                snapshot,
+                authorization,
+                constraints,
+                model_field,
+                VirtualTier::Agent,
+                mintel,
             ),
             "coding" => self.decide_ordered_virtual(
                 snapshot,
@@ -1611,18 +1654,10 @@ impl Router {
                 constraints,
                 model_field,
                 VirtualTier::Coding,
-                minindex,
-            ),
-            "coding/think" => self.decide_ordered_virtual(
-                snapshot,
-                authorization,
-                constraints,
-                model_field,
-                VirtualTier::CodingThink,
-                minindex,
+                mintel,
             ),
             "lowest" => {
-                self.decide_lowest(snapshot, authorization, constraints, model_field, minindex)
+                self.decide_lowest(snapshot, authorization, constraints, model_field, mintel)
             }
             "decision" => self.decide_decision(
                 snapshot,
@@ -1630,11 +1665,9 @@ impl Router {
                 constraints,
                 model_field,
                 false,
-                minindex,
+                mintel,
             ),
-            "batch" => {
-                self.decide_batch(snapshot, authorization, constraints, model_field, minindex)
-            }
+            "batch" => self.decide_batch(snapshot, authorization, constraints, model_field, mintel),
             _ => Err(RouteRejection {
                 code: "no_eligible_offering",
                 message: format!("unknown fallback tier {tier:?}"),
@@ -1738,7 +1771,7 @@ impl Router {
                 model_field,
                 authorization,
                 constraints,
-                virtual_model.minindex,
+                virtual_model.mintel,
             );
             return match (first, &virtual_model.fallback) {
                 (Ok(decision), _) => Ok(decision),
@@ -1765,7 +1798,7 @@ impl Router {
                         authorization,
                         constraints,
                         model_field,
-                        virtual_model.minindex,
+                        virtual_model.mintel,
                     )
                     .and_then(|decision| {
                         decision.ok_or_else(|| RouteRejection {
@@ -1802,7 +1835,7 @@ impl Router {
                     constraints,
                     model_field,
                     virtual_model.free_only,
-                    virtual_model.minindex,
+                    virtual_model.mintel,
                 );
                 match (first, &virtual_model.fallback) {
                     (Ok(decision), _) => Ok(decision),
@@ -1824,7 +1857,7 @@ impl Router {
                 authorization,
                 constraints,
                 model_field,
-                virtual_model.minindex,
+                virtual_model.mintel,
             ),
             // Smart ids never route synchronously: the classifier leg
             // is async and lives in the handler (`lib.rs`). Reaching
@@ -1840,7 +1873,7 @@ impl Router {
                 constraints,
                 model_field,
                 tier,
-                virtual_model.minindex,
+                virtual_model.mintel,
             ),
         }
     }
@@ -1870,9 +1903,9 @@ impl Router {
             constraints.ignore.push(provider.to_string());
         }
         // The floor rides the smart id itself (Iter 33).
-        let minindex = parse_smart(model_field).and_then(|smart| smart.minindex);
+        let mintel = parse_smart(model_field).and_then(|smart| smart.mintel);
         let decision =
-            self.decide_smart_tier(&snapshot, tier, model_field, &constraints, minindex)?;
+            self.decide_smart_tier(&snapshot, tier, model_field, &constraints, mintel)?;
         Self::finish_route(model_field, json, decision).ok_or_else(|| RouteRejection {
             code: "no_eligible_offering",
             message: "failed to rewrite the smart request body".to_string(),
@@ -1882,7 +1915,7 @@ impl Router {
     /// Smart tier dispatch (Iter 26): the classified tier through the
     /// normal path. Unlike [`Router::decide_tier`] (fallback targets,
     /// never free), this covers `free` too — the classifier may pick
-    /// it. Sessions stay unpinned either way. The optional `minindex`
+    /// it. Sessions stay unpinned either way. The optional `mintel`
     /// floor (Iter 33) applies to the classified tier's candidates.
     fn decide_smart_tier(
         &self,
@@ -1890,11 +1923,11 @@ impl Router {
         tier: &str,
         model_field: &str,
         constraints: &ProviderConstraints,
-        minindex: Option<u8>,
+        mintel: Option<u8>,
     ) -> Result<Decision, RouteRejection> {
         if tier == "free" {
             return self
-                .decide_free(snapshot, &[], None, constraints, model_field, minindex)
+                .decide_free(snapshot, &[], None, constraints, model_field, mintel)
                 .and_then(|decision| {
                     decision.ok_or_else(|| RouteRejection {
                         code: "no_eligible_offering",
@@ -1902,7 +1935,7 @@ impl Router {
                     })
                 });
         }
-        self.decide_tier(snapshot, tier, model_field, None, constraints, minindex)
+        self.decide_tier(snapshot, tier, model_field, None, constraints, mintel)
     }
 
     /// Pinned-model pick (Iter 28): provider selection scoped to one
@@ -1917,7 +1950,7 @@ impl Router {
         model_field: &str,
         authorization: Option<&str>,
         constraints: &ProviderConstraints,
-        minindex: Option<u8>,
+        mintel: Option<u8>,
     ) -> Result<Decision, RouteRejection> {
         let offerings = snapshot
             .models
@@ -1934,12 +1967,12 @@ impl Router {
         }
         // One model, one index: the floor admits or rejects the whole
         // pinned leg (Iter 33).
-        if !meets_minindex(snapshot, model_id, minindex) {
+        if !meets_mintel(snapshot, model_id, mintel) {
             return Err(RouteRejection {
                 code: "no_eligible_offering",
                 message: format!(
-                    "model {model_id:?} does not meet minindex {}",
-                    minindex.unwrap_or_default()
+                    "model {model_id:?} does not meet mintel {}",
+                    mintel.unwrap_or_default()
                 ),
             });
         }
@@ -2044,7 +2077,7 @@ impl Router {
                             orientation: Orientation::Default,
                             sticky: true,
                             ordering: "pinned",
-                            minindex,
+                            mintel,
                         });
                     }
                 }
@@ -2090,7 +2123,7 @@ impl Router {
                  eligible = provider allow + tools + context + budget; order = {source}; \
                  throttle-skipped;{} later requests keep this provider (sticky).",
                 class.as_deref().unwrap_or("any"),
-                minindex_note(minindex),
+                mintel_note(mintel),
             );
             self.store_pin(key, Pin::from_pick(authorization, pick, reason));
         }
@@ -2103,7 +2136,7 @@ impl Router {
             orientation: Orientation::Default,
             sticky: false,
             ordering: "pinned",
-            minindex,
+            mintel,
         })
     }
 
@@ -2115,7 +2148,10 @@ impl Router {
         match tier {
             VirtualTier::Free => 0,
             VirtualTier::Low | VirtualTier::Coding => 1,
-            VirtualTier::Think | VirtualTier::CodingThink => 3,
+            VirtualTier::Think => 3,
+            // Agent has its own cheapest-of-pool pick (Iter 49);
+            // the arm exists for exhaustiveness.
+            VirtualTier::Agent => 0,
             // Decision never routes through the floored ordered path
             // (it has its own pick without a scored floor, like
             // `lowest`); the arm exists for exhaustiveness.
@@ -2136,8 +2172,8 @@ impl Router {
             VirtualTier::Free => "free",
             VirtualTier::Low => "low",
             VirtualTier::Think => "think",
+            VirtualTier::Agent => "agent",
             VirtualTier::Coding => "coding",
-            VirtualTier::CodingThink => "coding/think",
             VirtualTier::Decision => "decision",
             VirtualTier::Batch => "batch",
             VirtualTier::Smart => "smart",
@@ -2159,13 +2195,21 @@ impl Router {
         constraints: &ProviderConstraints,
         session_ns: &str,
         tier: VirtualTier,
-        minindex: Option<u8>,
+        mintel: Option<u8>,
     ) -> Result<Decision, RouteRejection> {
         let tier_name = Self::ordered_tier_name(tier);
         // Coding tiers scope to the most-used pool (Iter 48); an
         // empty bracket means an empty pool — they fail closed
-        // instead of silently serving the full list.
-        let coding_only = matches!(tier, VirtualTier::Coding | VirtualTier::CodingThink);
+        // instead of silently serving the full list. The agent tier
+        // (Iter 49) scopes to the top-20 usage pool the same way.
+        let coding_only = matches!(tier, VirtualTier::Coding);
+        let agent_only = matches!(tier, VirtualTier::Agent);
+        if agent_only && snapshot.agent_top20.is_empty() {
+            return Err(RouteRejection {
+                code: "no_eligible_offering",
+                message: "no agent pool data: the artifact carries no usage top-20".to_string(),
+            });
+        }
         let base: Vec<&Offering> = snapshot
             .models
             .values()
@@ -2176,23 +2220,24 @@ impl Router {
                     // batch pricing can't serve interactive requests.
                     && !is_batch_model(&o.model_id)
                     && (!coding_only || snapshot.bracket.contains(o.model_id.as_str()))
+                    && (!agent_only || snapshot.agent_top20.contains(o.model_id.as_str()))
                     // Tiers are disjoint by design: zero-cost serves `free`
                     // only, never `low`/`think`.
                     && inline_cost(o).is_some_and(|cost| cost > 0.0)
                     && is_known_precision_class(o.precision_class.as_deref().unwrap_or("unknown"))
                     // Quality floor first (Iter 33): too low an index is
                     // never rescued by being cheaper.
-                    && meets_minindex(snapshot, &o.model_id, minindex)
+                    && meets_mintel(snapshot, &o.model_id, mintel)
             })
             .collect();
         if base.is_empty() {
             return Err(RouteRejection {
                 code: "no_eligible_offering",
-                message: minindex.map_or_else(
+                message: mintel.map_or_else(
                     || format!("no offering is eligible for the {tier_name} tier"),
                     |floor| {
                         format!(
-                            "no {tier_name} tier offering meets minindex {floor} \
+                            "no {tier_name} tier offering meets mintel {floor} \
                              (or none is otherwise eligible)"
                         )
                     },
@@ -2209,6 +2254,11 @@ impl Router {
             .collect();
         if base.is_empty() {
             return Err(tools_unsupported());
+        }
+        // Agent (Iter 49): cheapest of the top-20 pool, no floor, no
+        // score path, no long-tail partition — the pool is the tier.
+        if agent_only {
+            return self.decide_agent_ordered(authorization, constraints, session_ns, mintel, base);
         }
         // Score-first path (Iter 44; Iter 47 gates it on the mode):
         // when the artifact carries a bracket and scored offerings,
@@ -2236,7 +2286,7 @@ impl Router {
                 constraints,
                 session_ns,
                 tier,
-                minindex,
+                mintel,
                 shortlist,
             );
         }
@@ -2251,7 +2301,7 @@ impl Router {
                 constraints,
                 session_ns,
                 tier,
-                minindex,
+                mintel,
                 base,
             );
         }
@@ -2263,7 +2313,7 @@ impl Router {
             constraints,
             session_ns,
             tier,
-            minindex,
+            mintel,
             inside,
         ) {
             Ok(decision) => Ok(decision),
@@ -2276,7 +2326,7 @@ impl Router {
                     constraints,
                     session_ns,
                     tier,
-                    minindex,
+                    mintel,
                     outside,
                 ) {
                     Ok(decision) => Ok(decision),
@@ -2301,11 +2351,11 @@ impl Router {
         constraints: &ProviderConstraints,
         session_ns: &str,
         tier: VirtualTier,
-        minindex: Option<u8>,
+        mintel: Option<u8>,
         pool: Vec<&Offering>,
     ) -> Result<Decision, RouteRejection> {
         let tier_name = Self::ordered_tier_name(tier);
-        let coding_only = matches!(tier, VirtualTier::Coding | VirtualTier::CodingThink);
+        let coding_only = matches!(tier, VirtualTier::Coding);
         let floored: Vec<&Offering> = pool
             .into_iter()
             .filter(|o| Self::quality_rank(o.quality_tier.as_deref()) >= Self::tier_floor(tier))
@@ -2361,7 +2411,7 @@ impl Router {
                         orientation: Orientation::Default,
                         sticky: true,
                         ordering: "legacy",
-                        minindex,
+                        mintel,
                     });
                 }
             }
@@ -2405,7 +2455,7 @@ impl Router {
                 "tier '{tier_name}': {rule}; quality floor = {floor}; \
                  eligible = {pool}paid priceable + known precision class + non-batch model + provider allow + tools + context + budget; \
                  throttle-skipped;{} later requests keep this provider (sticky).",
-                minindex_note(minindex),
+                mintel_note(mintel),
             );
             self.store_pin(key, Pin::from_pick(authorization, pick, reason));
         }
@@ -2418,7 +2468,93 @@ impl Router {
             orientation: Orientation::Default,
             sticky: false,
             ordering: "legacy",
-            minindex,
+            mintel,
+        })
+    }
+
+    /// Agent pick (Iter 49): cheapest offering across the usage
+    /// top-20 pool, no quality floor. Caller gates (context/budget),
+    /// throttle, and stickiness still apply. Caller passes in-pool
+    /// offerings only.
+    fn decide_agent_ordered(
+        &self,
+        authorization: Option<&str>,
+        constraints: &ProviderConstraints,
+        session_ns: &str,
+        mintel: Option<u8>,
+        pool: Vec<&Offering>,
+    ) -> Result<Decision, RouteRejection> {
+        let price_order = |a: &&Offering, b: &&Offering| {
+            inline_cost(a)
+                .partial_cmp(&inline_cost(b))
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.model_id.cmp(&b.model_id))
+                .then_with(|| a.provider_name.cmp(&b.provider_name))
+        };
+        let fitting: Vec<&Offering> = pool
+            .into_iter()
+            .filter(|o| constraints.context_allows(o))
+            .collect();
+        if fitting.is_empty() {
+            return Err(context_exceeded("agent tier"));
+        }
+        let budgeted: Vec<&Offering> = fitting
+            .into_iter()
+            .filter(|o| constraints.budget_allows(o))
+            .collect();
+        if budgeted.is_empty() {
+            return Err(RouteRejection {
+                code: "budget_exceeded",
+                message: "no agent tier offering fits the price ceiling".to_string(),
+            });
+        }
+        let candidates = self.skip_throttled(budgeted);
+        let key = authorization.map(|auth| self.session_key(auth, session_ns));
+        if let Some(key) = &key {
+            if let Some(pin) = self.lookup_pin(key) {
+                if let Some(pick) = Self::pinned_pick(&candidates, &pin, price_order) {
+                    return Ok(Decision {
+                        model_id: pick.model_id.clone(),
+                        provider: pick.provider_name.clone(),
+                        tag: pick.tag.clone(),
+                        precision_class: pick.precision_class.clone(),
+                        quantization: pick.quantization.clone(),
+                        orientation: Orientation::Default,
+                        sticky: true,
+                        ordering: "agent",
+                        mintel,
+                    });
+                }
+            }
+        }
+        let pick = candidates
+            .into_iter()
+            .min_by(price_order)
+            .ok_or_else(|| RouteRejection {
+                code: "no_eligible_offering",
+                message: "no offering is eligible for the agent tier".to_string(),
+            })?;
+        if let Some(key) = key {
+            let reason = format!(
+                "tier 'agent': cheapest effective cost across the usage top-20 pool \
+                 (balanced prompt/completion/cache blend, promo applied); tie-break cost, model id, provider; \
+                 eligible = top-20 pool + paid priceable + known precision class + non-batch model + \
+                 provider allow + tools + context + budget; throttle-skipped;{} \
+                 later requests keep this provider (sticky).",
+                mintel_note(mintel),
+            );
+            self.store_pin(key, Pin::from_pick(authorization, pick, reason));
+        }
+        Ok(Decision {
+            model_id: pick.model_id.clone(),
+            provider: pick.provider_name.clone(),
+            tag: pick.tag.clone(),
+            precision_class: pick.precision_class.clone(),
+            quantization: pick.quantization.clone(),
+            orientation: Orientation::Default,
+            sticky: false,
+            ordering: "agent",
+            mintel,
         })
     }
 
@@ -2433,7 +2569,7 @@ impl Router {
         constraints: &ProviderConstraints,
         session_ns: &str,
         tier: VirtualTier,
-        minindex: Option<u8>,
+        mintel: Option<u8>,
         pool: Vec<&Offering>,
     ) -> Result<Decision, RouteRejection> {
         let tier_name = Self::ordered_tier_name(tier);
@@ -2475,7 +2611,7 @@ impl Router {
                         orientation: Orientation::Default,
                         sticky: true,
                         ordering: "longtail",
-                        minindex,
+                        mintel,
                     });
                 }
             }
@@ -2493,7 +2629,7 @@ impl Router {
                  eligible = out-of-bracket + paid priceable + known precision class + non-batch model + \
                  provider allow + tools + context + budget; effective cost = balanced prompt/completion/cache blend, \
                  promo applied; throttle-skipped;{} later requests keep this provider (sticky).",
-                minindex_note(minindex),
+                mintel_note(mintel),
             );
             self.store_pin(key, Pin::from_pick(authorization, pick, reason));
         }
@@ -2506,7 +2642,7 @@ impl Router {
             orientation: Orientation::Default,
             sticky: false,
             ordering: "longtail",
-            minindex,
+            mintel,
         })
     }
 
@@ -2548,7 +2684,7 @@ impl Router {
         constraints: &ProviderConstraints,
         session_ns: &str,
         tier: VirtualTier,
-        minindex: Option<u8>,
+        mintel: Option<u8>,
         shortlist: Vec<&Offering>,
     ) -> Result<Decision, RouteRejection> {
         let tier_name = match tier {
@@ -2620,7 +2756,7 @@ impl Router {
                         orientation: Orientation::Default,
                         sticky: true,
                         ordering: "score",
-                        minindex,
+                        mintel,
                     });
                 }
             }
@@ -2649,7 +2785,7 @@ impl Router {
                  eligible = bracket + scored + paid + known class + non-batch + provider allow + \
                  tools + context + budget; throttle-skipped;{} \
                  later requests keep this provider (sticky).",
-                minindex_note(minindex),
+                mintel_note(mintel),
             );
             self.store_pin(key, Pin::from_pick(authorization, pick, reason));
         }
@@ -2662,7 +2798,7 @@ impl Router {
             orientation: Orientation::Default,
             sticky: false,
             ordering: "score",
-            minindex,
+            mintel,
         })
     }
 
@@ -2673,14 +2809,14 @@ impl Router {
     /// tie-breaks as the `low` tier, minus the scored-tier floor.
     /// Exactly-once: tags never retry, only virtual ids do. Full
     /// list, bracket or not (Iter 44); activity breaks price ties
-    /// and an optional `minindex` floor gates first.
+    /// and an optional `mintel` floor gates first.
     fn decide_lowest(
         &self,
         snapshot: &Snapshot,
         authorization: Option<&str>,
         constraints: &ProviderConstraints,
         session_ns: &str,
-        minindex: Option<u8>,
+        mintel: Option<u8>,
     ) -> Result<Decision, RouteRejection> {
         let base: Vec<&Offering> = snapshot
             .models
@@ -2693,17 +2829,17 @@ impl Router {
                     && is_known_precision_class(o.precision_class.as_deref().unwrap_or("unknown"))
                     // Batch variants serve the `batch` tier only.
                     && !is_batch_model(&o.model_id)
-                    && meets_minindex(snapshot, &o.model_id, minindex)
+                    && meets_mintel(snapshot, &o.model_id, mintel)
             })
             .collect();
         if base.is_empty() {
             return Err(RouteRejection {
                 code: "no_eligible_offering",
-                message: minindex.map_or_else(
+                message: mintel.map_or_else(
                     || "no paid offering is currently eligible".to_string(),
                     |floor| {
                         format!(
-                            "no paid offering meets minindex {floor} \
+                            "no paid offering meets mintel {floor} \
                              (or none is otherwise eligible)"
                         )
                     },
@@ -2751,7 +2887,7 @@ impl Router {
                         orientation: Orientation::Lowest,
                         sticky: true,
                         ordering: "lowest",
-                        minindex,
+                        mintel,
                     });
                 }
             }
@@ -2770,7 +2906,7 @@ impl Router {
                  provider allow + tools + context + budget; effective cost = balanced prompt/completion/cache blend, \
                  promo applied; tie-break cost, activity level, model id, provider; exactly-once;{} \
                  later requests keep this provider (sticky).",
-                minindex_note(minindex),
+                mintel_note(mintel),
             );
             self.store_pin(key, Pin::from_pick(authorization, pick, reason));
         }
@@ -2783,7 +2919,7 @@ impl Router {
             orientation: Orientation::Lowest,
             sticky: false,
             ordering: "lowest",
-            minindex,
+            mintel,
         })
     }
 
@@ -2821,7 +2957,7 @@ impl Router {
         constraints: &ProviderConstraints,
         session_ns: &str,
         free_only: bool,
-        minindex: Option<u8>,
+        mintel: Option<u8>,
     ) -> Result<Decision, RouteRejection> {
         let scope = if free_only { "free " } else { "" };
         let now = now_unix();
@@ -2841,17 +2977,17 @@ impl Router {
                     && (free_only || inline_cost(o).is_some_and(|cost| cost > 0.0))
                     && (!free_only
                         || free_eligible(ranking.as_ref(), &o.model_id, o, now))
-                    && meets_minindex(snapshot, &o.model_id, minindex)
+                    && meets_mintel(snapshot, &o.model_id, mintel)
             })
             .collect();
         if base.is_empty() {
             return Err(RouteRejection {
                 code: "no_eligible_offering",
-                message: minindex.map_or_else(
+                message: mintel.map_or_else(
                     || format!("no decisions-capable {scope}offering is currently eligible"),
                     |floor| {
                         format!(
-                            "no decisions-capable {scope}offering meets minindex {floor} \
+                            "no decisions-capable {scope}offering meets mintel {floor} \
                              (or none is otherwise eligible)"
                         )
                     },
@@ -2903,7 +3039,7 @@ impl Router {
                         orientation: Orientation::Default,
                         sticky: true,
                         ordering: "decision",
-                        minindex,
+                        mintel,
                     });
                 }
             }
@@ -2934,7 +3070,7 @@ impl Router {
                  effective cost = balanced prompt/completion/cache blend, promo applied; \
                  tie-break cost, model id, provider; throttle-skipped;{} \
                  later requests keep this provider (sticky).",
-                minindex_note(minindex),
+                mintel_note(mintel),
             );
             self.store_pin(key, Pin::from_pick(authorization, pick, reason));
         }
@@ -2947,7 +3083,7 @@ impl Router {
             orientation: Orientation::Default,
             sticky: false,
             ordering: "decision",
-            minindex,
+            mintel,
         })
     }
 
@@ -2967,7 +3103,7 @@ impl Router {
         authorization: Option<&str>,
         constraints: &ProviderConstraints,
         session_ns: &str,
-        minindex: Option<u8>,
+        mintel: Option<u8>,
     ) -> Result<Decision, RouteRejection> {
         let base: Vec<&Offering> = snapshot
             .models
@@ -2977,17 +3113,17 @@ impl Router {
                 constraints.allows(&o.provider_name)
                     && is_batch_model(&o.model_id)
                     && inline_cost(o).is_some_and(|cost| cost > 0.0)
-                    && meets_minindex(snapshot, &o.model_id, minindex)
+                    && meets_mintel(snapshot, &o.model_id, mintel)
             })
             .collect();
         if base.is_empty() {
             return Err(RouteRejection {
                 code: "no_eligible_offering",
-                message: minindex.map_or_else(
+                message: mintel.map_or_else(
                     || "no batch offering is currently eligible".to_string(),
                     |floor| {
                         format!(
-                            "no batch offering meets minindex {floor} \
+                            "no batch offering meets mintel {floor} \
                              (or none is otherwise eligible)"
                         )
                     },
@@ -3039,7 +3175,7 @@ impl Router {
                         orientation: Orientation::Default,
                         sticky: true,
                         ordering: "batch",
-                        minindex,
+                        mintel,
                     });
                 }
             }
@@ -3065,7 +3201,7 @@ impl Router {
                  effective cost = balanced prompt/completion/cache blend, promo applied; \
                  tie-break cost, model id, provider; throttle-skipped;{} \
                  later requests keep this provider (sticky).",
-                minindex_note(minindex),
+                mintel_note(mintel),
             );
             self.store_pin(key, Pin::from_pick(authorization, pick, reason));
         }
@@ -3078,7 +3214,7 @@ impl Router {
             orientation: Orientation::Default,
             sticky: false,
             ordering: "batch",
-            minindex,
+            mintel,
         })
     }
 
@@ -3117,7 +3253,7 @@ impl Router {
         authorization: Option<&str>,
         constraints: &ProviderConstraints,
         session_ns: &str,
-        minindex: Option<u8>,
+        mintel: Option<u8>,
     ) -> Result<Option<Decision>, RouteRejection> {
         let now = now_unix();
         let ranking = self.ranking.read().unwrap_or_else(|e| e.into_inner());
@@ -3131,7 +3267,7 @@ impl Router {
                         // Batch variants serve the `batch` tier only,
                         // even when zero-cost.
                         && !is_batch_model(model_id)
-                        && meets_minindex(snapshot, model_id, minindex)
+                        && meets_mintel(snapshot, model_id, mintel)
                 })
             })
             .collect();
@@ -3187,7 +3323,7 @@ impl Router {
                     );
                     if let Some(pick) = order.into_iter().next() {
                         if free_eligible(ranking.as_ref(), &pick.model_id, pick, now) {
-                            return Ok(Some(free_decision(pick, orientation, true, minindex)));
+                            return Ok(Some(free_decision(pick, orientation, true, mintel)));
                         }
                         // Pin stopped being free: fall through and re-route.
                     }
@@ -3236,11 +3372,11 @@ impl Router {
                  throttle-skipped;{} pin re-routes if it stops being free, else later requests keep \
                  this provider (sticky).",
                 class.as_deref().unwrap_or("any"),
-                minindex_note(minindex),
+                mintel_note(mintel),
             );
             self.store_pin(key, Pin::from_pick(authorization, pick, reason));
         }
-        Ok(Some(free_decision(pick, orientation, false, minindex)))
+        Ok(Some(free_decision(pick, orientation, false, mintel)))
     }
 
     /// Route a buffered chat-completions body: returns the rewritten body
@@ -3358,7 +3494,7 @@ impl Router {
             constraints.ignore.extend(extra.ignore.iter().cloned());
             constraints.only.extend(extra.only.iter().cloned());
         }
-        // A virtual id with an unusable `minindex` suffix (Iter 33)
+        // A virtual id with an unusable `mintel` suffix (Iter 33)
         // fails closed here: the gateway owns this id space.
         if let Some(message) = invalid_virtual(&model_field) {
             return Err(RouteRejection {
@@ -3382,7 +3518,7 @@ impl Router {
             let snapshot = self.snapshot.read().unwrap_or_else(|e| e.into_inner());
             if let Some((_, tags)) = split_model(&snapshot, &model_field) {
                 if orientation_from(&tags) == Orientation::Lowest {
-                    let floor = lowest_minindex(&tags).map_err(|message| RouteRejection {
+                    let floor = lowest_mintel(&tags).map_err(|message| RouteRejection {
                         code: "invalid_model",
                         message,
                     })?;
@@ -3719,12 +3855,13 @@ impl Router {
     }
 }
 
-/// Fixed minindex inspector ids (Iter 40): same preview table as
-/// [`FIXED_PREVIEW_IDS`] but with a coding-index floor, so operators
-/// see the suffix working — one plain, one composed with `privacy/`.
-pub const MININDEX_PREVIEW_IDS: [&str; 2] = [
-    "openrouter/pair/low/minindex/40",
-    "openrouter/pair/privacy/think/minindex/70",
+/// Fixed mintel inspector ids (Iter 40): same preview table as
+/// [`FIXED_PREVIEW_IDS`] but with an intelligence-index floor, so
+/// operators see the suffix working — one plain, one composed with
+/// `privacy/`.
+pub const MINTEL_PREVIEW_IDS: [&str; 2] = [
+    "openrouter/pair/low/mintel/20",
+    "openrouter/pair/privacy/think/mintel/40",
 ];
 
 /// Fixed inspector ids (Iter 29): the non-smart virtual menu. Smart ids
@@ -3734,16 +3871,16 @@ pub const FIXED_PREVIEW_IDS: [&str; 16] = [
     "openrouter/pair/free",
     "openrouter/pair/low",
     "openrouter/pair/think",
+    "openrouter/pair/agent",
     "openrouter/pair/coding",
-    "openrouter/pair/coding/think",
     "openrouter/pair/decision",
     "openrouter/pair/decision/free",
     "openrouter/pair/batch",
     "openrouter/pair/privacy/free",
     "openrouter/pair/privacy/low",
     "openrouter/pair/privacy/think",
+    "openrouter/pair/privacy/agent",
     "openrouter/pair/privacy/coding",
-    "openrouter/pair/privacy/coding/think",
     "openrouter/pair/privacy/decision",
     "openrouter/pair/privacy/decision/free",
     "openrouter/pair/privacy/batch",
@@ -3878,7 +4015,7 @@ impl Router {
             };
         }
 
-        // A virtual id with an unusable `minindex` suffix (Iter 33)
+        // A virtual id with an unusable `mintel` suffix (Iter 33)
         // previews as an invalid id, matching the request path.
         if let Some(message) = invalid_virtual(model_field) {
             return Preview {
@@ -3909,7 +4046,7 @@ impl Router {
                     &constraints,
                     now,
                     top,
-                    virtual_model.minindex,
+                    virtual_model.mintel,
                 );
                 match (first.rejection.is_none(), &virtual_model.fallback) {
                     (true, _) => return first,
@@ -3943,7 +4080,7 @@ impl Router {
                         &constraints,
                         now,
                         top,
-                        virtual_model.minindex,
+                        virtual_model.mintel,
                     );
                     match (free.rejection.is_none(), &virtual_model.fallback) {
                         (true, _) => return free,
@@ -3974,7 +4111,7 @@ impl Router {
                         now,
                         virtual_model.free_only,
                         top,
-                        virtual_model.minindex,
+                        virtual_model.mintel,
                     );
                     match (first.rejection.is_none(), &virtual_model.fallback) {
                         (true, _) => return first,
@@ -4006,7 +4143,7 @@ impl Router {
                         &constraints,
                         now,
                         top,
-                        virtual_model.minindex,
+                        virtual_model.mintel,
                     );
                 }
                 VirtualTier::Smart | VirtualTier::SmartMax => {
@@ -4036,7 +4173,7 @@ impl Router {
                         now,
                         tier,
                         top,
-                        virtual_model.minindex,
+                        virtual_model.mintel,
                     );
                 }
             }
@@ -4067,7 +4204,7 @@ impl Router {
             if orientation_from(&tags) == Orientation::Lowest {
                 // Malformed floors preview invalid, matching the
                 // request path.
-                let floor = match lowest_minindex(&tags) {
+                let floor = match lowest_mintel(&tags) {
                     Ok(floor) => floor,
                     Err(message) => {
                         return Preview {
@@ -4184,14 +4321,14 @@ impl Router {
                 top,
                 None,
             ),
-            "coding/think" => self.preview_ordered_virtual_list(
+            "agent" => self.preview_ordered_virtual_list(
                 snapshot,
                 ranking,
                 model_field,
                 authorization,
                 constraints,
                 now,
-                VirtualTier::CodingThink,
+                VirtualTier::Agent,
                 top,
                 None,
             ),
@@ -4540,7 +4677,7 @@ impl Router {
         constraints: &ProviderConstraints,
         now: u64,
         top: usize,
-        minindex: Option<u8>,
+        mintel: Option<u8>,
     ) -> Preview {
         let orientation = orientation_from(tags);
         let free: Vec<Offering> = snapshot
@@ -4551,7 +4688,7 @@ impl Router {
                     constraints.allows(&o.provider_name)
                         && free_eligible(ranking, model_id, o, now)
                         && !is_batch_model(model_id)
-                        && meets_minindex(snapshot, model_id, minindex)
+                        && meets_mintel(snapshot, model_id, mintel)
                 })
             })
             .cloned()
@@ -4627,10 +4764,11 @@ impl Router {
         now: u64,
         tier: VirtualTier,
         top: usize,
-        minindex: Option<u8>,
+        mintel: Option<u8>,
     ) -> Preview {
         let tier_name = Self::ordered_tier_name(tier);
-        let coding_only = matches!(tier, VirtualTier::Coding | VirtualTier::CodingThink);
+        let coding_only = matches!(tier, VirtualTier::Coding);
+        let agent_only = matches!(tier, VirtualTier::Agent);
         let base: Vec<&Offering> = snapshot
             .models
             .values()
@@ -4641,10 +4779,16 @@ impl Router {
                     && is_known_precision_class(o.precision_class.as_deref().unwrap_or("unknown"))
                     && !is_batch_model(&o.model_id)
                     && (!coding_only || snapshot.bracket.contains(o.model_id.as_str()))
-                    && meets_minindex(snapshot, &o.model_id, minindex)
+                    && (!agent_only || snapshot.agent_top20.contains(o.model_id.as_str()))
+                    && meets_mintel(snapshot, &o.model_id, mintel)
             })
             .collect();
         if base.is_empty() {
+            let message = if agent_only && snapshot.agent_top20.is_empty() {
+                "no agent pool data: the artifact carries no usage top-20".to_string()
+            } else {
+                format!("no offering is eligible for the {tier_name} tier")
+            };
             return Preview {
                 model_field: model_field.to_string(),
                 session_namespace: model_field.to_string(),
@@ -4655,10 +4799,41 @@ impl Router {
                 candidates: Vec::new(),
                 rejection: Some(RouteRejection {
                     code: "no_eligible_offering",
-                    message: format!("no offering is eligible for the {tier_name} tier"),
+                    message,
                 }),
                 note: None,
             };
+        }
+        // Agent (Iter 49): the pool lists cheapest-first, no floor,
+        // no score path, no long-tail partition — like routing.
+        if agent_only {
+            let mut sorted: Vec<&Offering> = base;
+            sorted.sort_by(|a, b| {
+                inline_cost(a)
+                    .partial_cmp(&inline_cost(b))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.model_id.cmp(&b.model_id))
+                    .then_with(|| a.provider_name.cmp(&b.provider_name))
+            });
+            let ordered_all: Vec<(Offering, Option<usize>)> = sorted
+                .into_iter()
+                .enumerate()
+                .map(|(i, o)| (o.clone(), Some(i)))
+                .collect();
+            return self.finish_preview(
+                model_field,
+                model_field,
+                authorization,
+                ordered_all,
+                ranking,
+                now,
+                top,
+                Some(RouteRejection {
+                    code: "no_eligible_offering",
+                    message: format!("no offering is eligible for the {tier_name} tier"),
+                }),
+                None,
+            );
         }
         // Score-first preview (Iter 44): the same cascade as routing —
         // bracket ends when score data exists, legacy below. Coding
@@ -4851,7 +5026,7 @@ impl Router {
     }
 
     /// Cross-model `lowest` preview: cheapest paid, no floor —
-    /// same minindex gate and activity tie-break as routing.
+    /// same mintel gate and activity tie-break as routing.
     #[allow(clippy::too_many_arguments)]
     fn preview_lowest_list(
         &self,
@@ -4862,7 +5037,7 @@ impl Router {
         constraints: &ProviderConstraints,
         now: u64,
         top: usize,
-        minindex: Option<u8>,
+        mintel: Option<u8>,
     ) -> Preview {
         let base: Vec<&Offering> = snapshot
             .models
@@ -4873,7 +5048,7 @@ impl Router {
                     && inline_cost(o).is_some_and(|cost| cost > 0.0)
                     && is_known_precision_class(o.precision_class.as_deref().unwrap_or("unknown"))
                     && !is_batch_model(&o.model_id)
-                    && meets_minindex(snapshot, &o.model_id, minindex)
+                    && meets_mintel(snapshot, &o.model_id, mintel)
             })
             .collect();
         if base.is_empty() {
@@ -4887,11 +5062,11 @@ impl Router {
                 candidates: Vec::new(),
                 rejection: Some(RouteRejection {
                     code: "no_eligible_offering",
-                    message: minindex.map_or_else(
+                    message: mintel.map_or_else(
                         || "no paid offering is currently eligible".to_string(),
                         |floor| {
                             format!(
-                                "no paid offering meets minindex {floor} \
+                                "no paid offering meets mintel {floor} \
                                  (or none is otherwise eligible)"
                             )
                         },
@@ -4935,7 +5110,7 @@ impl Router {
         now: u64,
         free_only: bool,
         top: usize,
-        minindex: Option<u8>,
+        mintel: Option<u8>,
     ) -> Preview {
         let scope = if free_only { "free " } else { "" };
         let base: Vec<&Offering> = snapshot
@@ -4948,7 +5123,7 @@ impl Router {
                     && !is_batch_model(&o.model_id)
                     && (free_only || inline_cost(o).is_some_and(|cost| cost > 0.0))
                     && (!free_only || free_eligible(ranking, &o.model_id, o, now))
-                    && meets_minindex(snapshot, &o.model_id, minindex)
+                    && meets_mintel(snapshot, &o.model_id, mintel)
             })
             .collect();
         if base.is_empty() {
@@ -5008,7 +5183,7 @@ impl Router {
         constraints: &ProviderConstraints,
         now: u64,
         top: usize,
-        minindex: Option<u8>,
+        mintel: Option<u8>,
     ) -> Preview {
         let base: Vec<&Offering> = snapshot
             .models
@@ -5018,7 +5193,7 @@ impl Router {
                 constraints.allows(&o.provider_name)
                     && is_batch_model(&o.model_id)
                     && inline_cost(o).is_some_and(|cost| cost > 0.0)
-                    && meets_minindex(snapshot, &o.model_id, minindex)
+                    && meets_mintel(snapshot, &o.model_id, mintel)
             })
             .collect();
         if base.is_empty() {
@@ -5078,7 +5253,7 @@ impl Router {
         constraints: &ProviderConstraints,
         now: u64,
         top: usize,
-        minindex: Option<u8>,
+        mintel: Option<u8>,
     ) -> Preview {
         let mk_empty = |message: String, code: &'static str| Preview {
             model_field: model_field.to_string(),
@@ -5091,11 +5266,11 @@ impl Router {
             rejection: Some(RouteRejection { code, message }),
             note: None,
         };
-        if !meets_minindex(snapshot, model_id, minindex) {
+        if !meets_mintel(snapshot, model_id, mintel) {
             return mk_empty(
                 format!(
-                    "model {model_id:?} does not meet minindex {}",
-                    minindex.unwrap_or_default()
+                    "model {model_id:?} does not meet mintel {}",
+                    mintel.unwrap_or_default()
                 ),
                 "no_eligible_offering",
             );
@@ -5248,7 +5423,7 @@ pub fn route_pinned(model_field: &str, mut json: serde_json::Value) -> Option<(V
             orientation: Orientation::Default,
             sticky: false,
             ordering: "direct",
-            minindex: None,
+            mintel: None,
         },
     ))
 }
@@ -5401,7 +5576,7 @@ fn free_decision(
     pick: &Offering,
     orientation: Orientation,
     sticky: bool,
-    minindex: Option<u8>,
+    mintel: Option<u8>,
 ) -> Decision {
     Decision {
         model_id: pick.model_id.clone(),
@@ -5411,7 +5586,7 @@ fn free_decision(
         quantization: pick.quantization.clone(),
         orientation,
         sticky,
-        minindex,
+        mintel,
         ordering: "free",
     }
 }
@@ -5713,8 +5888,10 @@ mod tests {
             ]),
             artifact_version: None,
             aa_coding_index: HashMap::new(),
+            aa_intelligence_index: HashMap::new(),
             model_signals: HashMap::new(),
             bracket: HashSet::new(),
+            agent_top20: HashSet::new(),
             top_models: HashMap::new(),
             fetch_health: BTreeMap::new(),
             popular_models: Vec::new(),
@@ -5837,8 +6014,10 @@ mod tests {
             ]),
             artifact_version: None,
             aa_coding_index: HashMap::new(),
+            aa_intelligence_index: HashMap::new(),
             model_signals: HashMap::new(),
             bracket: HashSet::new(),
+            agent_top20: HashSet::new(),
             top_models: HashMap::new(),
             fetch_health: BTreeMap::new(),
             popular_models: Vec::new(),
@@ -5878,8 +6057,10 @@ mod tests {
             ]),
             artifact_version: None,
             aa_coding_index: HashMap::new(),
+            aa_intelligence_index: HashMap::new(),
             model_signals: HashMap::new(),
             bracket: HashSet::new(),
+            agent_top20: HashSet::new(),
             top_models: HashMap::new(),
             fetch_health: BTreeMap::new(),
             popular_models: Vec::new(),
@@ -5917,8 +6098,10 @@ mod tests {
             )]),
             artifact_version: None,
             aa_coding_index: HashMap::new(),
+            aa_intelligence_index: HashMap::new(),
             model_signals: HashMap::new(),
             bracket: HashSet::new(),
+            agent_top20: HashSet::new(),
             top_models: HashMap::new(),
             fetch_health: BTreeMap::new(),
             popular_models: Vec::new(),
@@ -6026,8 +6209,10 @@ mod tests {
             )]),
             artifact_version: None,
             aa_coding_index: HashMap::new(),
+            aa_intelligence_index: HashMap::new(),
             model_signals: HashMap::new(),
             bracket: HashSet::new(),
+            agent_top20: HashSet::new(),
             top_models: HashMap::new(),
             fetch_health: BTreeMap::new(),
             popular_models: Vec::new(),
@@ -6058,8 +6243,10 @@ mod tests {
                 ]),
                 artifact_version: None,
                 aa_coding_index: HashMap::new(),
+                aa_intelligence_index: HashMap::new(),
                 model_signals: HashMap::new(),
                 bracket: HashSet::new(),
+                agent_top20: HashSet::new(),
                 top_models: HashMap::new(),
                 fetch_health: BTreeMap::new(),
                 popular_models: Vec::new(),
@@ -6097,8 +6284,10 @@ mod tests {
                     )]),
                     artifact_version: None,
                     aa_coding_index: HashMap::new(),
+                    aa_intelligence_index: HashMap::new(),
                     model_signals: HashMap::new(),
                     bracket: HashSet::new(),
+                    agent_top20: HashSet::new(),
                     top_models: HashMap::new(),
                     fetch_health: BTreeMap::new(),
                     popular_models: Vec::new(),
@@ -6151,8 +6340,10 @@ mod tests {
                 )]),
                 artifact_version: None,
                 aa_coding_index: HashMap::new(),
+                aa_intelligence_index: HashMap::new(),
                 model_signals: HashMap::new(),
                 bracket: HashSet::new(),
+                agent_top20: HashSet::new(),
                 top_models: HashMap::new(),
                 fetch_health: BTreeMap::new(),
                 popular_models: Vec::new(),
@@ -6188,8 +6379,10 @@ mod tests {
                 )]),
                 artifact_version: None,
                 aa_coding_index: HashMap::new(),
+                aa_intelligence_index: HashMap::new(),
                 model_signals: HashMap::new(),
                 bracket: HashSet::new(),
+                agent_top20: HashSet::new(),
                 top_models: HashMap::new(),
                 fetch_health: BTreeMap::new(),
                 popular_models: Vec::new(),
@@ -6216,8 +6409,10 @@ mod tests {
             )]),
             artifact_version: None,
             aa_coding_index: HashMap::new(),
+            aa_intelligence_index: HashMap::new(),
             model_signals: HashMap::new(),
             bracket: HashSet::new(),
+            agent_top20: HashSet::new(),
             top_models: HashMap::new(),
             fetch_health: BTreeMap::new(),
             popular_models: Vec::new(),
@@ -6248,8 +6443,10 @@ mod tests {
             )]),
             artifact_version: None,
             aa_coding_index: HashMap::new(),
+            aa_intelligence_index: HashMap::new(),
             model_signals: HashMap::new(),
             bracket: HashSet::new(),
+            agent_top20: HashSet::new(),
             top_models: HashMap::new(),
             fetch_health: BTreeMap::new(),
             popular_models: Vec::new(),
@@ -6282,8 +6479,10 @@ mod tests {
             )]),
             artifact_version: None,
             aa_coding_index: HashMap::new(),
+            aa_intelligence_index: HashMap::new(),
             model_signals: HashMap::new(),
             bracket: HashSet::new(),
+            agent_top20: HashSet::new(),
             top_models: HashMap::new(),
             fetch_health: BTreeMap::new(),
             popular_models: Vec::new(),
@@ -6429,8 +6628,10 @@ mod tests {
         router_with(Snapshot {
             models: HashMap::from([("m/q".to_string(), vec![o])]),
             aa_coding_index: HashMap::new(),
+            aa_intelligence_index: HashMap::new(),
             model_signals: HashMap::new(),
             bracket: HashSet::new(),
+            agent_top20: HashSet::new(),
             top_models: HashMap::new(),
             fetch_health: BTreeMap::new(),
             artifact_version: None,
@@ -6537,7 +6738,7 @@ mod tests {
                 free_only: false,
                 fallback: None,
                 pinned_model: None,
-                minindex: None,
+                mintel: None,
             })
         );
         assert_eq!(
@@ -6548,7 +6749,7 @@ mod tests {
                 free_only: false,
                 fallback: None,
                 pinned_model: None,
-                minindex: None,
+                mintel: None,
             })
         );
         assert_eq!(
@@ -6559,7 +6760,7 @@ mod tests {
                 free_only: false,
                 fallback: None,
                 pinned_model: None,
-                minindex: None,
+                mintel: None,
             })
         );
         assert_eq!(
@@ -6570,7 +6771,7 @@ mod tests {
                 free_only: true,
                 fallback: None,
                 pinned_model: None,
-                minindex: None,
+                mintel: None,
             })
         );
         assert_eq!(
@@ -6581,32 +6782,20 @@ mod tests {
                 free_only: false,
                 fallback: None,
                 pinned_model: None,
-                minindex: None,
+                mintel: None,
             })
         );
+        // Iter 51: `coding/think` is dropped — the id no longer
+        // parses and passes through untouched.
+        assert_eq!(parse_virtual("openrouter/pair/privacy/coding/think"), None);
         assert_eq!(
-            parse_virtual("openrouter/pair/privacy/coding/think"),
-            Some(VirtualModel {
-                tier: VirtualTier::CodingThink,
-                privacy: true,
-                free_only: false,
-                fallback: None,
-                pinned_model: None,
-                minindex: None,
-            })
-        );
-        assert_eq!(
-            parse_virtual("openrouter/pair/coding/minindex/50")
+            parse_virtual("openrouter/pair/coding/mintel/50")
                 .unwrap()
-                .minindex,
+                .mintel,
             Some(50)
         );
         // No `/fallback/` suffix of their own, like `low`/`think`.
         assert_eq!(parse_virtual("openrouter/pair/coding/fallback/low"), None);
-        assert_eq!(
-            parse_virtual("openrouter/pair/coding/think/fallback/low"),
-            None
-        );
         assert_eq!(
             parse_virtual("openrouter/pair/decision/free/fallback/low"),
             Some(VirtualModel {
@@ -6615,7 +6804,7 @@ mod tests {
                 free_only: true,
                 fallback: Some("low".to_string()),
                 pinned_model: None,
-                minindex: None,
+                mintel: None,
             })
         );
         assert_eq!(
@@ -6626,7 +6815,7 @@ mod tests {
                 free_only: true,
                 fallback: Some("think".to_string()),
                 pinned_model: None,
-                minindex: None,
+                mintel: None,
             })
         );
         assert_eq!(
@@ -6637,7 +6826,7 @@ mod tests {
                 free_only: false,
                 fallback: None,
                 pinned_model: None,
-                minindex: None,
+                mintel: None,
             })
         );
         assert_eq!(
@@ -6648,7 +6837,7 @@ mod tests {
                 free_only: false,
                 fallback: None,
                 pinned_model: None,
-                minindex: None,
+                mintel: None,
             })
         );
         // Fallback stays exclusive to the free scopes.
@@ -6679,7 +6868,7 @@ mod tests {
                 free_only: false,
                 fallback: None,
                 pinned_model: None,
-                minindex: None,
+                mintel: None,
             })
         );
         assert_eq!(
@@ -6690,7 +6879,7 @@ mod tests {
                 free_only: false,
                 fallback: None,
                 pinned_model: None,
-                minindex: None,
+                mintel: None,
             })
         );
         assert_eq!(
@@ -6698,7 +6887,7 @@ mod tests {
             Some(SmartId {
                 max: false,
                 privacy: false,
-                minindex: None,
+                mintel: None,
             })
         );
         assert_eq!(
@@ -6706,7 +6895,7 @@ mod tests {
             Some(SmartId {
                 max: true,
                 privacy: false,
-                minindex: None,
+                mintel: None,
             })
         );
         assert_eq!(
@@ -6714,7 +6903,7 @@ mod tests {
             Some(SmartId {
                 max: false,
                 privacy: true,
-                minindex: None,
+                mintel: None,
             })
         );
         assert_eq!(parse_smart("openrouter/pair/low"), None);
@@ -6788,8 +6977,10 @@ mod tests {
                 ]),
                 artifact_version: None,
                 aa_coding_index: HashMap::new(),
+                aa_intelligence_index: HashMap::new(),
                 model_signals: HashMap::new(),
                 bracket: HashSet::new(),
+                agent_top20: HashSet::new(),
                 top_models: HashMap::new(),
                 fetch_health: BTreeMap::new(),
                 popular_models: Vec::new(),
@@ -6896,8 +7087,10 @@ mod tests {
                 ]),
                 artifact_version: None,
                 aa_coding_index: HashMap::new(),
+                aa_intelligence_index: HashMap::new(),
                 model_signals: HashMap::new(),
                 bracket: HashSet::new(),
+                agent_top20: HashSet::new(),
                 top_models: HashMap::new(),
                 fetch_health: BTreeMap::new(),
                 popular_models: Vec::new(),
@@ -6970,8 +7163,10 @@ mod tests {
                 )]),
                 artifact_version: None,
                 aa_coding_index: HashMap::new(),
+                aa_intelligence_index: HashMap::new(),
                 model_signals: HashMap::new(),
                 bracket: HashSet::new(),
+                agent_top20: HashSet::new(),
                 top_models: HashMap::new(),
                 fetch_health: BTreeMap::new(),
                 popular_models: Vec::new(),
@@ -7026,8 +7221,10 @@ mod tests {
                 ]),
                 artifact_version: None,
                 aa_coding_index: HashMap::new(),
+                aa_intelligence_index: HashMap::new(),
                 model_signals: HashMap::new(),
                 bracket: HashSet::new(),
+                agent_top20: HashSet::new(),
                 top_models: HashMap::new(),
                 fetch_health: BTreeMap::new(),
                 popular_models: Vec::new(),
@@ -7082,8 +7279,10 @@ mod tests {
                 models: HashMap::from([("m/a".to_string(), vec![priced("m/a", "A", 2.0, None)])]),
                 artifact_version: None,
                 aa_coding_index: HashMap::new(),
+                aa_intelligence_index: HashMap::new(),
                 model_signals: HashMap::new(),
                 bracket: HashSet::new(),
+                agent_top20: HashSet::new(),
                 top_models: HashMap::new(),
                 fetch_health: BTreeMap::new(),
                 popular_models: Vec::new(),
@@ -7114,8 +7313,10 @@ mod tests {
                 models: HashMap::from([("m/a".to_string(), vec![priced("m/a", "A", 2.0, None)])]),
                 artifact_version: None,
                 aa_coding_index: HashMap::new(),
+                aa_intelligence_index: HashMap::new(),
                 model_signals: HashMap::new(),
                 bracket: HashSet::new(),
+                agent_top20: HashSet::new(),
                 top_models: HashMap::new(),
                 fetch_health: BTreeMap::new(),
                 popular_models: Vec::new(),
@@ -7222,74 +7423,73 @@ mod tests {
         assert!(map.contains_key(&("fresh".to_string(), "P".to_string())));
     }
 
-    /// Iter 33: the `minindex` suffix parses on every virtual form and
+    /// Iter 33: the `mintel` suffix parses on every virtual form and
     /// composes with `privacy/`, `model/<id>`, and `/fallback/`.
     #[test]
-    fn minindex_parses_on_virtual_ids() {
-        let low = parse_virtual("openrouter/pair/low/minindex/50").unwrap();
+    fn mintel_parses_on_virtual_ids() {
+        let low = parse_virtual("openrouter/pair/low/mintel/50").unwrap();
         assert_eq!(low.tier, VirtualTier::Low);
-        assert_eq!(low.minindex, Some(50));
+        assert_eq!(low.mintel, Some(50));
 
-        let privacy = parse_virtual("openrouter/pair/privacy/think/minindex/40").unwrap();
+        let privacy = parse_virtual("openrouter/pair/privacy/think/mintel/40").unwrap();
         assert!(privacy.privacy);
-        assert_eq!(privacy.minindex, Some(40));
+        assert_eq!(privacy.mintel, Some(40));
 
         let pinned =
-            parse_virtual("openrouter/pair/model/deepseek/deepseek-v4.1-flash/minindex/60")
-                .unwrap();
+            parse_virtual("openrouter/pair/model/deepseek/deepseek-v4.1-flash/mintel/60").unwrap();
         assert_eq!(
             pinned.pinned_model.as_deref(),
             Some("deepseek/deepseek-v4.1-flash")
         );
-        assert_eq!(pinned.minindex, Some(60));
+        assert_eq!(pinned.mintel, Some(60));
 
         let both = parse_virtual(
-            "openrouter/pair/model/deepseek/deepseek-v4.1-flash/minindex/60/fallback/low",
+            "openrouter/pair/model/deepseek/deepseek-v4.1-flash/mintel/60/fallback/low",
         )
         .unwrap();
-        assert_eq!(both.minindex, Some(60));
+        assert_eq!(both.mintel, Some(60));
         assert_eq!(both.fallback.as_deref(), Some("low"));
 
-        let free = parse_virtual("openrouter/pair/free/minindex/0").unwrap();
-        assert_eq!(free.minindex, Some(0));
+        let free = parse_virtual("openrouter/pair/free/mintel/0").unwrap();
+        assert_eq!(free.mintel, Some(0));
 
-        let smart = parse_smart("openrouter/pair/smart/minindex/40").unwrap();
-        assert_eq!(smart.minindex, Some(40));
+        let smart = parse_smart("openrouter/pair/smart/mintel/40").unwrap();
+        assert_eq!(smart.mintel, Some(40));
         assert_eq!(
-            parse_virtual("openrouter/pair/smart/minindex/40")
+            parse_virtual("openrouter/pair/smart/mintel/40")
                 .unwrap()
-                .minindex,
+                .mintel,
             Some(40)
         );
 
         // Leading zeros are the same floor.
         assert_eq!(
-            parse_virtual("openrouter/pair/low/minindex/050")
+            parse_virtual("openrouter/pair/low/mintel/050")
                 .unwrap()
-                .minindex,
+                .mintel,
             Some(50)
         );
         // No suffix stays `None`.
-        assert_eq!(parse_virtual("openrouter/pair/low").unwrap().minindex, None);
+        assert_eq!(parse_virtual("openrouter/pair/low").unwrap().mintel, None);
     }
 
-    /// Iter 44: the `lowest` tag reads a `/minindex/<n>` floor from
-    /// its own segments — first `minindex` wins, malformed fails.
+    /// Iter 44: the `lowest` tag reads a `/mintel/<n>` floor from
+    /// its own segments — first `mintel` wins, malformed fails.
     #[test]
-    fn lowest_minindex_parses_from_tags() {
+    fn lowest_mintel_parses_from_tags() {
         let tags = |parts: &[&str]| parts.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         assert_eq!(
-            lowest_minindex(&tags(&["lowest", "minindex", "50"])).unwrap(),
+            lowest_mintel(&tags(&["lowest", "mintel", "50"])).unwrap(),
             Some(50)
         );
-        assert_eq!(lowest_minindex(&tags(&["lowest"])).unwrap(), None);
+        assert_eq!(lowest_mintel(&tags(&["lowest"])).unwrap(), None);
         assert_eq!(
-            lowest_minindex(&tags(&["minindex", "70", "lowest"])).unwrap(),
+            lowest_mintel(&tags(&["mintel", "70", "lowest"])).unwrap(),
             Some(70)
         );
-        assert!(lowest_minindex(&tags(&["lowest", "minindex", "abc"])).is_err());
-        assert!(lowest_minindex(&tags(&["lowest", "minindex", "101"])).is_err());
-        assert!(lowest_minindex(&tags(&["lowest", "minindex"])).is_err());
+        assert!(lowest_mintel(&tags(&["lowest", "mintel", "abc"])).is_err());
+        assert!(lowest_mintel(&tags(&["lowest", "mintel", "101"])).is_err());
+        assert!(lowest_mintel(&tags(&["lowest", "mintel"])).is_err());
     }
 
     /// Iter 47: unset/empty means score-first; anything else must be
@@ -7311,24 +7511,24 @@ mod tests {
     /// Iter 33: unusable floors fail closed with `invalid_model` — never
     /// silent passthrough of a gateway-owned id.
     #[test]
-    fn minindex_invalid_suffixes_fail_closed() {
+    fn mintel_invalid_suffixes_fail_closed() {
         for id in [
-            "openrouter/pair/low/minindex/",
-            "openrouter/pair/low/minindex/50.5",
-            "openrouter/pair/low/minindex/-1",
-            "openrouter/pair/low/minindex/abc",
-            "openrouter/pair/low/minindex/101",
-            "openrouter/pair/low/minindex/50/minindex/60",
+            "openrouter/pair/low/mintel/",
+            "openrouter/pair/low/mintel/50.5",
+            "openrouter/pair/low/mintel/-1",
+            "openrouter/pair/low/mintel/abc",
+            "openrouter/pair/low/mintel/101",
+            "openrouter/pair/low/mintel/50/mintel/60",
         ] {
             assert!(parse_virtual(id).is_none(), "{id} must not parse");
             assert!(invalid_virtual(id).is_some(), "{id} must be invalid");
         }
         // Non-virtual ids and valid floors are not "invalid".
         assert!(invalid_virtual("meta/muse-spark").is_none());
-        assert!(invalid_virtual("openrouter/pair/low/minindex/50").is_none());
+        assert!(invalid_virtual("openrouter/pair/low/mintel/50").is_none());
 
         let r = router();
-        let body = routed_body("openrouter/pair/low/minindex/abc", serde_json::json!({}));
+        let body = routed_body("openrouter/pair/low/mintel/abc", serde_json::json!({}));
         let err = r
             .route_request_or_reject(&axum::http::HeaderMap::new(), &body)
             .unwrap_err();
@@ -7355,9 +7555,14 @@ mod tests {
                 ),
             ]),
             artifact_version: None,
-            aa_coding_index: HashMap::from([("m/low".to_string(), 30), ("m/high".to_string(), 60)]),
+            aa_coding_index: HashMap::new(),
+            aa_intelligence_index: HashMap::from([
+                ("m/low".to_string(), 30),
+                ("m/high".to_string(), 60),
+            ]),
             model_signals: HashMap::new(),
             bracket: HashSet::new(),
+            agent_top20: HashSet::new(),
             top_models: HashMap::new(),
             fetch_health: BTreeMap::new(),
             popular_models: Vec::new(),
@@ -7370,7 +7575,7 @@ mod tests {
     /// Iter 33: the floor is the first gate — a cheaper model below it
     /// (or with no index) never wins.
     #[test]
-    fn minindex_filters_cross_model_tiers() {
+    fn mintel_filters_cross_model_tiers() {
         let r = indexed_router();
         let route = |model: &str| {
             let body = routed_body(model, serde_json::json!({}));
@@ -7383,13 +7588,13 @@ mod tests {
         // No floor: cheapest wins, unknown index included.
         assert_eq!(route("openrouter/pair/low").model_id, "m/unknown");
         // Floor 50: only m/high (60) survives.
-        let d = route("openrouter/pair/low/minindex/50");
+        let d = route("openrouter/pair/low/mintel/50");
         assert_eq!(d.model_id, "m/high");
-        assert_eq!(d.minindex, Some(50));
+        assert_eq!(d.mintel, Some(50));
         // Floor 0: "must have any index" — the null model is excluded.
-        assert_eq!(route("openrouter/pair/low/minindex/0").model_id, "m/low");
+        assert_eq!(route("openrouter/pair/low/mintel/0").model_id, "m/low");
         // Floor above every index: fail closed.
-        let body = routed_body("openrouter/pair/low/minindex/90", serde_json::json!({}));
+        let body = routed_body("openrouter/pair/low/mintel/90", serde_json::json!({}));
         let err = r
             .route_request_or_reject(&axum::http::HeaderMap::new(), &body)
             .unwrap_err();
@@ -7398,34 +7603,34 @@ mod tests {
 
     /// Iter 33: a pinned model is admitted or rejected whole.
     #[test]
-    fn minindex_gates_pinned_models() {
+    fn mintel_gates_pinned_models() {
         let r = indexed_router();
         let route = |model: &str| {
             let body = routed_body(model, serde_json::json!({}));
             r.route_request_or_reject(&axum::http::HeaderMap::new(), &body)
         };
         assert_eq!(
-            route("openrouter/pair/model/m/high/minindex/50")
+            route("openrouter/pair/model/m/high/mintel/50")
                 .unwrap()
                 .unwrap()
                 .1
                 .model_id,
             "m/high"
         );
-        let err = route("openrouter/pair/model/m/low/minindex/50").unwrap_err();
+        let err = route("openrouter/pair/model/m/low/mintel/50").unwrap_err();
         assert_eq!(err.code, "no_eligible_offering");
         // Unknown index is excluded too.
-        let err = route("openrouter/pair/model/m/unknown/minindex/0").unwrap_err();
+        let err = route("openrouter/pair/model/m/unknown/mintel/0").unwrap_err();
         assert_eq!(err.code, "no_eligible_offering");
     }
 
     /// Iter 33: the floor scopes the primary leg only — the fallback
     /// tier runs unfiltered.
     #[test]
-    fn minindex_fallback_leg_ignores_floor() {
+    fn mintel_fallback_leg_ignores_floor() {
         let r = indexed_router();
         let body = routed_body(
-            "openrouter/pair/free/minindex/90/fallback/low",
+            "openrouter/pair/free/mintel/90/fallback/low",
             serde_json::json!({}),
         );
         let (_, decision) = r
@@ -7433,17 +7638,17 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(decision.model_id, "m/unknown");
-        assert_eq!(decision.minindex, None);
+        assert_eq!(decision.mintel, None);
     }
 
     /// Iter 33: the floor rides the decision so the handler can echo it.
     #[test]
-    fn minindex_helpers_read_the_suffix() {
-        assert_eq!(minindex_of("openrouter/pair/low/minindex/50"), Some(50));
-        assert_eq!(minindex_of("openrouter/pair/low"), None);
-        assert_eq!(minindex_of("meta/muse-spark"), None);
-        assert_eq!(tier_label("openrouter/pair/low/minindex/50"), "low");
-        assert_eq!(tier_label("openrouter/pair/smart/minindex/50"), "smart");
+    fn mintel_helpers_read_the_suffix() {
+        assert_eq!(mintel_of("openrouter/pair/low/mintel/50"), Some(50));
+        assert_eq!(mintel_of("openrouter/pair/low"), None);
+        assert_eq!(mintel_of("meta/muse-spark"), None);
+        assert_eq!(tier_label("openrouter/pair/low/mintel/50"), "low");
+        assert_eq!(tier_label("openrouter/pair/smart/mintel/50"), "smart");
         assert_eq!(tier_label("openrouter/pair/batch"), "batch");
         assert_eq!(tier_label("meta/muse-spark"), "none");
     }

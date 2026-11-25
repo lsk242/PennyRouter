@@ -1054,4 +1054,56 @@ only when pulled forward deliberately.
   (431 passed). fmt/clippy binaries still absent here — CI runs
   the gates.
 
-## After Iter 48
+## Iter 49 — Agent tier (done)
+
+- Goal: `openrouter/pair/agent` (+ `privacy/`) serves the cheapest
+  paid offering across the usage top-20 — the popular low-cost
+  pick for agents.
+- Value: one id for "what everyone uses, cheapest provider", with
+  no score math and no quality floor to misfire.
+- Shipped: catalog publishes the ranked `agent_top20` pool from
+  the rankings window (`:free` variants excluded, slug-or-id
+  resolution, `:batch`/`:free` ids dropped); gateway `Agent`
+  tier (cheapest effective cost over the pool, paid-only,
+  known-precision, tool/context/budget/throttle/sticky stages,
+  fail closed without pool data); `minindex` composes; valid
+  fallback target; menu (22 ids) + inspector (18 fixed combos)
+  list it; preview lists the pool cheapest-first.
+- Test: pool build (rank/free-exclusion/slug-resolution/empty) +
+  `agent.rs` (parse/route/privacy/minindex/fallback/empty-pool/
+  preview) + menu count updates; full workspace green
+  (453 passed). fmt via the extracted 1.8.0 binary (byte-identical
+  to CI before), clippy `-D warnings` clean the same way.
+
+## Iter 50 — `mintel` rename (done)
+
+- Goal: retire `/minindex/` for `/mintel/` on the AA intelligence
+  index — the coding index no longer means anything downstream.
+- Value: one index name across the filter, the header, the metric,
+  and the new tier rules; stale callers get a 400 naming the fix.
+- Shipped: segment/header (`x-pennyrouter-mintel`) / metric
+  (`pennyrouter_mintel_requests_total`) / struct fields renamed;
+  gate rebased on a new `aa_intelligence_index` snapshot map
+  (coding map stays display-only); retired `/minindex/` fails
+  closed with the rename notice on virtual ids and `lowest`
+  tags; fixed inspector examples 20/40 on the intelligence scale.
+- Test: `mintel.rs` (route/header/400/503/metric/retired-segment) +
+  rebased gate units + fixture flips (agent/coding/batch/score/
+  ui); full workspace green (454 passed). fmt + clippy `-D
+  warnings` via the extracted toolchain, clean.
+
+## Iter 51 — Drop `coding/think` + top-5 inspector (done)
+
+- Goal: remove the unneeded `coding/think` tier; show five
+  candidates in the fixed inspector combos instead of three.
+- Value: smaller tier surface; deeper at-a-glance ranking reads.
+- Shipped: `CodingThink` variant, parse/menu/preview/fallback
+  arms, and inspector ids removed (menu back to 20 ids, fixed
+  combos to 16); fixed + mintel groups render top-5 on first
+  paint and on key refresh.
+- Test: drop asserts (parse None, menu absence, passthrough
+  preview) + trimmed `coding_tiers.rs`; full workspace green
+  (453 passed). fmt + clippy `-D warnings` via the extracted
+  toolchain, clean.
+
+## After Iter 51

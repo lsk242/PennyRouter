@@ -1367,12 +1367,12 @@ async fn ui_page(State(state): State<AppState>, Query(params): Query<UiParams>) 
                 }
                 page.push_str("</ul>");
                 page.push_str(
-                    "<p>Every id composes with a coding-index floor \
-                    <code>/minindex/&lt;0..=100&gt;</code> \
-                    (e.g. <code>openrouter/pair/low/minindex/50</code>); pinned-model form \
+                    "<p>Every id composes with an intelligence-index floor \
+                    <code>/mintel/&lt;0..=100&gt;</code> \
+                    (e.g. <code>openrouter/pair/low/mintel/20</code>); pinned-model form \
                     <code>openrouter/pair/model/&lt;id&gt;</code>; fallback form \
                     <code>openrouter/pair/free/fallback/low</code> \
-                    (full chain: <code>openrouter/pair/privacy/think/minindex/40/fallback/low</code>).</p>",
+                    (full chain: <code>openrouter/pair/privacy/think/mintel/40/fallback/low</code>).</p>",
                 );
                 // Popularity pins: top OpenRouter models (menu pins, served
                 // passthrough) and hot apps, with the citation timestamp.
@@ -1658,7 +1658,7 @@ async fn ui_page(State(state): State<AppState>, Query(params): Query<UiParams>) 
         <button id=\"inspector-refresh\" type=\"button\" class=\"action\">Refresh fixed with key</button> \
         <span id=\"inspector-hash\"></span></p>",
     );
-        page.push_str("<h3>Fixed combinations (top 3)</h3>");
+        page.push_str("<h3>Fixed combinations (top 5)</h3>");
         page.push_str("<div class=\"table-scroll\">");
         if let Some(router) = router.as_ref() {
             fn bool3(value: Option<bool>) -> &'static str {
@@ -1670,17 +1670,17 @@ async fn ui_page(State(state): State<AppState>, Query(params): Query<UiParams>) 
             }
             for (prefix, ids) in [
                 ("fixed", routing::FIXED_PREVIEW_IDS.as_slice()),
-                ("minindex", routing::MININDEX_PREVIEW_IDS.as_slice()),
+                ("mintel", routing::MINTEL_PREVIEW_IDS.as_slice()),
             ] {
-                if prefix == "minindex" {
+                if prefix == "mintel" {
                     page.push_str(
-                        "<h3>Fixed minindex combinations (top 3)</h3>\
-                    <p>Same tiers with a coding-index floor (<code>/minindex/&lt;n&gt;</code>): \
-                    only models with a known AA coding index at or above the floor can win.</p>",
+                        "<h3>Fixed mintel combinations (top 5)</h3>\
+                    <p>Same tiers with an intelligence-index floor (<code>/mintel/&lt;n&gt;</code>): \
+                    only models with a known AA intelligence index at or above the floor can win.</p>",
                     );
                 }
                 for (i, id) in ids.iter().enumerate() {
-                    let preview = router.preview(id, None, 3);
+                    let preview = router.preview(id, None, 5);
                     page.push_str(&format!("<h4>{}</h4>", esc(id)));
                     match &preview.fresh {
                         Some(fresh) => page.push_str(&format!(
@@ -1825,7 +1825,7 @@ async fn ui_page(State(state): State<AppState>, Query(params): Query<UiParams>) 
         catch(e){box.textContent='preview failed: '+e;}};\
         async function insRefreshGroup(prefix,models){\
         for(var i=0;i<models.length;i++){\
-        try{var data=await insFetch(models[i],3);\
+        try{var data=await insFetch(models[i],5);\
         var rows=document.getElementById(prefix+'-'+i+'-rows');\
         var pick=document.getElementById(prefix+'-'+i+'-pick');\
         if(rows){var h='';for(var j=0;j<data.candidates.length;j++){var c=data.candidates[j];\
@@ -1847,15 +1847,15 @@ async fn ui_page(State(state): State<AppState>, Query(params): Query<UiParams>) 
         catch(e){}}}\
         document.getElementById('inspector-refresh').onclick=async function(){\
         await insRefreshGroup('fixed',['openrouter/pair/free','openrouter/pair/low','openrouter/pair/think',\
-        'openrouter/pair/coding','openrouter/pair/coding/think',\
+        'openrouter/pair/agent','openrouter/pair/coding',\
         'openrouter/pair/decision','openrouter/pair/decision/free','openrouter/pair/batch',\
         'openrouter/pair/privacy/free',\
         'openrouter/pair/privacy/low','openrouter/pair/privacy/think',\
-        'openrouter/pair/privacy/coding','openrouter/pair/privacy/coding/think',\
+        'openrouter/pair/privacy/agent','openrouter/pair/privacy/coding',\
         'openrouter/pair/privacy/decision',\
         'openrouter/pair/privacy/decision/free','openrouter/pair/privacy/batch']);\
-        await insRefreshGroup('minindex',['openrouter/pair/low/minindex/40',\
-        'openrouter/pair/privacy/think/minindex/70']);};\
+        await insRefreshGroup('mintel',['openrouter/pair/low/mintel/20',\
+        'openrouter/pair/privacy/think/mintel/40']);};\
         </script>",
     );
     }
@@ -1881,8 +1881,8 @@ async fn ui_page(State(state): State<AppState>, Query(params): Query<UiParams>) 
             <code>free</code>, <code>lowest</code>, or <code>low</code> per request</li>\
             <li><code>openrouter/pair/smart/max</code> — the classifier may also pick \
             <code>think</code></li>\
-            <li><code>openrouter/pair/privacy/smart/max/minindex/40</code> — privacy fields \
-            plus a coding-index floor compose; a <code>/fallback/</code> suffix never does \
+            <li><code>openrouter/pair/privacy/smart/max/mintel/40</code> — privacy fields \
+            plus an intelligence-index floor compose; a <code>/fallback/</code> suffix never does \
             (<code>smart/.../fallback/...</code> is rejected)</li>\
             </ul>\
             <p>Paste one into the Inspector custom-model box: without a live classifier leg \
@@ -2219,7 +2219,7 @@ async fn routed_decisions(
     let virtual_model = model
         .as_ref()
         .and_then(|model| routing::parse_virtual(model));
-    // An unusable `minindex` suffix (Iter 33) is still a gateway-owned
+    // An unusable `mintel` suffix (Iter 33) is still a gateway-owned
     // id: it must fail closed, never pass through.
     let is_virtual = virtual_model.is_some()
         || model
@@ -2266,14 +2266,14 @@ async fn routed_decisions(
     let (forwarded_body, decision, retry_body) = match &state.router {
         Some(router) => match router.route_decision_request(&headers, &buffered) {
             Ok(Some((rewritten, decision))) => {
-                note_minindex(&state, model.as_deref().unwrap_or_default(), "ok");
+                note_mintel(&state, model.as_deref().unwrap_or_default(), "ok");
                 let retry_body = is_virtual.then_some(buffered);
                 (rewritten, Some(decision), retry_body)
             }
             Ok(None) => (buffered, None, None),
             Err(rejection) => {
                 if fail_closed {
-                    note_minindex(
+                    note_mintel(
                         &state,
                         model.as_deref().unwrap_or_default(),
                         if rejection.code == "invalid_model" {
@@ -2466,7 +2466,7 @@ async fn routed_completion(
     let virtual_model = model
         .as_ref()
         .and_then(|model| routing::parse_virtual(model));
-    // An unusable `minindex` suffix (Iter 33) is still a gateway-owned
+    // An unusable `mintel` suffix (Iter 33) is still a gateway-owned
     // id: it must fail closed, never pass through.
     let is_virtual = virtual_model.is_some()
         || model
@@ -2544,14 +2544,14 @@ async fn routed_completion(
     let (forwarded_body, decision, retry_body) = match &state.router {
         Some(router) => match router.route_request_or_reject(&headers, &buffered) {
             Ok(Some((rewritten, decision))) => {
-                note_minindex(&state, model.as_deref().unwrap_or_default(), "ok");
+                note_mintel(&state, model.as_deref().unwrap_or_default(), "ok");
                 let retry_body = is_virtual.then_some(buffered);
                 (rewritten, Some(decision), retry_body)
             }
             Ok(None) => (buffered, None, None),
             Err(rejection) => {
                 if fail_closed {
-                    note_minindex(
+                    note_mintel(
                         &state,
                         model.as_deref().unwrap_or_default(),
                         if rejection.code == "invalid_model" {
@@ -2986,11 +2986,11 @@ async fn smart_completion(
                 match router.route_smart(&buffered, model_field, &tier, None) {
                     Ok(route) => route,
                     Err(rejection) => {
-                        note_minindex(state, model_field, "no_eligible");
+                        note_mintel(state, model_field, "no_eligible");
                         return with_smart_headers(rejection_response(&rejection), &ctx);
                     }
                 };
-            note_minindex(state, model_field, "ok");
+            note_mintel(state, model_field, "ok");
             let base = state.upstream_base_url.clone();
             let mut response = forward_upstream(
                 state,
@@ -3153,26 +3153,26 @@ fn record_throttle(
 }
 
 /// Count a floored request (Iter 33): bounded labels only.
-fn note_minindex(state: &AppState, model_field: &str, result: &'static str) {
-    if let Some(floor) = routing::minindex_of(model_field) {
+fn note_mintel(state: &AppState, model_field: &str, result: &'static str) {
+    if let Some(floor) = routing::mintel_of(model_field) {
         state
             .metrics
-            .minindex_request(floor, routing::tier_label(model_field), result);
+            .mintel_request(floor, routing::tier_label(model_field), result);
     }
 }
 
 /// Attach the routed diagnostic headers: the serving provider, plus
-/// the AA coding-index floor when the request carried one (Iter 33).
+/// the AA intelligence-index floor when the request carried one (Iter 33).
 fn with_routed_headers(mut response: Response, decision: &routing::Decision) -> Response {
     if let Ok(value) = decision.provider.parse() {
         response
             .headers_mut()
             .insert(routing::PROVIDER_HEADER, value);
     }
-    if let Some(floor) = decision.minindex {
+    if let Some(floor) = decision.mintel {
         if let Ok(value) = floor.to_string().parse() {
             response.headers_mut().insert(
-                axum::http::HeaderName::from_static(routing::MININDEX_HEADER),
+                axum::http::HeaderName::from_static(routing::MINTEL_HEADER),
                 value,
             );
         }

@@ -714,7 +714,7 @@ async fn ui_models_tab_mirrors_catalog_models_page() {
             .update_model_index(
                 "m/code",
                 &ModelIndex {
-                    aa_intelligence_index: None,
+                    aa_intelligence_index: Some(60),
                     aa_coding_index: Some(60),
                     aa_agentic_index: None,
                     aa_cost_per_task: None,
@@ -1459,12 +1459,12 @@ async fn ui_page_contains_inspector() {
     );
 }
 
-/// Iter 40: smart + minindex examples across the debug UI — minindex
+/// Iter 40: smart + mintel examples across the debug UI — mintel
 /// fixed combos in the inspector (with key-refresh coverage), smart
 /// examples on the classifier tab, and the composition note on the
 /// virtual menu.
 #[tokio::test]
-async fn ui_shows_smart_and_minindex_examples() {
+async fn ui_shows_smart_and_mintel_examples() {
     let _guard = lock_env().await;
     std::env::set_var("GATEWAY_UI", "1");
     let (mock, _) = spawn_mock().await;
@@ -1485,21 +1485,21 @@ async fn ui_shows_smart_and_minindex_examples() {
         .text()
         .await
         .unwrap();
-    // Inspector: minindex fixed group renders with its own row ids.
+    // Inspector: mintel fixed group renders with its own row ids.
     assert!(
-        body.contains("Fixed minindex combinations"),
-        "minindex group header, got: {body}"
+        body.contains("Fixed mintel combinations"),
+        "mintel group header, got: {body}"
     );
-    for id in pennyrouter_gateway::routing::MININDEX_PREVIEW_IDS {
+    for id in pennyrouter_gateway::routing::MINTEL_PREVIEW_IDS {
         assert!(body.contains(id), "combo {id} listed, got: {body}");
     }
     assert!(
-        body.contains("id=\"minindex-0-rows\""),
-        "minindex rows id, got: {body}"
+        body.contains("id=\"mintel-0-rows\""),
+        "mintel rows id, got: {body}"
     );
     assert!(
-        body.contains("insRefreshGroup('minindex'"),
-        "key refresh covers the minindex group, got: {body}"
+        body.contains("insRefreshGroup('mintel'"),
+        "key refresh covers the mintel group, got: {body}"
     );
     // Inspector points at the classifier tab for smart ids.
     assert!(
@@ -1512,11 +1512,11 @@ async fn ui_shows_smart_and_minindex_examples() {
     );
     // Overview menu note shows the composed forms.
     assert!(
-        body.contains("openrouter/pair/low/minindex/50"),
-        "menu minindex example, got: {body}"
+        body.contains("openrouter/pair/low/mintel/20"),
+        "menu mintel example, got: {body}"
     );
     assert!(
-        body.contains("openrouter/pair/privacy/think/minindex/40/fallback/low"),
+        body.contains("openrouter/pair/privacy/think/mintel/40/fallback/low"),
         "menu full-chain example, got: {body}"
     );
 }

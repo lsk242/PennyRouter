@@ -272,8 +272,8 @@ fn batch_preview_lists_batch_candidates_only() {
 }
 
 #[tokio::test]
-async fn batch_minindex_floor_scopes_to_indexed_batch_models() {
-    let db = scratch_db("minindex");
+async fn batch_mintel_floor_scopes_to_indexed_batch_models() {
+    let db = scratch_db("mintel");
     build_db(&db);
     {
         let catalog = Catalog::open(&db).unwrap();
@@ -282,8 +282,8 @@ async fn batch_minindex_floor_scopes_to_indexed_batch_models() {
                 .update_model_index(
                     model,
                     &ModelIndex {
-                        aa_intelligence_index: None,
-                        aa_coding_index: Some(index),
+                        aa_intelligence_index: Some(index),
+                        aa_coding_index: None,
                         aa_agentic_index: None,
                         aa_cost_per_task: None,
                     },
@@ -296,7 +296,7 @@ async fn batch_minindex_floor_scopes_to_indexed_batch_models() {
     let gw = spawn_gateway(mock, &db).await;
 
     // The floor admits only the indexed-60 batch model.
-    let res = post_chat(gw, "openrouter/pair/batch/minindex/50").await;
+    let res = post_chat(gw, "openrouter/pair/batch/mintel/50").await;
     assert_eq!(res.status(), StatusCode::OK);
     assert_eq!(
         res.headers().get("x-pennyrouter-provider").unwrap(),
@@ -304,14 +304,14 @@ async fn batch_minindex_floor_scopes_to_indexed_batch_models() {
     );
     assert_eq!(
         res.headers()
-            .get("x-pennyrouter-minindex")
+            .get("x-pennyrouter-mintel")
             .and_then(|v| v.to_str().ok()),
         Some("50"),
         "floor echoed back"
     );
 
     // Nothing indexed that high: fail closed.
-    let res = post_chat(gw, "openrouter/pair/batch/minindex/90").await;
+    let res = post_chat(gw, "openrouter/pair/batch/mintel/90").await;
     assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
     let body: serde_json::Value = res.json().await.unwrap();
     assert_eq!(body["error"]["code"], "no_eligible_offering");

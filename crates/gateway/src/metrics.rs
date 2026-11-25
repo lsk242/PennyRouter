@@ -255,7 +255,7 @@ pub struct Metrics {
     smart_fallback: [AtomicU64; 2],
     /// Floored requests (Iter 33): (floor, tier, result) → count.
     /// Bounded: 101 floors × 6 tiers × 3 results.
-    minindex: Mutex<HashMap<(u8, &'static str, &'static str), u64>>,
+    mintel: Mutex<HashMap<(u8, &'static str, &'static str), u64>>,
     classifier_last_error: Mutex<String>,
     /// Score rollup gauges (Iter 46): recomputed wholesale per
     /// snapshot (loads are rare); rendered sorted.
@@ -294,7 +294,7 @@ impl Metrics {
             classifier_sum_micros: AtomicU64::new(0),
             classifier_count: AtomicU64::new(0),
             smart_fallback: [const { AtomicU64::new(0) }; 2],
-            minindex: Mutex::new(HashMap::new()),
+            mintel: Mutex::new(HashMap::new()),
             classifier_last_error: Mutex::new(String::new()),
             score_models: Mutex::new(HashMap::new()),
             score_flags: Mutex::new(HashMap::new()),
@@ -408,8 +408,8 @@ impl Metrics {
 
     /// Count one floored request (Iter 33). Labels are bounded: the
     /// floor is 0..=100, the tier and result are fixed strings.
-    pub fn minindex_request(&self, floor: u8, tier: &'static str, result: &'static str) {
-        if let Ok(mut counts) = self.minindex.lock() {
+    pub fn mintel_request(&self, floor: u8, tier: &'static str, result: &'static str) {
+        if let Ok(mut counts) = self.mintel.lock() {
             *counts.entry((floor, tier, result)).or_insert(0) += 1;
         }
     }
@@ -646,16 +646,16 @@ impl Metrics {
             self.smart_fallback[1].load(Ordering::Relaxed)
         ));
         out.push_str(
-            "# HELP pennyrouter_minindex_requests_total Floored requests by floor, tier, result.\n",
+            "# HELP pennyrouter_mintel_requests_total Floored requests by floor, tier, result.\n",
         );
-        out.push_str("# TYPE pennyrouter_minindex_requests_total counter\n");
-        if let Ok(counts) = self.minindex.lock() {
+        out.push_str("# TYPE pennyrouter_mintel_requests_total counter\n");
+        if let Ok(counts) = self.mintel.lock() {
             let mut pairs: Vec<((u8, &'static str, &'static str), u64)> =
                 counts.iter().map(|(key, n)| (*key, *n)).collect();
             pairs.sort_unstable();
             for ((floor, tier, result), n) in pairs {
                 out.push_str(&format!(
-                    "pennyrouter_minindex_requests_total{{minindex=\"{floor}\",tier=\"{tier}\",result=\"{result}\"}} {n}\n"
+                    "pennyrouter_mintel_requests_total{{mintel=\"{floor}\",tier=\"{tier}\",result=\"{result}\"}} {n}\n"
                 ));
             }
         }

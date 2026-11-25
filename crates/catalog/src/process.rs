@@ -4,7 +4,7 @@
 //! later (Phase 2b) behind the same per-endpoint update.
 
 use crate::benchmarks::{read_benchmark_code, read_benchmark_intel};
-use crate::popular::{read_activity, ModelActivity};
+use crate::popular::{read_activity, ModelActivity, AGENT_TOP_N};
 use crate::rank_score::{
     self, RankInputs, BRACKET_MIN_SHARE, BRACKET_PERFORMANCE_FLOOR, BRACKET_TOP_N, RULESET_VERSION,
     THINK_MAX_COST_TASK,
@@ -144,7 +144,7 @@ pub fn run_processing(catalog: &Catalog, processed_at: &str) -> Result<ProcessSu
                 .or_else(|| extract_aa_index(&payload, "agentic_index"));
             // Version gate: stale or unversioned intel is NULL once a
             // current version is known — the columns always hold
-            // counted values, so minindex, tiers, and the UI respect
+            // counted values, so mintel, tiers, and the UI respect
             // the gate for free. Unknown current keeps the legacy
             // behavior (everything counts).
             let gated_intel = match (&intel, &current_version) {
@@ -502,6 +502,44 @@ fn run_brackets(
         })
         .to_string(),
     )?;
+    // Agent pool (Iter 49): top slugs by recent-window tokens,
+    // `:free` variants excluded — the `agent` tier is paid-only.
+    // Resolved to catalog model ids like the bracket (slug or id);
+    // `:batch`/`:free` ids are not routable picks. Ranked best
+    // first; empty without popularity data (the tier fails closed).
+    let mut by_tokens: Vec<(&String, u64)> = popular
+        .iter()
+        .map(|(slug, tokens)| (slug, *tokens))
+        .collect();
+    by_tokens.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+    let agent_rank: HashMap<&str, usize> = by_tokens
+        .into_iter()
+        .filter(|(slug, _)| !slug.ends_with(":free"))
+        .take(AGENT_TOP_N)
+        .map(|(slug, _)| slug.as_str())
+        .enumerate()
+        .map(|(rank, slug)| (slug, rank))
+        .collect();
+    let mut agent: Vec<(&String, usize)> = facts
+        .iter()
+        .filter(|(id, _)| !id.ends_with(":batch") && !id.ends_with(":free"))
+        .filter_map(|(id, f)| {
+            agent_rank
+                .get(f.slug.as_str())
+                .or_else(|| agent_rank.get(id.as_str()))
+                .map(|rank| (id, *rank))
+        })
+        .collect();
+    agent.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(b.0)));
+    catalog.set_meta(
+        "agent_top20",
+        &json!({
+            "ruleset": RULESET_VERSION,
+            "top_n": AGENT_TOP_N,
+            "members": agent.iter().map(|(id, _)| id).collect::<Vec<_>>(),
+        })
+        .to_string(),
+    )?;
     let mut ids: Vec<&String> = facts.keys().collect();
     ids.sort();
     let mut top = serde_json::Map::new();
@@ -698,6 +736,26 @@ pub fn read_top_models(catalog: &Catalog) -> HashMap<String, TopModel> {
 pub fn read_bracket_members(catalog: &Catalog) -> HashSet<String> {
     catalog
         .get_meta("bracket")
+        .ok()
+        .flatten()
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .and_then(|v| v.get("members")?.as_array().cloned())
+        .map(|members| {
+            members
+                .into_iter()
+                .filter_map(|m| m.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Ranked agent-pool model ids for the gateway (Iter 49): the
+/// `agent_top20` summary's member list, best first. Missing or
+/// unparseable (old artifacts, keyless syncs) reads as empty — the
+/// tier fails closed.
+pub fn read_agent_top20(catalog: &Catalog) -> Vec<String> {
+    catalog
+        .get_meta("agent_top20")
         .ok()
         .flatten()
         .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())

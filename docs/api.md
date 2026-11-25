@@ -66,13 +66,13 @@ default route — never an error. The `lowest` filter instead rewrites to
 the cheapest paid offering catalog-wide (no quality floor) and fails
 closed when none is eligible. `openrouter/pair/free/fallback/<tier>`
 serves free first, then exactly one pick from the named tier
-(`low|think|lowest|decision`; unknown targets fail closed with
+(`low|think|agent|lowest|decision`; unknown targets fail closed with
 `no_eligible_offering`) when free is exhausted. An optional
-`/minindex/<0..=100>` suffix (Iter 33) keeps only models whose AA
-coding index meets the floor — e.g.
-`openrouter/pair/low/minindex/50`; an unusable value is a 400
+`/mintel/<0..=100>` suffix (Iter 33, renamed Iter 50) keeps only
+models whose AA intelligence index meets the floor — e.g.
+`openrouter/pair/low/mintel/20`; an unusable value is a 400
 `invalid_model`, an unsatisfiable floor a 503 `no_eligible_offering`,
-and routed responses echo the floor in `x-pennyrouter-minindex`. 429
+and routed responses echo the floor in `x-pennyrouter-mintel`. 429
 responses carry
 `Retry-After` plus the
 upstream's `X-RateLimit-*` headers when present. A `modal/` or `baseten/` prefix instead
@@ -86,7 +86,8 @@ From Iter 7, `openrouter/free` routes to any free offering (rewritten
 to its backend id) or passes through untouched when nothing is free.
 From Iter 13, the virtual catalog `openrouter/pair/[privacy/]<free|low|think>`
 is the stable menu (see [routing.md](routing.md)): `free` = zero-cost,
-`low` = cheapest basic, `think` = best quality, `decision` =
+`low` = cheapest basic, `think` = best quality, `agent` (Iter 49) =
+cheapest across the usage top-20, `decision` =
 cheapest decisions-capable (plus a `decision/free` zero-cost scope);
 `openrouter/pair/model/<model-id>` (Iter 28) pins to one specific
 model and picks the best provider for it; `privacy/` variants

@@ -1496,3 +1496,98 @@ fn benchmark_backfill_fills_missing_intelligence_only() {
     assert_eq!(ranks[&gap.id].rank_basis.as_deref(), Some("intel"));
     assert!(ranks[&gap.id].rank_score.is_some());
 }
+
+/// Iter 49: the agent pool ranks the top-20 usage slugs excluding
+/// `:free` variants, resolved to catalog ids via slug or id.
+#[test]
+fn agent_pool_top20_excludes_free_and_resolves_slugs() {
+    let (_dir, catalog) = v2_db("v2-agent-pool");
+    // 22 measured models: the quietest fall off the top-20.
+    let mut popular = serde_json::Map::new();
+    for n in 0..22 {
+        let id = format!("m/{n:02}");
+        catalog.insert_model(&v2_model(&id, "")).unwrap();
+        catalog
+            .insert_endpoint(&v2_endpoint(&id, "P", Some("0.000001")))
+            .unwrap();
+        popular.insert(id, serde_json::json!(2200 - n * 100));
+    }
+    // A `:free` variant with huge usage never enters the ranking.
+    popular.insert("m/freeload:free".to_string(), serde_json::json!(99999));
+    catalog
+        .insert_model(&v2_model("m/freeload:free", ""))
+        .unwrap();
+    catalog
+        .insert_endpoint(&v2_endpoint("m/freeload:free", "P", Some("0.000001")))
+        .unwrap();
+    // A `:batch` id ranks (it is a usage slug) but never resolves —
+    // `:batch` ids are not routable picks.
+    popular.insert("m/batched:batch".to_string(), serde_json::json!(88888));
+    catalog
+        .insert_model(&v2_model("m/batched:batch", ""))
+        .unwrap();
+    catalog
+        .insert_endpoint(&v2_endpoint("m/batched:batch", "P", Some("0.000001")))
+        .unwrap();
+    // Slug resolution: a dated ranking slug meets the catalog id
+    // through `canonical_slug`.
+    catalog
+        .insert_model(&ModelRow {
+            model_id: "vnd/fancy".to_string(),
+            name: "fancy".to_string(),
+            source: "test".to_string(),
+            payload: r#"{"id":"vnd/fancy","canonical_slug":"vnd/fancy-20260101"}"#.to_string(),
+            fetched_at: "t".to_string(),
+        })
+        .unwrap();
+    catalog
+        .insert_endpoint(&v2_endpoint("vnd/fancy", "P", Some("0.000001")))
+        .unwrap();
+    popular.insert("vnd/fancy-20260101".to_string(), serde_json::json!(2150));
+    catalog
+        .set_meta(
+            "popular_tokens",
+            &serde_json::Value::Object(popular).to_string(),
+        )
+        .unwrap();
+
+    run_processing(&catalog, PROCESSED_AT).unwrap();
+
+    let agent: serde_json::Value =
+        serde_json::from_str(&catalog.get_meta("agent_top20").unwrap().unwrap()).unwrap();
+    let members: Vec<&str> = agent["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m.as_str().unwrap())
+        .collect();
+    // 19 resolve: the `:batch` rank-1 slug drops at resolution, the
+    // `:free` slug never ranked, m/18..m/21 fall off the top-20.
+    assert_eq!(members.len(), 19);
+    assert_eq!(members[0], "m/00");
+    assert_eq!(members[1], "vnd/fancy");
+    assert_eq!(members[2], "m/01");
+    assert_eq!(members[18], "m/17");
+    assert!(!members.contains(&"m/freeload:free"));
+    assert!(!members.contains(&"m/batched:batch"));
+    assert!(!members.contains(&"m/18"));
+    assert_eq!(pennyrouter_catalog::read_agent_top20(&catalog).len(), 19);
+}
+
+/// Iter 49: without popularity data the pool publishes empty and the
+/// reader agrees — the tier fails closed.
+#[test]
+fn agent_pool_empty_without_popularity() {
+    let (_dir, catalog) = v2_db("v2-agent-empty");
+    catalog.insert_model(&v2_model("m/solo", "")).unwrap();
+    catalog
+        .insert_endpoint(&v2_endpoint("m/solo", "P", Some("0.000001")))
+        .unwrap();
+
+    run_processing(&catalog, PROCESSED_AT).unwrap();
+
+    let agent: serde_json::Value =
+        serde_json::from_str(&catalog.get_meta("agent_top20").unwrap().unwrap()).unwrap();
+    assert_eq!(agent["members"], serde_json::json!([]));
+    assert!(pennyrouter_catalog::read_agent_top20(&catalog).is_empty());
+}

@@ -78,7 +78,7 @@ session.
   and deterministic tie-breaks as the `low` tier, minus its
   scored-tier floor. Full list, bracket or not; activity level
   breaks price ties (Iter 44), then model id, provider. An
-  optional `/minindex/<n>` tag segment floors the pool, failing
+  optional `/mintel/<n>` tag segment floors the pool, failing
   closed on malformed values like the virtual suffix. Fails closed
   like virtual ids (`no_eligible_offering` 503, `budget_exceeded`
   400) instead of leaking the tagged id upstream; exactly-once
@@ -180,14 +180,24 @@ session.
   valid `/fallback/` target. Async processing is a caller-level
   latency tradeoff, so `batch` stays out of the smart classifier's
   tier domain.
-- Coding tiers (Iter 48): `openrouter/pair/[privacy/]coding` and
-  `.../coding/think` run the `low`/`think` legacy orderings
-  (cheapest / best quality signals, same floors) scoped to the
-  most-used (top-usage bracket) models — popularity-first picks
-  alongside the score-first `low`/`think`. No bracket data means
-  no pool, so they fail closed instead of silently serving the
-  full list. `minindex` composes; valid `/fallback/` targets;
-  no `/fallback/` suffix of their own, like `low`/`think`.
+- Coding tier (Iter 48; `coding/think` dropped in Iter 51):
+  `openrouter/pair/[privacy/]coding` runs the `low` legacy ordering
+  (cheapest, same floor) scoped to the most-used (top-usage
+  bracket) models — a popularity-first pick alongside the
+  score-first `low`/`think`. No bracket data means no pool, so it
+  fails closed instead of silently serving the full list. `mintel`
+  composes; valid `/fallback/` target; no `/fallback/` suffix of
+  its own, like `low`/`think`.
+- Agent tier (Iter 49): `openrouter/pair/[privacy/]agent` serves
+  the cheapest paid offering across the usage top-20 pool — the
+  20 most-used ranking slugs (`:free` variants excluded),
+  resolved to catalog models. No quality floor and no score
+  math: eligibility (paid, known precision, tools, context,
+  budget, throttle) then cheapest effective cost, sticky per
+  session. No pool data means no picks, so it fails closed
+  instead of silently serving the full list. `mintel`
+  composes; valid `/fallback/` target; no `/fallback/` suffix
+  of its own, like `low`/`think`.
 - Decisions route (Iter 27): `POST /v1/decisions` dispatches through
   the same virtual ids (`decision`, `decision/free`,
   `decision/free/fallback/decision`) but rewrites the model only —
@@ -213,20 +223,23 @@ session.
   Privacy/budget/auth semantics mirror the
   other virtual routes. An unknown model id fails closed with
   `no_eligible_offering` (503) rather than leaking the virtual name.
-- AA coding-index floor (Iter 33): an optional `/minindex/<0..=100>`
-  suffix on any virtual id (`low`, `think`, `decision`, `batch`,
+- AA intelligence-index floor (Iter 33, `/mintel/` since Iter 50):
+  an optional `/mintel/<0..=100>` suffix on any virtual id (`low`,
+  `think`, `agent`, `coding`, `decision`, `batch`,
   `free`, `model/<id>`, `smart`) keeps only models whose catalog
-  `aa_coding_index` is at or above the floor. It sits after the core
+  `aa_intelligence_index` is at or above the floor. It sits after the core
   id and before `/fallback/`:
-  `openrouter/pair/privacy/think/minindex/40/fallback/low`. The floor
+  `openrouter/pair/privacy/think/mintel/40/fallback/low`. The floor
   is the first eligibility gate — a cheaper model below it (or with
-  no index at all) never wins, and `minindex/0` means "must have any
+  no index at all) never wins, and `mintel/0` means "must have any
   index". It scopes the primary leg only; the fallback tier runs
   unfiltered. An unusable value (empty, non-numeric, out of range,
   duplicated) fails closed with `invalid_model` (400); a satisfiable
   floor with no surviving candidate fails closed with
-  `no_eligible_offering` (503). Routed responses echo the floor in
-  `x-pennyrouter-minindex`.
+  `no_eligible_offering` (503). The retired `/minindex/` segment
+  fails closed with `invalid_model` naming the rename instead of
+  leaking upstream. Routed responses echo the floor in
+  `x-pennyrouter-mintel`.
 - Cost (Iter 7): "cheapest" compares effective cost under the balanced
   workload profile (see [pricing.md](pricing.md)), promo column
   applied; unpriceable offerings sort last. The `openrouter/free`
@@ -298,8 +311,8 @@ stores a pin. Throttled pins fall through exactly like the request
 path; fallback ids preview the leg that would serve; smart ids
 preview as `smart_requires_classifier` because their tier comes
 from the live classifier leg, not the local index. The `/ui` page
-renders the sixteen fixed non-smart virtual combos top-3, two fixed
-minindex combos (Iter 40), smart examples on the Classifier tab,
+renders the sixteen fixed non-smart virtual combos top-5, two fixed
+mintel combos (Iter 40), smart examples on the Classifier tab,
 plus a custom model box on top of this endpoint. Plain-request view: tools, budget,
 and only/ignore constraints are not applied, so a capped request can
 fail closed where the preview shows a pick.
