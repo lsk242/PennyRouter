@@ -79,33 +79,15 @@ router keeps serving the last good index.
   and promo-free eligibility publishes in the ranking document
   (`free_offers`, Iter 11).
 
-## Value score (Iter 34)
+## Task cost (Iter 34, slimmed Iter 57)
 
-A second, deterministic ordering answers "maximum intelligence for the
-lowest price" without AI or an external ranking service:
+Processing stores one cost-per-task per endpoint: AA's own figure
+when positive, else the catalog blend at 10 000 tokens on the
+balanced profile. `coding/task` routes on it; the UIs display it.
+Unpriceable rows keep `NULL`, never zero. (The Iter 34 value score
+that used to surround this number was removed in Iters 56–57:
+routing reads prices, indexes, and usage directly now.)
 
-```
-rank_score = quality × efficiency × popularity        (0..100)
-quality    = AA index × precision factor
-efficiency = COST_HALF_CREDIT / (cost_per_task + COST_HALF_CREDIT)
-popularity = (1 + POP_WEIGHT × share) / (1 + POP_WEIGHT)
-```
-
-- Basis chain: `coding → intelligence → agentic → none`, recorded per
-  row in `rank_basis`. Decision models read `agentic` (falling back to
-  `intelligence`) and skip the precision factor.
-- `COST_HALF_CREDIT` = $0.01/task (the live median), `POP_WEIGHT` =
-  0.10, task = 10 000 tokens on the balanced profile. Constants live in
-  `crates/catalog/src/rank_score.rs`; `RULESET_VERSION` (`rank-v1`)
-  travels with every row.
-- No index or no price means **no score** (`NULL`), never zero: an
-  unmeasured model must not sort below a measured bad one.
-- Ties break on throughput → latency → uptime → provider/tag, so
-  rebuilds stay byte-stable.
-- The ranking document gains an optional `score` ordering per class,
-  omitted entirely when the catalog was never processed. The gateway
-  ignores it until a later iteration adopts the score for routing.
-- The catalog UI renders the same arithmetic: an overview page
-  (coverage, gaps, formula, worked example) and a models page with
-  `free` / `tiers` / `decision` tabs, each row expanding to its
-  components.
+- The catalog UI renders tables ordered by usage, then price: an
+  overview page (coverage, gaps, usage pools) and a models page
+  with `free` / `tiers` / `batch` / `decision` tabs.

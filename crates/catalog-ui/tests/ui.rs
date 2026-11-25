@@ -206,21 +206,12 @@ fn artifact_dir(test: &str) -> std::path::PathBuf {
         .update_endpoint_rank(
             free.id,
             &EndpointRank {
-                rank_score: Some(80.0),
-                rank_quality: Some(80.0),
-                rank_efficiency: Some(1.0),
-                rank_popularity: Some(1.0),
-                rank_activity: None,
                 rank_cost_task: None,
-                rank_basis: Some("coding".to_string()),
-                rank_ruleset: Some("rank-v1".to_string()),
-                ranked_at: Some("t".to_string()),
             },
         )
         .unwrap();
 
-    // A v2-scored offering: rank_activity + rank_cost_task set,
-    // popularity NULL — the breakdown must render the v2 formula.
+    // A measured offering: activity + stored task cost set.
     catalog
         .insert_model(&ModelRow {
             model_id: "v2/model".to_string(),
@@ -302,15 +293,7 @@ fn artifact_dir(test: &str) -> std::path::PathBuf {
         .update_endpoint_rank(
             v2.id,
             &EndpointRank {
-                rank_score: Some(36.0),
-                rank_quality: Some(80.0),
-                rank_efficiency: Some(0.5),
-                rank_popularity: None,
-                rank_activity: Some(0.9),
                 rank_cost_task: Some(0.01),
-                rank_basis: Some("coding".to_string()),
-                rank_ruleset: Some("rank-v2".to_string()),
-                ranked_at: Some("t".to_string()),
             },
         )
         .unwrap();
@@ -351,20 +334,56 @@ fn artifact_dir(test: &str) -> std::path::PathBuf {
             price_override_tokens: None,
         })
         .unwrap();
-    // TOP rollup + bracket + fetch health (Iter 46): two bracket
-    // members plus one flagged outsider.
+    // A measured non-text offering: hidden from every tab.
     catalog
-        .set_meta(
-            "top_models",
-            r#"{"top/alpha":{"score":36.0,"quality":80.0,"efficiency":0.5,"activity":0.9,"cost_task":0.01,"basis":"coding","level":0.9,"trend":1.1,"bracket":true,"flags":[]},
-                "top/beta":{"score":24.0,"quality":60.0,"efficiency":0.5,"activity":0.8,"cost_task":0.01,"basis":"coding","level":0.88,"trend":1.0,"bracket":true,"flags":[]},
-                "top/ghost":{"score":null,"quality":null,"efficiency":null,"activity":null,"cost_task":null,"basis":null,"level":0.4,"trend":1.0,"bracket":false,"flags":["no-price","popular-but-unscored"]}}"#,
-        )
+        .insert_model(&ModelRow {
+            model_id: "m/audio".to_string(),
+            name: "m/audio".to_string(),
+            source: "test".to_string(),
+            payload: "{}".to_string(),
+            fetched_at: "t".to_string(),
+        })
         .unwrap();
+    catalog
+        .insert_endpoint(&EndpointRow {
+            id: 0,
+            model_id: "m/audio".to_string(),
+            provider_name: "AudioProvider".to_string(),
+            payload: "{}".to_string(),
+            fetched_at: "t".to_string(),
+            price_prompt: Some(1e-9),
+            price_completion: Some(1e-9),
+            price_cache_read: None,
+            price_cache_write: None,
+            precision_class: Some("fp16".to_string()),
+            quantization: None,
+            promo_discount: None,
+            processed_at: Some("t".to_string()),
+            supports_tools: None,
+            supports_decisions: None,
+            quality_tier: None,
+            quality_score: None,
+            scored_at: None,
+            score_model: None,
+            score_prompt: None,
+            price_override_tokens: None,
+        })
+        .unwrap();
+    catalog
+        .update_model_modalities("m/audio", Some(&["text".to_string(), "audio".to_string()]))
+        .unwrap();
+    // Usage pools + fetch health: two bracket members, three
+    // top-20 members.
     catalog
         .set_meta(
             "bracket",
             r#"{"ruleset":"rank-v2","members":["top/alpha","top/beta"]}"#,
+        )
+        .unwrap();
+    catalog
+        .set_meta(
+            "agent_top20",
+            r#"{"ruleset":"rank-v2","top_n":20,"members":["a","b","c"]}"#,
         )
         .unwrap();
     catalog
@@ -394,7 +413,6 @@ fn artifact_dir(test: &str) -> std::path::PathBuf {
             }],
             price: vec![],
             quality: vec![],
-            score: vec![],
         }],
     );
     let doc = RankingDocument {
@@ -657,39 +675,27 @@ fn model_link_round_trips_special_chars_and_prices_render() {
 /// Iter 34: the home page is an overview (coverage, gaps, the formula,
 /// a worked example) and the models page splits free from tiers.
 #[test]
-fn overview_explains_the_score_and_models_tabs_split_free_from_tiers() {
-    let out = artifact_dir("score-ui");
+fn overview_shows_pools_and_models_tabs_split_free_from_tiers() {
+    let out = artifact_dir("pools-ui");
     let log = out.join("pipe.log");
     std::fs::write(&log, "").unwrap();
     let server = spawn(&out, &log);
 
     let index = get(&server, "/");
     assert!(index.contains("200 OK"), "got: {index}");
-    assert!(
-        index.contains("How the rank score is calculated"),
-        "formula section present"
-    );
-    assert!(
-        index.contains("rank_score = quality × efficiency × activity"),
-        "v2 formula spelled out"
-    );
-    assert!(
-        index.contains("Legacy <code>rank-v1</code>"),
-        "v1 formula kept for old artifacts"
-    );
-    assert!(index.contains("Worked example"), "worked example present");
+    assert!(index.contains("Usage pools"), "pools section present");
     assert!(
         index.contains("models with no AA index"),
         "coverage counts present"
     );
     assert!(index.contains("Data quality"), "gap warnings present");
     assert!(
-        index.contains("coding → intelligence → agentic"),
-        "basis chain documented"
-    );
-    assert!(
         index.contains("openrouter/pair/low/mintel/20"),
         "mintel example tied to the intelligence index, got: {index}"
+    );
+    assert!(
+        !index.contains("rank_score"),
+        "no score formula anywhere, got: {index}"
     );
 
     let free = get(&server, "/models?tab=free");
@@ -698,13 +704,11 @@ fn overview_explains_the_score_and_models_tabs_split_free_from_tiers() {
         !free.contains("UiProvider"),
         "paid offerings stay out of the free tab, got: {free}"
     );
-    assert!(free.contains("80.0"), "score rendered");
-    assert!(free.contains("calc"), "per-row breakdown available");
+    assert!(free.contains("<th>usage</th>"), "usage column present");
     assert!(
-        free.contains("efficiency = 0.01 / (0.000000 + 0.01) = 1.0000"),
-        "free efficiency shown as full credit, got: {free}"
+        !free.contains("calc-"),
+        "no breakdown rows anymore, got: {free}"
     );
-    assert!(free.contains("120 tok/s"), "speed shown as a tie-breaker");
 
     let tiers = get(&server, "/models?tab=tiers");
     assert!(tiers.contains("UiProvider"), "paid offering listed");
@@ -712,9 +716,16 @@ fn overview_explains_the_score_and_models_tabs_split_free_from_tiers() {
         !tiers.contains("free/model"),
         "free offerings stay out of the tiers tab, got: {tiers}"
     );
+    // Usage-first ordering: the measured v2 row sorts above the
+    // unmeasured ones, which fall back to cheapest-first.
+    let v2 = tiers.find("v2/model").unwrap();
+    let amp = tiers.find("AmpProvider").unwrap();
+    let ui = tiers.find("UiProvider").unwrap();
+    assert!(v2 < amp && amp < ui, "usage then price, got: {tiers}");
+    assert!(tiers.contains("0.990"), "usage level rendered");
     assert!(
-        tiers.contains("no score: no price"),
-        "unpriced offering explains why it has no score"
+        tiers.contains("$0.01000"),
+        "stored cost/task rendered, got: {tiers}"
     );
 }
 
@@ -771,7 +782,7 @@ fn resync_button_requests_a_sync_cycle() {
 /// interactive free/tiers views; the rank number opens the
 /// calculation in a row under the model instead of a side column.
 #[test]
-fn batch_tab_lists_batch_models_and_rank_number_opens_calc_row() {
+fn batch_tab_lists_batch_models() {
     let out = artifact_dir("batch-tab");
     let log = out.join("pipe.log");
     std::fs::write(&log, "").unwrap();
@@ -800,20 +811,12 @@ fn batch_tab_lists_batch_models_and_rank_number_opens_calc_row() {
     );
 
     assert!(
-        batch.contains("href=\"#calc-1\""),
-        "rank number links to the calc row, got: {batch}"
+        !batch.contains("calc-"),
+        "no breakdown rows anymore, got: {batch}"
     );
     assert!(
-        batch.contains("</tr><tr id=\"calc-1\""),
-        "calc row sits directly under its model row, got: {batch}"
-    );
-    assert!(
-        batch.contains("colspan=\"17\""),
-        "calc row spans the table width, got: {batch}"
-    );
-    assert!(
-        !batch.contains("<th>calc</th>"),
-        "no more calc side column, got: {batch}"
+        batch.contains("<th>usage</th>"),
+        "usage column present, got: {batch}"
     );
     assert!(
         batch.contains(".wrap{width:100%;margin:0}"),
@@ -821,11 +824,11 @@ fn batch_tab_lists_batch_models_and_rank_number_opens_calc_row() {
     );
 }
 
-/// Iter 43: v2 rows (activity + stored cost/task) render the v2
-/// arithmetic; v1 rows keep the popularity line.
+/// Iter 56: measured rows render their usage level and stored
+/// task cost; unmeasured cells stay `-`.
 #[test]
-fn v2_rows_render_activity_arithmetic() {
-    let out = artifact_dir("v2-breakdown");
+fn measured_rows_render_usage_and_task_cost() {
+    let out = artifact_dir("usage-cols");
     let log = out.join("pipe.log");
     std::fs::write(&log, "").unwrap();
     let server = spawn(&out, &log);
@@ -833,86 +836,38 @@ fn v2_rows_render_activity_arithmetic() {
     let tiers = get(&server, "/models?tab=tiers");
     assert!(tiers.contains("200 OK"), "got: {tiers}");
     assert!(tiers.contains("v2/model"), "v2 row listed");
-    for line in [
-        "quality    = 80 (coding) × 1.00 (fp16) = 80.00",
-        "cost/task  = $0.010000 (stored)",
-        "efficiency = 0.01 / (0.010000 + 0.01) = 0.5000",
-        "activity   = 0.9900 × (1 + +0.0000) / 1.10 = 0.9000",
-        "rank_score = 80.00 × 0.5000 × 0.9000 = 36.0",
-        "ruleset    = rank-v2",
-    ] {
-        assert!(tiers.contains(line), "v2 line present: {line}");
-    }
-    // Scoped to the v2 calc row: no v1 popularity line there.
-    let calc = tiers
-        .split_once("calc — v2/model")
-        .map(|(_, tail)| &tail[..tail.len().min(1200)])
-        .unwrap();
-    assert!(!calc.contains("popularity ="), "no v1 line in v2 row");
-}
-
-/// Iter 46: TOP tab lists bracket members score-desc with per-row
-/// arithmetic, then flagged outsiders; flags render exactly when
-/// set, and `?q=` + `?min=` filter.
-#[test]
-fn top_tab_lists_bracket_with_arithmetic_and_flags() {
-    let out = artifact_dir("top-tab");
-    let log = out.join("pipe.log");
-    std::fs::write(&log, "").unwrap();
-    let server = spawn(&out, &log);
-
-    let top = get(&server, "/models?tab=top");
-    assert!(top.contains("200 OK"), "got: {top}");
-    assert!(top.contains("top (3)"), "tab count");
-    let alpha = top.find("top/alpha").unwrap();
-    let beta = top.find("top/beta").unwrap();
-    let ghost = top.find("top/ghost").unwrap();
+    assert!(tiers.contains("0.990"), "usage level rendered");
     assert!(
-        alpha < beta && beta < ghost,
-        "bracket score-desc, flagged last"
+        tiers.contains("$0.01000"),
+        "stored task cost rendered, got: {tiers}"
     );
-    for line in [
-        "rank_score = 80.00 × 0.5000 × 0.9000 = 36.0",
-        "activity   = 0.9000 × (1 + +0.1000) / 1.10 = 0.9000",
-        "cost/task  = $0.010000 (stored)",
-        "bracket    = yes",
-        "flags      = none",
-    ] {
-        assert!(top.contains(line), "alpha arithmetic: {line}");
-    }
-    assert!(top.contains("no score"), "ghost unscored");
     assert!(
-        top.contains("flags      = no-price, popular-but-unscored"),
-        "ghost flags render"
+        tiers.contains("https://openrouter.ai/v2/model"),
+        "model page link present, got: {tiers}"
     );
-    assert!(top.contains("bracket    = no"), "ghost outside");
-    // Filters: q narrows, min floors (unscored fail a set floor).
-    let beta_only = get(&server, "/models?tab=top&q=beta");
-    assert!(beta_only.contains("top/beta"));
-    assert!(!beta_only.contains("top/alpha"));
-    let min = get(&server, "/models?tab=top&min=30");
-    assert!(min.contains("top/alpha"));
-    assert!(!min.contains("top/beta"));
-    assert!(!min.contains("top/ghost"));
-    let none = get(&server, "/models?tab=top&q=zzz");
-    assert!(none.contains("No models match this tab."));
-    assert!(!top.contains("NaN"), "no NaN anywhere");
+    assert!(
+        !tiers.contains("AudioProvider"),
+        "measured non-text stays out of the browser, got: {tiers}"
+    );
+    assert!(
+        !tiers.contains("rank_score"),
+        "no score arithmetic, got: {tiers}"
+    );
 }
-
-/// Iter 46: overview shows bracket counts and per-source fetch
+/// Iter 56: overview shows usage-pool counts and per-source fetch
 /// health from the artifact metas.
 #[test]
-fn overview_shows_bracket_counts_and_fetch_health() {
-    let out = artifact_dir("top-overview");
+fn overview_shows_pool_counts_and_fetch_health() {
+    let out = artifact_dir("pools-overview");
     let log = out.join("pipe.log");
     std::fs::write(&log, "").unwrap();
     let server = spawn(&out, &log);
 
     let index = get(&server, "/");
-    assert!(index.contains("Top-usage bracket"), "bracket section");
+    assert!(index.contains("Usage pools"), "pools section");
     assert!(
-        index.contains("<td>2</td><td>0</td><td>1</td>"),
-        "2 in, 0 stale, 1 popular"
+        index.contains("<td>2</td><td>3</td><td>2026-11-24T09:00:00Z</td>"),
+        "2 bracket, 3 top-20, citation"
     );
     assert!(index.contains("Fetch health"), "health section");
     assert!(index.contains("Artificial Analysis"), "AA row");
@@ -936,28 +891,37 @@ fn bare_artifact_dir(test: &str) -> std::path::PathBuf {
     out
 }
 
-/// Iter 46: an unscored artifact degrades gracefully — explanatory
-/// text, no tables, no NaN.
+/// Iter 56: unknown tabs fall back to tiers; a bare artifact
+/// shows empty pools and never-fetched health.
 #[test]
-fn top_tab_empty_artifact_degrades_gracefully() {
-    let out = bare_artifact_dir("top-empty");
+fn unknown_tab_falls_back_to_tiers() {
+    let out = artifact_dir("tab-fallback");
     let log = out.join("pipe.log");
     std::fs::write(&log, "").unwrap();
     let server = spawn(&out, &log);
 
-    let top = get(&server, "/models?tab=top");
-    assert!(top.contains("200 OK"), "got: {top}");
-    assert!(
-        top.contains("No TOP data in this artifact"),
-        "explains itself"
-    );
-    assert!(!top.contains("NaN"), "no NaN");
+    for tab in ["top", "nope"] {
+        let body = get(&server, &format!("/models?tab={tab}"));
+        assert!(body.contains("200 OK"), "got: {body}");
+        assert!(
+            body.contains("UiProvider"),
+            "{tab} falls back to tiers, got: {body}"
+        );
+    }
+
+    let out = bare_artifact_dir("pools-empty");
+    let log = out.join("pipe.log");
+    std::fs::write(&log, "").unwrap();
+    let server = spawn(&out, &log);
+
     let index = get(&server, "/");
+    assert!(index.contains("Usage pools"), "pools section");
     assert!(
-        index.contains("No TOP data in this artifact"),
-        "overview explains"
+        index.contains("<td>0</td><td>0</td><td>-</td>"),
+        "empty pools read zero"
     );
     assert!(index.contains("never"), "health reads never fetched");
+    assert!(!index.contains("NaN"), "no NaN");
 }
 
 #[test]

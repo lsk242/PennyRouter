@@ -486,10 +486,9 @@ impl AppState {
 
     /// State with provider routing: recognized models are rewritten to
     /// the stripped model id with a forced provider. Refreshes the
-    /// score gauges from the router's snapshot (Iter 46).
+    /// fetch-health gauges from the router's snapshot (Iter 46).
     pub fn with_router(mut self, router: Arc<routing::Router>) -> Self {
-        let (top, fetch) = router.score_inputs();
-        self.metrics.score_snapshot(&top, &fetch);
+        self.metrics.fetch_snapshot(&router.fetch_health());
         self.router = Some(router);
         self
     }
@@ -682,8 +681,7 @@ pub fn spawn_reload_task(
             {
                 Ok(()) => {
                     metrics.reload_report(true);
-                    let (top, fetch) = router.score_inputs();
-                    metrics.score_snapshot(&top, &fetch);
+                    metrics.fetch_snapshot(&router.fetch_health());
                 }
                 Err(e) => {
                     metrics.reload_report(false);
@@ -938,9 +936,8 @@ fn preview_json(preview: &routing::Preview) -> serde_json::Value {
             "throttled": c.throttled,
             "availability": if c.throttled { "cool-down" } else { "available" },
             "rank_index": c.rank_index,
-            "rank_score": c.rank_score,
-            "score_rank": c.score_rank,
             "sticky_match": c.sticky_match,
+            "intel": c.intel,
         })).collect::<Vec<_>>(),
     })
 }
@@ -955,15 +952,13 @@ fn preview_json(preview: &routing::Preview) -> serde_json::Value {
 const UI_TEMPLATE: &str = include_str!("../templates/ui.html");
 
 /// Debug-UI query: the models tab mirrors the catalog UI models page,
-/// so it takes the same tab (`models_tab`: free/tiers/batch/decision/
-/// top, default tiers), `q` model-id filter, and TOP `min` score
-/// floor. Tab links carry `#models` so the page reopens on the tab
-/// after the reload.
+/// so it takes the same tab (`models_tab`: free/tiers/batch/decision,
+/// default tiers) and `q` model-id filter. Tab links carry `#models`
+/// so the page reopens on the tab after the reload.
 #[derive(Debug, Deserialize)]
 struct UiParams {
     models_tab: Option<String>,
     q: Option<String>,
-    min: Option<String>,
 }
 
 async fn ui_page(State(state): State<AppState>, Query(params): Query<UiParams>) -> Response {
@@ -998,11 +993,15 @@ async fn ui_page(State(state): State<AppState>, Query(params): Query<UiParams>) 
             None => "-".to_string(),
         }
     }
-    fn score_cell(value: Option<f64>) -> String {
-        match value {
-            Some(value) => format!("<strong>{value:.1}</strong>"),
-            None => "<span class=\"muted\">-</span>".to_string(),
-        }
+    /// Link to the model's OpenRouter page (Iter 58): the base id
+    /// (variant suffixes share the base page).
+    fn openrouter_link(model_id: &str) -> String {
+        let base = model_id.split(':').next().unwrap_or(model_id);
+        format!(
+            "<a href=\"https://openrouter.ai/{}\" title=\"Open on OpenRouter\" \
+            target=\"_blank\" rel=\"noopener\">↗</a>",
+            esc(base),
+        )
     }
     /// Effective cost under the balanced profile — the same blend the
     /// catalog UI splits its free/tiers tabs on.
@@ -1015,319 +1014,6 @@ async fn ui_page(State(state): State<AppState>, Query(params): Query<UiParams>) 
             &pennyrouter_catalog::balanced_profile(),
             entry.promo_discount.unwrap_or(0.0),
         )
-    }
-    /// The AA index the score actually used, per `rank_basis`.
-    fn offering_index(entry: &routing::UiOffering) -> Option<i64> {
-        match entry.rank_basis.as_deref() {
-            Some("coding") => entry.signals.aa_coding_index,
-            Some("intel") => entry.signals.aa_intelligence_index,
-            Some("agentic") => entry.signals.aa_agentic_index,
-            _ => None,
-        }
-    }
-    fn rank_key(entry: &routing::UiOffering) -> pennyrouter_catalog::RankKey<'_> {
-        pennyrouter_catalog::RankKey {
-            score: entry.rank_score,
-            throughput_tps: entry.throughput_tps,
-            latency_ms: entry.latency_ms,
-            uptime_pct: entry.uptime_pct,
-            provider: &entry.provider,
-            tag: entry.tag.as_deref(),
-        }
-    }
-    /// The full arithmetic behind one row, from the stored components —
-    /// the same text as the catalog UI models page. `rank-v1` rows
-    /// show the popularity line; `rank-v2` rows (those carrying
-    /// `rank_activity`) show the stored cost/task and the activity
-    /// line instead.
-    fn breakdown(entry: &routing::UiOffering) -> String {
-        let cost = offering_cost(entry);
-        let index = offering_index(entry);
-        let factor = if entry.supports_decisions == Some(true) {
-            1.0
-        } else {
-            pennyrouter_catalog::precision_factor(entry.precision_class.as_deref())
-        };
-        let Some(score) = entry.rank_score else {
-            let why = if cost.is_none() {
-                "no price"
-            } else if index.is_none() {
-                "no AA index"
-            } else {
-                "not processed"
-            };
-            return format!("no score: {why}");
-        };
-        if entry.rank_activity.is_some() {
-            return breakdown_v2(entry, index, factor, score);
-        }
-        let quality = entry.rank_quality.unwrap_or(0.0);
-        let efficiency = entry.rank_efficiency.unwrap_or(0.0);
-        let popularity = entry.rank_popularity.unwrap_or(0.0);
-        let share = entry.signals.popularity_share.unwrap_or(0.0);
-        let cost_task = cost
-            .map(|cost| cost * pennyrouter_catalog::TASK_TOKENS)
-            .unwrap_or(0.0);
-        let mut lines = vec![
-            format!(
-                "quality    = {} ({}) × {:.2} ({}) = {:.2}",
-                index.unwrap_or(0),
-                entry.rank_basis.as_deref().unwrap_or("-"),
-                factor,
-                entry.precision_class.as_deref().unwrap_or("unknown"),
-                quality
-            ),
-            format!(
-                "cost/task  = {} $/M × {} tokens = ${:.6}",
-                money(cost),
-                pennyrouter_catalog::TASK_TOKENS as u64,
-                cost_task
-            ),
-            format!(
-                "efficiency = {:.2} / ({:.6} + {:.2}) = {:.4}",
-                pennyrouter_catalog::COST_HALF_CREDIT,
-                cost_task,
-                pennyrouter_catalog::COST_HALF_CREDIT,
-                efficiency
-            ),
-            format!(
-                "popularity = (1 + {:.2} × {:.3}) / {:.2} = {:.4}",
-                pennyrouter_catalog::POP_WEIGHT,
-                share,
-                1.0 + pennyrouter_catalog::POP_WEIGHT,
-                popularity
-            ),
-            format!(
-                "rank_score = {:.2} × {:.4} × {:.4} = {:.1}",
-                quality, efficiency, popularity, score
-            ),
-            format!(
-                "tie-breaks = {} tok/s · {} ms · {}% uptime",
-                num(entry.throughput_tps, 0),
-                num(entry.latency_ms, 0),
-                num(entry.uptime_pct, 1)
-            ),
-        ];
-        if let Some(ruleset) = entry.rank_ruleset.as_deref() {
-            lines.push(format!("ruleset    = {ruleset}"));
-        }
-        lines.join("\n")
-    }
-    /// v2 arithmetic: the stored cost/task (AA's number when the fetch
-    /// carried it, else the catalog blend) and the activity factor.
-    fn breakdown_v2(
-        entry: &routing::UiOffering,
-        index: Option<i64>,
-        factor: f64,
-        score: f64,
-    ) -> String {
-        let quality = entry.rank_quality.unwrap_or(0.0);
-        let efficiency = entry.rank_efficiency.unwrap_or(0.0);
-        let activity = entry.rank_activity.unwrap_or(0.0);
-        let cost_task = entry.rank_cost_task.unwrap_or(0.0);
-        let max_boost = pennyrouter_catalog::TREND_BOOST_MAX;
-        let activity_line = match (entry.signals.activity_level, entry.signals.activity_trend) {
-            (Some(level), Some(trend)) => {
-                let boost = (trend - 1.0).clamp(-max_boost, max_boost);
-                format!(
-                    "activity   = {:.4} × (1 + {:+.4}) / {:.2} = {:.4}",
-                    level,
-                    boost,
-                    1.0 + max_boost,
-                    activity
-                )
-            }
-            _ => format!("activity   = {activity:.4} (neutral, unmeasured)"),
-        };
-        let mut lines = vec![
-            format!(
-                "quality    = {} ({}) × {:.2} ({}) = {:.2}",
-                index.unwrap_or(0),
-                entry.rank_basis.as_deref().unwrap_or("-"),
-                factor,
-                entry.precision_class.as_deref().unwrap_or("unknown"),
-                quality
-            ),
-            format!("cost/task  = ${cost_task:.6} (stored)"),
-            format!(
-                "efficiency = {:.2} / ({:.6} + {:.2}) = {:.4}",
-                pennyrouter_catalog::COST_HALF_CREDIT,
-                cost_task,
-                pennyrouter_catalog::COST_HALF_CREDIT,
-                efficiency
-            ),
-            activity_line,
-            format!(
-                "rank_score = {:.2} × {:.4} × {:.4} = {:.1}",
-                quality, efficiency, activity, score
-            ),
-            format!(
-                "tie-breaks = {} tok/s · {} ms · {}% uptime",
-                num(entry.throughput_tps, 0),
-                num(entry.latency_ms, 0),
-                num(entry.uptime_pct, 1)
-            ),
-        ];
-        if let Some(ruleset) = entry.rank_ruleset.as_deref() {
-            lines.push(format!("ruleset    = {ruleset}"));
-        }
-        lines.join("\n")
-    }
-    /// Finite values only: corrupt stored floats display as `-`,
-    /// never NaN or inf.
-    fn fin(value: Option<f64>) -> Option<f64> {
-        value.filter(|v| v.is_finite())
-    }
-    /// TOP tab table (Iter 46): the same model-level rollup as the
-    /// catalog UI page — bracket members score-desc, then flagged
-    /// outsiders slug-asc — over the live snapshot. Model cells are
-    /// plain text (no per-model endpoints page here, as everywhere
-    /// in this tab).
-    fn render_top_table(
-        page: &mut String,
-        summary: &routing::UiSummary,
-        search: &str,
-        min: Option<&str>,
-    ) {
-        if summary.top.is_empty() {
-            page.push_str("<p>No TOP data in this artifact (sync without scoring).</p>");
-            return;
-        }
-        let floor: Option<f64> = min.and_then(|m| m.parse().ok());
-        let mut bracket: Vec<&(String, pennyrouter_catalog::TopModel)> = Vec::new();
-        let mut flagged: Vec<&(String, pennyrouter_catalog::TopModel)> = Vec::new();
-        for row in summary.top.iter() {
-            if !search.is_empty() && !row.0.to_lowercase().contains(search) {
-                continue;
-            }
-            if let Some(floor) = floor {
-                if row.1.score.is_none_or(|s| s < floor) {
-                    continue;
-                }
-            }
-            if row.1.bracket {
-                bracket.push(row);
-            } else if !row.1.flags.is_empty() {
-                flagged.push(row);
-            }
-        }
-        bracket.sort_by(|a, b| {
-            b.1.score
-                .partial_cmp(&a.1.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.0.cmp(&b.0))
-        });
-        flagged.sort_by(|a, b| a.0.cmp(&b.0));
-        let rows: Vec<&(String, pennyrouter_catalog::TopModel)> =
-            bracket.into_iter().chain(flagged).collect();
-        if rows.is_empty() {
-            page.push_str("<p>No models match this tab.</p>");
-            return;
-        }
-        page.push_str("<div class=\"table-scroll\">");
-        page.push_str(
-            "<table><tr><th>#</th><th>model</th><th>score</th><th>quality</th>\
-            <th>efficiency</th><th>activity</th><th>cost/task</th><th>basis</th>\
-            <th>level</th><th>trend</th><th>bracket</th><th>flags</th></tr>",
-        );
-        const COLUMNS: usize = 12;
-        for (position, (id, entry)) in rows.iter().enumerate() {
-            let flags = if entry.flags.is_empty() {
-                "<span class=\"muted\">-</span>".to_string()
-            } else {
-                esc(&entry.flags.join(", "))
-            };
-            page.push_str(&format!(
-                "<tr><td><a class=\"ranknum\" href=\"#calc-{}\" title=\"show calculation\">{}</a></td>\
-                <td>{}</td>\
-                <td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td>\
-                <td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
-                position + 1,
-                position + 1,
-                esc(id),
-                score_cell(fin(entry.score)),
-                num(fin(entry.quality), 2),
-                num(fin(entry.efficiency), 3),
-                num(fin(entry.activity), 3),
-                fin(entry.cost_task)
-                    .map(|cost| format!("${cost:.6}"))
-                    .unwrap_or_else(|| "-".to_string()),
-                esc(entry.basis.as_deref().unwrap_or("-")),
-                num(fin(entry.level), 4),
-                num(fin(entry.trend), 3),
-                if entry.bracket {
-                    "yes"
-                } else {
-                    "<span class=\"muted\">no</span>"
-                },
-                flags,
-            ));
-            page.push_str(&format!(
-                "<tr id=\"calc-{}\" class=\"calc-row\"><td colspan=\"{}\">\
-                <div class=\"calc\">calc — {}<br>{}</div>\
-                <a href=\"#\" class=\"muted\">close</a></td></tr>",
-                position + 1,
-                COLUMNS,
-                esc(id),
-                esc(&top_breakdown(entry)).replace('\n', "<br>")
-            ));
-        }
-        page.push_str("</table></div>");
-    }
-    /// Model-level arithmetic from one TOP entry: the stored
-    /// components plus bracket membership and flags. Same text as
-    /// the catalog UI page.
-    fn top_breakdown(entry: &pennyrouter_catalog::TopModel) -> String {
-        let flags = if entry.flags.is_empty() {
-            "none".to_string()
-        } else {
-            entry.flags.join(", ")
-        };
-        let bracket = if entry.bracket { "yes" } else { "no" };
-        let Some(score) = fin(entry.score) else {
-            return format!("no score\nflags      = {flags}\nbracket    = {bracket}");
-        };
-        let quality = fin(entry.quality).unwrap_or(0.0);
-        let efficiency = fin(entry.efficiency).unwrap_or(0.0);
-        let activity = fin(entry.activity).unwrap_or(0.0);
-        let cost_task = fin(entry.cost_task).unwrap_or(0.0);
-        let max_boost = pennyrouter_catalog::TREND_BOOST_MAX;
-        let activity_line = match (fin(entry.level), fin(entry.trend)) {
-            (Some(level), Some(trend)) => {
-                let boost = (trend - 1.0).clamp(-max_boost, max_boost);
-                format!(
-                    "activity   = {:.4} × (1 + {:+.4}) / {:.2} = {:.4}",
-                    level,
-                    boost,
-                    1.0 + max_boost,
-                    activity
-                )
-            }
-            _ => format!("activity   = {activity:.4} (neutral, unmeasured)"),
-        };
-        [
-            format!(
-                "quality    = {:.2} ({})",
-                quality,
-                entry.basis.as_deref().unwrap_or("-")
-            ),
-            format!("cost/task  = ${cost_task:.6} (stored)"),
-            format!(
-                "efficiency = {:.2} / ({:.6} + {:.2}) = {:.4}",
-                pennyrouter_catalog::COST_HALF_CREDIT,
-                cost_task,
-                pennyrouter_catalog::COST_HALF_CREDIT,
-                efficiency
-            ),
-            activity_line,
-            format!(
-                "rank_score = {:.2} × {:.4} × {:.4} = {:.1}",
-                quality, efficiency, activity, score
-            ),
-            format!("bracket    = {bracket}"),
-            format!("flags      = {flags}"),
-        ]
-        .join("\n")
     }
     // One buffer per tab panel; each region below shadows `page` to
     // its buffer so the existing builders move over unchanged.
@@ -1463,7 +1149,7 @@ async fn ui_page(State(state): State<AppState>, Query(params): Query<UiParams>) 
                 // live, and the free tab is one click away.
                 let tab = params.models_tab.as_deref().unwrap_or("tiers");
                 let tab = match tab {
-                    "free" | "batch" | "decision" | "top" => tab,
+                    "free" | "batch" | "decision" => tab,
                     _ => "tiers",
                 };
                 let search = params.q.as_deref().unwrap_or_default().to_lowercase();
@@ -1515,8 +1201,19 @@ async fn ui_page(State(state): State<AppState>, Query(params): Query<UiParams>) 
                 if !search.is_empty() {
                     rows.retain(|(id, _)| id.to_lowercase().contains(&search));
                 }
+                // Same ordering as the catalog UI models page (Iter 56):
+                // most-used first, cheapest first inside each band.
                 rows.sort_by(|a, b| {
-                    pennyrouter_catalog::compare_rank(&rank_key(a.1), &rank_key(b.1))
+                    let level = |entry: &routing::UiOffering| {
+                        entry.signals.activity_level.unwrap_or(f64::NEG_INFINITY)
+                    };
+                    let cost =
+                        |entry: &routing::UiOffering| offering_cost(entry).unwrap_or(f64::INFINITY);
+                    level(b.1)
+                        .total_cmp(&level(a.1))
+                        .then_with(|| cost(a.1).total_cmp(&cost(b.1)))
+                        .then_with(|| a.0.cmp(b.0))
+                        .then_with(|| a.1.provider.cmp(&b.1.provider))
                 });
 
                 let tab_link = |name: &str, label: &str, count: usize| {
@@ -1525,108 +1222,65 @@ async fn ui_page(State(state): State<AppState>, Query(params): Query<UiParams>) 
                         "<a href=\"/ui?models_tab={name}#models\"{active}>{label} ({count})</a>"
                     )
                 };
-                let top_count = summary
-                    .top
-                    .iter()
-                    .filter(|(_, entry)| entry.bracket || !entry.flags.is_empty())
-                    .count();
                 let subtabs = format!(
-                    "<nav class=\"subtabs\">{}{}{}{}{}</nav>",
+                    "<nav class=\"subtabs\">{}{}{}{}</nav>",
                     tab_link("free", "free", free_count),
                     tab_link("tiers", "tiers", tier_count),
                     tab_link("batch", "batch", batch_count),
                     tab_link("decision", "decision", decision_count),
-                    tab_link("top", "top", top_count),
                 );
-                if tab == "top" {
-                    page.push_str(&format!(
-                        "{subtabs}\
-                        <form method=\"get\" action=\"/ui#models\">\
-                        <input type=\"hidden\" name=\"models_tab\" value=\"top\">\
-                        <input type=\"search\" name=\"q\" value=\"{}\" placeholder=\"filter model id\"> \
-                        <input type=\"text\" name=\"min\" value=\"{}\" placeholder=\"min score\" size=\"8\"> \
-                        <button type=\"submit\" class=\"action\">filter</button></form>",
-                        esc(&search),
-                        esc(params.min.as_deref().unwrap_or("")),
-                    ));
-                } else {
-                    page.push_str(&format!(
-                        "{subtabs}\
-                        <form method=\"get\" action=\"/ui#models\">\
-                        <input type=\"hidden\" name=\"models_tab\" value=\"{}\">\
-                        <input type=\"search\" name=\"q\" value=\"{}\" placeholder=\"filter model id\"> \
-                        <button type=\"submit\" class=\"action\">filter</button></form>",
-                        esc(tab),
-                        esc(&search),
-                    ));
-                }
+                page.push_str(&format!(
+                    "{subtabs}\
+                    <form method=\"get\" action=\"/ui#models\">\
+                    <input type=\"hidden\" name=\"models_tab\" value=\"{}\">\
+                    <input type=\"search\" name=\"q\" value=\"{}\" placeholder=\"filter model id\"> \
+                    <button type=\"submit\" class=\"action\">filter</button></form>",
+                    esc(tab),
+                    esc(&search),
+                ));
 
-                if tab == "top" {
-                    render_top_table(page, &summary, &search, params.min.as_deref());
-                } else if rows.is_empty() {
+                if rows.is_empty() {
                     page.push_str("<p>No offerings in this tab.</p>");
                 } else {
                     page.push_str("<div class=\"table-scroll\">");
                     page.push_str(
                         "<table><tr><th>#</th><th>model</th><th>provider</th><th>tag</th>\
-                        <th>precision</th><th>index</th><th>factor</th><th>quality</th>\
-                        <th>in $/M</th><th>out $/M</th><th>cost/task</th><th>efficiency</th>\
-                        <th>popularity</th><th>score</th><th>tok/s</th><th>latency</th>\
+                        <th>precision</th><th>intel</th><th>in $/M</th><th>out $/M</th>\
+                        <th>cost/task</th><th>usage</th><th>tok/s</th><th>latency</th>\
                         <th>uptime</th></tr>",
                     );
-                    // Data columns above; the breakdown row spans all of them.
-                    const COLUMNS: usize = 17;
                     for (position, (model_id, entry)) in rows.iter().enumerate() {
-                        let index = match offering_index(entry) {
-                            Some(value) => format!(
-                                "{value} <span class=\"muted\">{}</span>",
-                                esc(entry.rank_basis.as_deref().unwrap_or("-"))
-                            ),
-                            None => "<span class=\"muted\">-</span>".to_string(),
-                        };
-                        let factor = if entry.supports_decisions == Some(true) {
-                            1.0
-                        } else {
-                            pennyrouter_catalog::precision_factor(entry.precision_class.as_deref())
-                        };
-                        let cost_task = offering_cost(entry)
-                            .map(|cost| cost * pennyrouter_catalog::TASK_TOKENS);
                         page.push_str(&format!(
-                            "<tr><td><a class=\"ranknum\" href=\"#calc-{}\" title=\"show calculation\">{}</a></td>\
-                            <td>{}</td>\
-                            <td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{:.2}</td>\
-                            <td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td>\
-                            <td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
-                            position + 1,
+                            "<tr><td>{}</td>\
+                            <td>{} {}</td>\
+                            <td>{}</td><td>{}</td><td>{}</td><td>{}</td>\
+                            <td>{}</td><td>{}</td><td>{}</td><td>{}</td>\
+                            <td>{}</td><td>{}</td><td>{}</td></tr>",
                             position + 1,
                             esc(model_id),
+                            openrouter_link(model_id),
                             esc(&entry.provider),
                             text(&entry.tag),
                             class(&entry.precision_class),
-                            index,
-                            factor,
-                            num(entry.rank_quality, 2),
+                            entry
+                                .signals
+                                .aa_intelligence_index
+                                .map(|v| v.to_string())
+                                .unwrap_or_else(|| "-".to_string()),
                             money(entry.price_prompt),
                             money(entry.price_completion),
-                            cost_task
+                            entry
+                                .rank_cost_task
                                 .map(|cost| format!("${cost:.5}"))
                                 .unwrap_or_else(|| "-".to_string()),
-                            num(entry.rank_efficiency, 3),
-                            num(entry.rank_popularity, 3),
-                            score_cell(entry.rank_score),
+                            entry
+                                .signals
+                                .activity_level
+                                .map(|u| format!("{u:.3}"))
+                                .unwrap_or_else(|| "-".to_string()),
                             num(entry.throughput_tps, 0),
                             num(entry.latency_ms, 0),
                             num(entry.uptime_pct, 1),
-                        ));
-                        page.push_str(&format!(
-                            "<tr id=\"calc-{}\" class=\"calc-row\"><td colspan=\"{}\">\
-                            <div class=\"calc\">calc — {} / {}<br>{}</div>\
-                            <a href=\"#\" class=\"muted\">close</a></td></tr>",
-                            position + 1,
-                            COLUMNS,
-                            esc(model_id),
-                            esc(&entry.provider),
-                            esc(&breakdown(entry)).replace('\n', "<br>")
                         ));
                     }
                     page.push_str("</table></div>");
@@ -1697,19 +1351,20 @@ async fn ui_page(State(state): State<AppState>, Query(params): Query<UiParams>) 
                     <th>prompt $/M</th><th>completion $/M</th><th>cache-read $/M</th>\
                     <th>cache-write $/M</th><th>effective $/M</th><th>promo</th><th>class</th>\
                     <th>quant</th>\
-                    <th>tier</th><th>score</th><th>tools</th><th>decisions</th>\
-                    <th>free</th><th>availability</th><th>rank</th><th>score rank</th></tr></thead>",
+                    <th>tier</th><th>score</th><th>intel</th><th>tools</th><th>decisions</th>\
+                    <th>free</th><th>availability</th><th>rank</th></tr></thead>",
                 );
                     page.push_str(&format!("<tbody id=\"{prefix}-{i}-rows\">"));
                     for (n, c) in preview.candidates.iter().enumerate() {
                         page.push_str(&format!(
-                            "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td>\
+                            "<tr><td>{}</td><td>{}</td><td>{} {}</td><td>{}</td>\
                         <td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td>\
                         <td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td>\
                         <td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
                             n + 1,
                             esc(&c.provider),
                             esc(&c.model_id),
+                            openrouter_link(&c.model_id),
                             c.tag.as_deref().map(esc).unwrap_or_else(|| "-".to_string()),
                             money(c.price_prompt),
                             money(c.price_completion),
@@ -1717,13 +1372,16 @@ async fn ui_page(State(state): State<AppState>, Query(params): Query<UiParams>) 
                             money(c.price_cache_write),
                             money(c.effective_cost),
                             c.promo_discount
-                                .map(|d| format!("{d:.2}"))
+                                .map(|d| format!("{:.0}%", d * 100.0))
                                 .unwrap_or_else(|| "-".to_string()),
                             class(&c.precision_class),
                             text(&c.quantization),
                             text(&c.quality_tier),
                             c.quality_score
                                 .map(|s| format!("{s:.3}"))
+                                .unwrap_or_else(|| "-".to_string()),
+                            c.intel
+                                .map(|v| v.to_string())
                                 .unwrap_or_else(|| "-".to_string()),
                             bool3(c.supports_tools),
                             bool3(c.supports_decisions),
@@ -1736,11 +1394,6 @@ async fn ui_page(State(state): State<AppState>, Query(params): Query<UiParams>) 
                             c.rank_index
                                 .map(|r| r.to_string())
                                 .unwrap_or_else(|| "-".to_string()),
-                            match (c.score_rank, c.rank_score) {
-                                (Some(rank), Some(score)) => format!("#{rank} ({score:.1})"),
-                                (Some(rank), None) => format!("#{rank}"),
-                                _ => "-".to_string(),
-                            },
                         ));
                     }
                     page.push_str("</tbody></table>");
@@ -1776,28 +1429,22 @@ async fn ui_page(State(state): State<AppState>, Query(params): Query<UiParams>) 
         var res=await fetch('/ui/preview?model='+encodeURIComponent(model)+'&top='+top,{headers:headers});\
         return res.json();}\
         function insRow(c,i){\
-        return '<tr><td>'+(i+1)+'</td><td>'+insEsc(c.provider)+'</td><td>'+insEsc(c.model_id)+'</td><td>'\
+        return '<tr><td>'+(i+1)+'</td><td>'+insEsc(c.provider)+'</td><td>'+insEsc(c.model_id)+' '+'<a href=\"https://openrouter.ai/'+insEsc(c.model_id.split(':')[0])+'\" title=\"Open on OpenRouter\" target=\"_blank\" rel=\"noopener\">↗</a>'+'</td><td>'\
         +(c.tag?insEsc(c.tag):'-')+'</td><td>'+insMoney(c.price_prompt)+'</td><td>'+insMoney(c.price_completion)\
         +'</td><td>'+insMoney(c.price_cache_read)+'</td><td>'+insMoney(c.price_cache_write)+'</td><td>'\
-        +insMoney(c.effective_cost)+'</td><td>'+((c.promo_discount===null||c.promo_discount===undefined)?'-':Number(c.promo_discount).toFixed(2))\
+        +insMoney(c.effective_cost)+'</td><td>'+((c.promo_discount===null||c.promo_discount===undefined)?'-':(Number(c.promo_discount)*100).toFixed(0)+'%')\
         +'</td><td>'+(c.precision_class&&c.precision_class!=='unknown'?insEsc(c.precision_class):'-')+'</td><td>'+(c.quantization?insEsc(c.quantization):'-')+'</td><td>'\
         +(c.quality_tier?insEsc(c.quality_tier):'-')+'</td><td>'\
         +((c.quality_score===null||c.quality_score===undefined)?'-':Number(c.quality_score).toFixed(3))\
-        +'</td><td>'+insBool(c.supports_tools)+'</td><td>'+insBool(c.supports_decisions)+'</td><td>'\
+        +'</td><td>'+((c.intel===null||c.intel===undefined)?'-':c.intel)+'</td><td>'+insBool(c.supports_tools)+'</td><td>'+insBool(c.supports_decisions)+'</td><td>'\
         +(c.free_eligible?'yes':'no')+'</td><td>'+insEsc(c.availability)+'</td><td>'\
         +((c.rank_index===null||c.rank_index===undefined)?'-':c.rank_index)+'</td><td>'\
-        +insScoreRank(c)+'</td><td>'\
         +(c.sticky_match?'pinned':'-')+'</td></tr>';}\
-        function insScoreRank(c){\
-        if(c.score_rank===null||c.score_rank===undefined)return '-';\
-        var s='#'+c.score_rank;\
-        if(c.rank_score!==null&&c.rank_score!==undefined){s+=' ('+Number(c.rank_score).toFixed(1)+')';}\
-        return s;}\
         function insTable(data){\
         var h='<table><thead><tr><th>#</th><th>provider</th><th>backend model</th><th>tag</th>'\
         +'<th>prompt $/M</th><th>completion $/M</th><th>cache-read $/M</th><th>cache-write $/M</th>'\
-        +'<th>effective $/M</th><th>promo</th><th>class</th><th>quant</th><th>tier</th><th>score</th><th>tools</th>'\
-        +'<th>decisions</th><th>free</th><th>availability</th><th>rank</th><th>score rank</th><th>session</th></tr></thead><tbody>';\
+        +'<th>effective $/M</th><th>promo</th><th>class</th><th>quant</th><th>tier</th><th>score</th><th>intel</th><th>tools</th>'\
+        +'<th>decisions</th><th>free</th><th>availability</th><th>rank</th><th>session</th></tr></thead><tbody>';\
         for(var i=0;i<data.candidates.length;i++){h+=insRow(data.candidates[i],i);}\
         return h+'</tbody></table>';}\
         function insHead(data){\
@@ -1824,14 +1471,14 @@ async fn ui_page(State(state): State<AppState>, Query(params): Query<UiParams>) 
         var rows=document.getElementById(prefix+'-'+i+'-rows');\
         var pick=document.getElementById(prefix+'-'+i+'-pick');\
         if(rows){var h='';for(var j=0;j<data.candidates.length;j++){var c=data.candidates[j];\
-        h+='<tr><td>'+(j+1)+'</td><td>'+insEsc(c.provider)+'</td><td>'+insEsc(c.model_id)+'</td><td>'\
+        h+='<tr><td>'+(j+1)+'</td><td>'+insEsc(c.provider)+'</td><td>'+insEsc(c.model_id)+' '+'<a href=\"https://openrouter.ai/'+insEsc(c.model_id.split(':')[0])+'\" title=\"Open on OpenRouter\" target=\"_blank\" rel=\"noopener\">↗</a>'+'</td><td>'\
         +(c.tag?insEsc(c.tag):'-')+'</td><td>'+insMoney(c.price_prompt)+'</td><td>'+insMoney(c.price_completion)\
         +'</td><td>'+insMoney(c.price_cache_read)+'</td><td>'+insMoney(c.price_cache_write)+'</td><td>'\
-        +insMoney(c.effective_cost)+'</td><td>'+((c.promo_discount===null||c.promo_discount===undefined)?'-':Number(c.promo_discount).toFixed(2))\
+        +insMoney(c.effective_cost)+'</td><td>'+((c.promo_discount===null||c.promo_discount===undefined)?'-':(Number(c.promo_discount)*100).toFixed(0)+'%')\
         +'</td><td>'+(c.precision_class&&c.precision_class!=='unknown'?insEsc(c.precision_class):'-')+'</td><td>'+(c.quantization?insEsc(c.quantization):'-')+'</td><td>'\
         +(c.quality_tier?insEsc(c.quality_tier):'-')+'</td><td>'\
         +((c.quality_score===null||c.quality_score===undefined)?'-':Number(c.quality_score).toFixed(3))\
-        +'</td><td>'+insBool(c.supports_tools)+'</td><td>'+insBool(c.supports_decisions)+'</td><td>'\
+        +'</td><td>'+((c.intel===null||c.intel===undefined)?'-':c.intel)+'</td><td>'+insBool(c.supports_tools)+'</td><td>'+insBool(c.supports_decisions)+'</td><td>'\
         +(c.free_eligible?'yes':'no')+'</td><td>'+insEsc(c.availability)+'</td><td>'\
         +((c.rank_index===null||c.rank_index===undefined)?'-':c.rank_index)+'</td><td>'\
         +insScoreRank(c)+'</td></tr>';}\

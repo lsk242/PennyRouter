@@ -252,10 +252,8 @@ pub struct Metrics {
     /// Bounded: 101 floors × 6 tiers × 3 results.
     mintel: Mutex<HashMap<(u8, &'static str, &'static str), u64>>,
     classifier_last_error: Mutex<String>,
-    /// Score rollup gauges (Iter 46): recomputed wholesale per
+    /// Fetch-health gauges (Iter 46): recomputed wholesale per
     /// snapshot (loads are rare); rendered sorted.
-    score_models: Mutex<HashMap<(String, String), u64>>,
-    score_flags: Mutex<HashMap<String, u64>>,
     sync_fetch: Mutex<HashMap<(String, String), u64>>,
     /// Picks by ordering served (Iter 47): (ordering, tier) → count.
     /// Bounded: 9 orderings × 9 tiers.
@@ -291,8 +289,6 @@ impl Metrics {
             smart_fallback: AtomicU64::new(0),
             mintel: Mutex::new(HashMap::new()),
             classifier_last_error: Mutex::new(String::new()),
-            score_models: Mutex::new(HashMap::new()),
-            score_flags: Mutex::new(HashMap::new()),
             sync_fetch: Mutex::new(HashMap::new()),
             routing_order: Mutex::new(HashMap::new()),
         }
@@ -306,36 +302,15 @@ impl Metrics {
         }
     }
 
-    /// Refresh the score gauges from a snapshot load (Iter 46):
-    /// model counts by (basis, bracket), flag counts, and per-source
-    /// fetch health (ok/missing). Replaces wholesale — callers pass
-    /// the current snapshot's maps.
-    pub fn score_snapshot(
-        &self,
-        top: &HashMap<String, pennyrouter_catalog::TopModel>,
-        fetch: &std::collections::BTreeMap<String, String>,
-    ) {
-        let mut models: HashMap<(String, String), u64> = HashMap::new();
-        let mut flags: HashMap<String, u64> = HashMap::new();
-        for entry in top.values() {
-            let basis = entry.basis.clone().unwrap_or_else(|| "none".to_string());
-            let bracket = if entry.bracket { "in" } else { "out" }.to_string();
-            *models.entry((basis, bracket)).or_default() += 1;
-            for flag in &entry.flags {
-                *flags.entry(flag.clone()).or_default() += 1;
-            }
-        }
+    /// Refresh the fetch-health gauges from a snapshot load
+    /// (Iter 46, slimmed Iter 56): per-source ok/missing. Replaces
+    /// wholesale — callers pass the current snapshot's map.
+    pub fn fetch_snapshot(&self, fetch: &std::collections::BTreeMap<String, String>) {
         let mut sync: HashMap<(String, String), u64> = HashMap::new();
         for source in pennyrouter_catalog::FETCH_SOURCES {
             let ok = fetch.contains_key(*source);
             sync.insert((source.to_string(), "ok".to_string()), u64::from(ok));
             sync.insert((source.to_string(), "missing".to_string()), u64::from(!ok));
-        }
-        if let Ok(mut guard) = self.score_models.lock() {
-            *guard = models;
-        }
-        if let Ok(mut guard) = self.score_flags.lock() {
-            *guard = flags;
         }
         if let Ok(mut guard) = self.sync_fetch.lock() {
             *guard = sync;
@@ -658,28 +633,6 @@ impl Metrics {
             "pennyrouter_requests_in_flight {}\n",
             self.in_flight.load(Ordering::Relaxed)
         ));
-        out.push_str("# HELP pennyrouter_score_models_total Scored models by basis and bracket.\n");
-        out.push_str("# TYPE pennyrouter_score_models_total gauge\n");
-        if let Ok(models) = self.score_models.lock() {
-            let mut pairs: Vec<(&(String, String), &u64)> = models.iter().collect();
-            pairs.sort_unstable();
-            for ((basis, bracket), n) in pairs {
-                out.push_str(&format!(
-                    "pennyrouter_score_models_total{{basis=\"{basis}\",bracket=\"{bracket}\"}} {n}\n"
-                ));
-            }
-        }
-        out.push_str("# HELP pennyrouter_score_flag_total Models carrying each score flag.\n");
-        out.push_str("# TYPE pennyrouter_score_flag_total gauge\n");
-        if let Ok(flags) = self.score_flags.lock() {
-            let mut pairs: Vec<(&String, &u64)> = flags.iter().collect();
-            pairs.sort_unstable();
-            for (flag, n) in pairs {
-                out.push_str(&format!(
-                    "pennyrouter_score_flag_total{{flag=\"{flag}\"}} {n}\n"
-                ));
-            }
-        }
         out.push_str("# HELP pennyrouter_routing_order_total Picks by ordering served and tier.\n");
         out.push_str("# TYPE pennyrouter_routing_order_total counter\n");
         if let Ok(counts) = self.routing_order.lock() {

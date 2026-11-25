@@ -162,21 +162,13 @@ async fn request_id_propagated_or_generated() {
 /// Iter 46: score gauges expose the rollup — models by basis and
 /// bracket, flag counts, and per-source fetch health.
 #[tokio::test]
-async fn metrics_reports_score_rollup_and_fetch_health() {
+async fn metrics_reports_fetch_health() {
     let path =
-        std::env::temp_dir().join(format!("gateway-metrics-score-{}.db", std::process::id()));
+        std::env::temp_dir().join(format!("gateway-metrics-fetch-{}.db", std::process::id()));
     let _ = std::fs::remove_file(&path);
     {
         let catalog = Catalog::open(&path).unwrap();
         catalog.init().unwrap();
-        catalog
-            .set_meta(
-                "top_models",
-                r#"{"top/alpha":{"score":36.0,"quality":80.0,"efficiency":0.5,"activity":0.9,"cost_task":0.01,"basis":"coding","level":0.9,"trend":1.1,"bracket":true,"flags":[]},
-                    "top/beta":{"score":24.0,"quality":60.0,"efficiency":0.5,"activity":0.8,"cost_task":0.01,"basis":"coding","level":0.88,"trend":1.0,"bracket":true,"flags":[]},
-                    "top/ghost":{"score":null,"quality":null,"efficiency":null,"activity":null,"cost_task":null,"basis":null,"level":0.4,"trend":1.0,"bracket":false,"flags":["no-price","popular-but-unscored"]}}"#,
-            )
-            .unwrap();
         catalog
             .set_meta(
                 "fetch_health",
@@ -194,10 +186,6 @@ async fn metrics_reports_score_rollup_and_fetch_health() {
 
     let text = metrics_text(gw).await;
     for line in [
-        "pennyrouter_score_models_total{basis=\"coding\",bracket=\"in\"} 2",
-        "pennyrouter_score_models_total{basis=\"none\",bracket=\"out\"} 1",
-        "pennyrouter_score_flag_total{flag=\"no-price\"} 1",
-        "pennyrouter_score_flag_total{flag=\"popular-but-unscored\"} 1",
         "pennyrouter_sync_fetch_total{source=\"aa\",result=\"ok\"} 1",
         "pennyrouter_sync_fetch_total{source=\"aa\",result=\"missing\"} 0",
         "pennyrouter_sync_fetch_total{source=\"benchmarks\",result=\"missing\"} 1",
@@ -205,4 +193,8 @@ async fn metrics_reports_score_rollup_and_fetch_health() {
     ] {
         assert!(text.contains(line), "series present: {line}");
     }
+    assert!(
+        !text.contains("pennyrouter_score_"),
+        "no score gauges anymore"
+    );
 }

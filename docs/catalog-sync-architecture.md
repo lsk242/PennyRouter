@@ -26,19 +26,19 @@ Gathering and processing are separate phases (see
 first; indexed facts are distilled afterwards. The gateway never waits
 on either — it keeps serving the last good copy.
 
-## Value score (Iter 34)
+## Task cost + usage pools (Iter 34, slimmed Iter 57)
 
-Processing ends with a deterministic scoring pass: `rank_score =
-quality × efficiency × popularity` per offering, stored in the
-`rank_*` columns (see [ranking-index.md](ranking-index.md)). It reads
-the AA indexes, the effective price, the precision class, the
-speed/availability metrics, and the popularity window — all extracted
-in the same run. Popularity is fetched **before** processing so the
-score can read the full window, not just the top-10 menu pins. The
-benchmarks endpoint is fetched in the same pre-processing step and
-backfills `aa_intelligence_index` for models whose embedded payload
-carries no score — embedded values always win, so the backfill only
-adds scores, never moves them.
+Processing ends with two deterministic passes: one stored
+cost-per-task per endpoint (AA's figure when positive, else the
+catalog blend), and the usage pools — the top-usage bracket
+behind `coding`, the top-20 behind `agent` (see
+[ranking-index.md](ranking-index.md)). Popularity is fetched
+**before** processing so the pools read the full window, not just
+the top-10 menu pins. The benchmarks endpoint is fetched in the
+same pre-processing step and backfills `aa_intelligence_index`
+for models whose embedded payload carries no index — embedded
+values always win, so the backfill only adds indexes, never moves
+them.
 
 ## Schema: fixed index over fluid payload
 

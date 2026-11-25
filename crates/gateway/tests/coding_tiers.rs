@@ -113,15 +113,7 @@ fn build_db(path: &std::path::Path, bracket: bool) {
             .update_endpoint_rank(
                 endpoint,
                 &EndpointRank {
-                    rank_score: None,
-                    rank_quality: None,
-                    rank_efficiency: None,
-                    rank_popularity: None,
-                    rank_activity: None,
                     rank_cost_task: Some(cost_task),
-                    rank_basis: None,
-                    rank_ruleset: None,
-                    ranked_at: None,
                 },
             )
             .unwrap();

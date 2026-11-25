@@ -618,26 +618,10 @@ async fn ui_prices_render_per_million_tokens() {
             .update_model_index(
                 "m/code",
                 &ModelIndex {
-                    aa_intelligence_index: None,
-                    aa_coding_index: Some(71),
+                    aa_intelligence_index: Some(71),
+                    aa_coding_index: None,
                     aa_agentic_index: None,
                     aa_cost_per_task: None,
-                },
-            )
-            .unwrap();
-        catalog
-            .update_endpoint_rank(
-                cheap.id,
-                &EndpointRank {
-                    rank_score: Some(70.0),
-                    rank_quality: Some(71.0),
-                    rank_efficiency: Some(0.99),
-                    rank_popularity: Some(1.0),
-                    rank_activity: None,
-                    rank_cost_task: None,
-                    rank_basis: Some("coding".to_string()),
-                    rank_ruleset: Some("rank-v1".to_string()),
-                    ranked_at: Some("t".to_string()),
                 },
             )
             .unwrap();
@@ -680,12 +664,8 @@ async fn ui_prices_render_per_million_tokens() {
         "stored class unknown renders as -, not unknown"
     );
     assert!(
-        body.contains("71 <span class=\"muted\">coding</span>"),
-        "AA coding index shows in the index column with its basis"
-    );
-    assert!(
-        body.contains("<strong>70.0</strong>"),
-        "rank score renders in the score column"
+        body.contains("<th>intel</th>"),
+        "intel column present, got: {body}"
     );
 }
 
@@ -721,30 +701,6 @@ async fn ui_models_tab_mirrors_catalog_models_page() {
                 },
             )
             .unwrap();
-        for (provider, score) in [("Cheap", 10.0), ("Exp", 30.0)] {
-            let row = catalog
-                .endpoints_for("m/code")
-                .unwrap()
-                .into_iter()
-                .find(|e| e.provider_name == provider)
-                .unwrap();
-            catalog
-                .update_endpoint_rank(
-                    row.id,
-                    &EndpointRank {
-                        rank_score: Some(score),
-                        rank_quality: Some(60.0),
-                        rank_efficiency: Some(0.5),
-                        rank_popularity: Some(1.0),
-                        rank_activity: None,
-                        rank_cost_task: None,
-                        rank_basis: Some("coding".to_string()),
-                        rank_ruleset: Some("rank-v1".to_string()),
-                        ranked_at: Some("t".to_string()),
-                    },
-                )
-                .unwrap();
-        }
         let row = catalog
             .endpoints_for("m/code")
             .unwrap()
@@ -800,38 +756,28 @@ async fn ui_models_tab_mirrors_catalog_models_page() {
             "{provider} stays out of tiers"
         );
     }
-    let exp = models.find("<td>Exp</td>").unwrap();
     let cheap = models.find("<td>Cheap</td>").unwrap();
-    assert!(exp < cheap, "score 30 sorts before score 10");
-    for header in ["cost/task", "efficiency", "popularity", "tok/s"] {
+    let mid = models.find("<td>Mid</td>").unwrap();
+    let exp = models.find("<td>Exp</td>").unwrap();
+    assert!(cheap < mid && mid < exp, "no usage data, so cheapest first");
+    for header in ["intel", "cost/task", "usage", "tok/s"] {
         assert!(
             models.contains(&format!("<th>{header}</th>")),
             "column {header} present"
         );
     }
     assert!(
-        models.contains("<strong>30.0</strong>"),
-        "score renders in the score column"
+        models.contains("<td>60</td>"),
+        "intel index renders, got: {models}"
     );
     assert!(
-        models.contains("60 <span class=\"muted\">coding</span>"),
-        "index column shows the basis the score used"
+        !models.contains("calc-"),
+        "no breakdown rows anymore, got: {models}"
     );
+    assert!(models.contains("99.0"), "uptime renders, got: {models}");
     assert!(
-        models.contains("href=\"#calc-1\""),
-        "rank number links to the calc row"
-    );
-    assert!(
-        models.contains("colspan=\"17\""),
-        "calc row spans the table width"
-    );
-    assert!(
-        models.contains("rank_score = 60.00 × 0.5000 × 1.0000 = 30.0"),
-        "breakdown shows the full arithmetic"
-    );
-    assert!(
-        models.contains("tie-breaks = 50 tok/s"),
-        "speed renders as a tie-breaker"
+        models.contains("https://openrouter.ai/m/code"),
+        "model page link present, got: {models}"
     );
 
     // Free tab: only the zero-cost offering.
@@ -918,19 +864,29 @@ async fn ui_models_tab_mirrors_catalog_models_page() {
         "tiers tab marked active on fallback"
     );
 
-    // Iter 46: the inspector shows each candidate's score rank —
-    // Exp #1 (30.0), Cheap #2 (10.0) — over the legacy-ordered list.
+    // Iter 56: no score rank anywhere — neither the column nor
+    // the preview JSON keys.
     let inspector = body
         .split("id=\"tab-inspector\"")
         .nth(1)
         .and_then(|tail| tail.split("id=\"tab-sessions\"").next())
         .expect("inspector panel sits before the sessions panel");
     assert!(
-        inspector.contains("<th>score rank</th>"),
-        "score rank column present"
+        !inspector.contains("score rank"),
+        "no score rank column, got: {inspector}"
     );
-    assert!(inspector.contains("#1 (30.0)"), "Exp ranked first");
-    assert!(inspector.contains("#2 (10.0)"), "Cheap ranked second");
+    assert!(
+        inspector.contains("<th>intel</th>"),
+        "intel column present, got: {inspector}"
+    );
+    assert!(
+        inspector.contains("https://openrouter.ai/m/code"),
+        "model page link present, got: {inspector}"
+    );
+    assert!(
+        body.contains("(Number(c.promo_discount)*100).toFixed(0)+'%'"),
+        "promo renders as percent"
+    );
     let preview: serde_json::Value = client()
         .get(format!(
             "http://{gw}/ui/preview?model=openrouter/pair/low&top=5"
@@ -941,127 +897,21 @@ async fn ui_models_tab_mirrors_catalog_models_page() {
         .json()
         .await
         .unwrap();
-    let exp = preview["candidates"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|c| c["provider"] == "Exp")
-        .unwrap();
-    assert_eq!(exp["score_rank"], serde_json::json!(1));
-    assert_eq!(exp["rank_score"], serde_json::json!(30.0));
-}
-
-/// Iter 46: the gateway Models top tab mirrors the catalog UI page —
-/// same rows, order, arithmetic, and filters over the live snapshot.
-#[tokio::test]
-async fn ui_models_top_tab_mirrors_catalog_page() {
-    let _guard = lock_env().await;
-    std::env::set_var("GATEWAY_UI", "1");
-    let path = std::env::temp_dir().join(format!("gateway-ui-top-{}.db", std::process::id()));
-    let _ = std::fs::remove_file(&path);
-    {
-        let catalog = Catalog::open(&path).unwrap();
-        catalog.init().unwrap();
-        catalog
-            .set_meta(
-                "top_models",
-                r#"{"top/alpha":{"score":36.0,"quality":80.0,"efficiency":0.5,"activity":0.9,"cost_task":0.01,"basis":"coding","level":0.9,"trend":1.1,"bracket":true,"flags":[]},
-                    "top/beta":{"score":24.0,"quality":60.0,"efficiency":0.5,"activity":0.8,"cost_task":0.01,"basis":"coding","level":0.88,"trend":1.0,"bracket":true,"flags":[]},
-                    "top/ghost":{"score":null,"quality":null,"efficiency":null,"activity":null,"cost_task":null,"basis":null,"level":0.4,"trend":1.0,"bracket":false,"flags":["no-price","popular-but-unscored"]}}"#,
-            )
-            .unwrap();
-    }
-    let router = Arc::new(pennyrouter_gateway::routing::Router::load(&path).expect("loads"));
-    let state =
-        pennyrouter_gateway::AppState::new("http://127.0.0.1:9".to_string()).with_router(router);
-    let app = pennyrouter_gateway::app_with_state(state);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let gw = listener.local_addr().unwrap();
-    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    std::env::remove_var("GATEWAY_UI");
-
-    let body = client()
-        .get(format!("http://{gw}/ui?models_tab=top"))
-        .send()
-        .await
-        .unwrap()
-        .text()
-        .await
-        .unwrap();
-    let models = models_panel(&body);
-    assert!(models.contains("top (3)"), "tab count");
-    let alpha = models.find("top/alpha").unwrap();
-    let beta = models.find("top/beta").unwrap();
-    let ghost = models.find("top/ghost").unwrap();
-    assert!(
-        alpha < beta && beta < ghost,
-        "bracket score-desc, flagged last"
-    );
-    for line in [
-        "rank_score = 80.00 × 0.5000 × 0.9000 = 36.0",
-        "activity   = 0.9000 × (1 + +0.1000) / 1.10 = 0.9000",
-        "flags      = no-price, popular-but-unscored",
-        "bracket    = no",
-    ] {
-        assert!(models.contains(line), "same arithmetic: {line}");
+    let candidates = preview["candidates"].as_array().unwrap();
+    assert!(!candidates.is_empty());
+    for c in candidates {
+        assert!(c.get("score_rank").is_none(), "no score_rank key");
+        assert!(c.get("rank_score").is_none(), "no rank_score key");
     }
     assert!(
-        !models.contains("/endpoints?model=top"),
-        "model cells stay plain text, like the other tabs"
+        candidates.iter().any(|c| c["intel"] == 60),
+        "intel key carried"
     );
-    let beta_only = client()
-        .get(format!("http://{gw}/ui?models_tab=top&q=beta"))
-        .send()
-        .await
-        .unwrap()
-        .text()
-        .await
-        .unwrap();
-    assert!(beta_only.contains("top/beta"));
-    assert!(!beta_only.contains("top/alpha"));
-    let min = client()
-        .get(format!("http://{gw}/ui?models_tab=top&min=30"))
-        .send()
-        .await
-        .unwrap()
-        .text()
-        .await
-        .unwrap();
-    let min = models_panel(&min);
-    assert!(min.contains("top/alpha"));
-    assert!(!min.contains("top/beta"));
-
-    // No rollup at all: the tab explains itself.
-    let bare = std::env::temp_dir().join(format!("gateway-ui-top-bare-{}.db", std::process::id()));
-    let _ = std::fs::remove_file(&bare);
-    {
-        let catalog = Catalog::open(&bare).unwrap();
-        catalog.init().unwrap();
-    }
-    std::env::set_var("GATEWAY_UI", "1");
-    let router = Arc::new(pennyrouter_gateway::routing::Router::load(&bare).expect("loads"));
-    let state =
-        pennyrouter_gateway::AppState::new("http://127.0.0.1:9".to_string()).with_router(router);
-    let app = pennyrouter_gateway::app_with_state(state);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let gw2 = listener.local_addr().unwrap();
-    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    let body = client()
-        .get(format!("http://{gw2}/ui?models_tab=top"))
-        .send()
-        .await
-        .unwrap()
-        .text()
-        .await
-        .unwrap();
-    assert!(models_panel(&body).contains("No TOP data in this artifact"));
-    assert!(!body.contains("NaN"), "no NaN anywhere");
 }
-
-/// Iter 43: v2 rows (activity + stored cost/task) render the v2
-/// arithmetic, same text as the catalog UI models page.
+/// Iter 56: measured rows render usage + stored task cost, same
+/// columns as the catalog UI models page.
 #[tokio::test]
-async fn ui_models_v2_rows_render_activity_arithmetic() {
+async fn ui_models_rows_render_usage_and_task_cost() {
     let _guard = lock_env().await;
     std::env::set_var("GATEWAY_UI", "1");
     let path = std::env::temp_dir().join(format!("gateway-ui-v2-{}.db", std::process::id()));
@@ -1140,15 +990,7 @@ async fn ui_models_v2_rows_render_activity_arithmetic() {
             .update_endpoint_rank(
                 id,
                 &EndpointRank {
-                    rank_score: Some(36.0),
-                    rank_quality: Some(80.0),
-                    rank_efficiency: Some(0.5),
-                    rank_popularity: None,
-                    rank_activity: Some(0.9),
                     rank_cost_task: Some(0.01),
-                    rank_basis: Some("coding".to_string()),
-                    rank_ruleset: Some("rank-v2".to_string()),
-                    ranked_at: Some("t".to_string()),
                 },
             )
             .unwrap();
@@ -1171,19 +1013,16 @@ async fn ui_models_v2_rows_render_activity_arithmetic() {
         .await
         .unwrap();
     let models = models_panel(&body);
-    for line in [
-        "cost/task  = $0.010000 (stored)",
-        "activity   = 0.9900 × (1 + +0.0000) / 1.10 = 0.9000",
-        "rank_score = 80.00 × 0.5000 × 0.9000 = 36.0",
-        "ruleset    = rank-v2",
-    ] {
-        assert!(models.contains(line), "v2 line present: {line}");
-    }
-    let calc = models
-        .split_once("calc — v2/model")
-        .map(|(_, tail)| &tail[..tail.len().min(1200)])
-        .unwrap();
-    assert!(!calc.contains("popularity ="), "no v1 line in v2 row");
+    assert!(models.contains("v2/model"), "v2 row listed");
+    assert!(models.contains("0.990"), "usage level rendered");
+    assert!(
+        models.contains("$0.01000"),
+        "stored task cost rendered, got: {models}"
+    );
+    assert!(
+        !models.contains("calc-"),
+        "no breakdown rows anymore, got: {models}"
+    );
 }
 
 #[test]

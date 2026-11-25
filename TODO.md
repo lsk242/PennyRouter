@@ -396,5 +396,33 @@ cheap judge model, classifier-based routing.
       blend instead of minting efficiency 1.0. Test: score unit
       + extended `coding_tiers.rs`; full workspace green
       (441 passed).
+- [x] **Iter 55 — Full-width debug UI.** The gateway `/ui`
+      wrapper no longer caps at 88rem; every tab spans the
+      viewport. Test: page serves with the new rule; full
+      workspace green (441 passed).
+- [x] **Iter 56 — Score display sweep.** Value-score columns,
+      arithmetic, TOP tabs, inspector score rank, and score
+      gauges removed from both UIs; models tables show
+      intel/cost-task/usage and sort usage-first, price-second;
+      overview shows usage pools. Test: rewritten UI suites;
+      full workspace green (438 passed).
+- [x] **Iter 57 — Score computation sweep.** `rank_score.rs`,
+      bracket ends, TOP rollup, flags, and 8 rank columns
+      deleted; schema v11 with drop migration; cost-task pass
+      and pure-usage pools remain. Test: rewritten process
+      suite + migration test; full workspace green (423 passed).
+- [x] **Iter 58 — UI round.** Promo renders as % in the
+      inspector; intel column on every model table; OpenRouter
+      page link per row. Test: UI asserts; full workspace green
+      (423 passed).
+- [x] **Iter 59 — TEXT modality filter.** Output modalities
+      captured (schema v12); measured non-text models serve no
+      virtual tier except decision ones and stay out of both
+      models tables; unknown passes. Test: extraction + tier
+      exclusion + hidden rows; full workspace green (425 passed).
+- [x] **Iter 60 — Drop dead task-rankings fetch.** The guessed
+      dataset 404s and nothing read the share; fetch, store,
+      readers, exports, and the `task` health group removed.
+      Test: suite green (424 passed).
 
-## After Iter 54
+## After Iter 60

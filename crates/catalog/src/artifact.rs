@@ -36,7 +36,7 @@ pub fn now_rfc3339() -> Result<String, Error> {
 }
 
 /// Sync fetch groups with health tracking (Iter 46).
-pub const FETCH_SOURCES: &[&str] = &["aa", "popularity", "benchmarks", "apps", "task"];
+pub const FETCH_SOURCES: &[&str] = &["aa", "popularity", "benchmarks", "apps"];
 
 /// Record a successful dataset fetch (Iter 46): stamps the group
 /// with now in the `fetch_health` meta object. Called after each

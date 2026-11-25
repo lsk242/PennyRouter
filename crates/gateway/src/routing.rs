@@ -77,17 +77,13 @@ pub struct Offering {
     /// base price. `None` means no tier (or an old catalog) — the
     /// offering always fits.
     pub price_override_tokens: Option<u64>,
-    /// Value-score components (Iter 34): carried so the debug UI
-    /// mirrors the catalog models table. Routing ignores them until
-    /// the score-first switch lands.
-    pub rank_score: Option<f64>,
-    pub rank_quality: Option<f64>,
-    pub rank_efficiency: Option<f64>,
-    pub rank_popularity: Option<f64>,
-    pub rank_activity: Option<f64>,
+    /// Stored cost-per-task (AA's number when positive, else the
+    /// catalog blend): what `coding/task` orders by. The other
+    /// value-score components are gone (Iter 56).
     pub rank_cost_task: Option<f64>,
-    pub rank_basis: Option<String>,
-    pub rank_ruleset: Option<String>,
+    /// AA intelligence index of the model (Iter 58): carried for
+    /// display so every table can show it when available.
+    pub intel: Option<i64>,
     /// Speed/availability tie-breakers (Iter 34), display-only.
     pub throughput_tps: Option<f64>,
     pub latency_ms: Option<f64>,
@@ -116,10 +112,11 @@ pub struct Snapshot {
     /// free variants. The `agent` tier serves the cheapest offering
     /// across this pool and fails closed when it is empty.
     pub agent_top20: HashSet<String>,
-    /// Model-level TOP rollup (Iter 46): best score + components +
-    /// flags per generic model. Display + metrics only; routing
-    /// reads the bracket set above.
-    pub top_models: HashMap<String, pennyrouter_catalog::TopModel>,
+    /// Known non-text models (Iter 59): output modalities measured
+    /// and not text-only (audio/image/video/decision outputs). The
+    /// interactive tiers skip these; unknown passes (old artifacts,
+    /// minimal payloads).
+    pub nontext_models: HashSet<String>,
     /// Sync fetch health (Iter 46): last-ok timestamps per fetch
     /// group. Metrics only.
     pub fetch_health: BTreeMap<String, String>,
@@ -366,6 +363,13 @@ const LOWEST_RETIRED: &str = "the `lowest` tag was retired in Iter 52; use openr
 /// True when the tag list carries the retired `lowest` tag (Iter 52).
 fn has_retired_lowest_tag(tags: &[String]) -> bool {
     tags.iter().any(|tag| tag == "lowest")
+}
+
+/// True when measured output modalities disqualify a model from the
+/// text tiers (Iter 59): anything but text-only output. The query
+/// already drops missing/empty lists, so presence means measured.
+fn is_nontext_output(modalities: &[String]) -> bool {
+    !modalities.iter().all(|m| m == "text")
 }
 
 /// Parse one `mintel` value: digits only, `0..=100` (leading zeros
@@ -1070,18 +1074,13 @@ impl Router {
         )
     }
 
-    /// Score inputs for metrics (Iter 46): TOP rollup + fetch
-    /// health, cloned under one short read lock. Snapshot loads
-    /// and reloads are rare; the clone never sits on the request
-    /// path.
-    pub fn score_inputs(
-        &self,
-    ) -> (
-        HashMap<String, pennyrouter_catalog::TopModel>,
-        BTreeMap<String, String>,
-    ) {
+    /// Fetch health for metrics (Iter 46, slimmed Iter 56):
+    /// last-ok timestamps per fetch group, cloned under one short
+    /// read lock. Snapshot loads and reloads are rare; the clone
+    /// never sits on the request path.
+    pub fn fetch_health(&self) -> BTreeMap<String, String> {
         let snapshot = self.snapshot.read().unwrap_or_else(|e| e.into_inner());
-        (snapshot.top_models.clone(), snapshot.fetch_health.clone())
+        snapshot.fetch_health.clone()
     }
 
     /// True when this model field carries the retired `lowest` tag
@@ -1263,12 +1262,20 @@ impl Router {
         let speeds = catalog
             .endpoint_speeds()
             .map_err(|e| RouteError(e.to_string()))?;
+        let aa_intelligence_index = catalog
+            .aa_intelligence_map()
+            .map_err(|e| RouteError(e.to_string()))?;
         let mut models: HashMap<String, Vec<Offering>> = HashMap::new();
         for ep in catalog
             .all_endpoints()
             .map_err(|e| RouteError(e.to_string()))?
         {
-            let offering = offering_from(&ep, ranks.get(&ep.id), speeds.get(&ep.id));
+            let offering = offering_from(
+                &ep,
+                ranks.get(&ep.id),
+                speeds.get(&ep.id),
+                aa_intelligence_index.get(&ep.model_id).copied(),
+            );
             models
                 .entry(ep.model_id.clone())
                 .or_default()
@@ -1281,9 +1288,6 @@ impl Router {
         let aa_coding_index = catalog
             .aa_coding_map()
             .map_err(|e| RouteError(e.to_string()))?;
-        let aa_intelligence_index = catalog
-            .aa_intelligence_map()
-            .map_err(|e| RouteError(e.to_string()))?;
         let model_signals = catalog
             .model_signals()
             .map_err(|e| RouteError(e.to_string()))?;
@@ -1291,7 +1295,13 @@ impl Router {
         let agent_top20 = pennyrouter_catalog::read_agent_top20(&catalog)
             .into_iter()
             .collect();
-        let top_models = pennyrouter_catalog::read_top_models(&catalog);
+        let nontext_models: HashSet<String> = catalog
+            .model_modalities()
+            .map_err(|e| RouteError(e.to_string()))?
+            .into_iter()
+            .filter(|(_, list)| is_nontext_output(list))
+            .map(|(id, _)| id)
+            .collect();
         let fetch_health = pennyrouter_catalog::read_fetch_health(&catalog);
         Ok(Snapshot {
             models,
@@ -1300,7 +1310,7 @@ impl Router {
             model_signals,
             bracket,
             agent_top20,
-            top_models,
+            nontext_models,
             fetch_health,
             artifact_version,
             popular_models,
@@ -2247,6 +2257,9 @@ impl Router {
                     // Batch variants serve the `batch` tier only: async
                     // batch pricing can't serve interactive requests.
                     && !is_batch_model(&o.model_id)
+                    // Text output only (Iter 59): audio/image/video
+                    // models can't serve chat. Unknown passes.
+                    && !snapshot.nontext_models.contains(o.model_id.as_str())
                     && (!coding_only || snapshot.bracket.contains(o.model_id.as_str()))
                     && (!agent_only || snapshot.agent_top20.contains(o.model_id.as_str()))
                     // `coding/task` (Iter 54): in-bracket, intel 28+,
@@ -2997,6 +3010,7 @@ impl Router {
                 constraints.allows(&o.provider_name)
                     && is_batch_model(&o.model_id)
                     && inline_cost(o).is_some_and(|cost| cost > 0.0)
+                    && !snapshot.nontext_models.contains(o.model_id.as_str())
                     && meets_mintel(snapshot, &o.model_id, mintel)
             })
             .collect();
@@ -3151,6 +3165,9 @@ impl Router {
                         // Batch variants serve the `batch` tier only,
                         // even when zero-cost.
                         && !is_batch_model(model_id)
+                        // Text output only (Iter 59): a $0 audio
+                        // model is not a free chat model.
+                        && !snapshot.nontext_models.contains(model_id.as_str())
                         && meets_mintel(snapshot, model_id, mintel)
                 })
             })
@@ -3494,14 +3511,7 @@ pub struct UiOffering {
     pub quality_tier: Option<String>,
     pub quality_score: Option<f64>,
     pub supports_decisions: Option<bool>,
-    pub rank_score: Option<f64>,
-    pub rank_quality: Option<f64>,
-    pub rank_efficiency: Option<f64>,
-    pub rank_popularity: Option<f64>,
-    pub rank_activity: Option<f64>,
     pub rank_cost_task: Option<f64>,
-    pub rank_basis: Option<String>,
-    pub rank_ruleset: Option<String>,
     pub throughput_tps: Option<f64>,
     pub latency_ms: Option<f64>,
     pub uptime_pct: Option<f64>,
@@ -3564,9 +3574,6 @@ pub struct UiSummary {
     /// Active session pins (Iter 37; Iter 39 adds backend model,
     /// live offering params, and the selection rule per pin).
     pub sessions: Vec<UiSession>,
-    /// TOP rollup entries (Iter 46): (model id, best score +
-    /// components + flags), unsorted — the models tab orders them.
-    pub top: Vec<(String, pennyrouter_catalog::TopModel)>,
 }
 
 impl Router {
@@ -3578,6 +3585,9 @@ impl Router {
         let mut models: Vec<(String, Option<i64>, Vec<UiOffering>)> = snapshot
             .models
             .iter()
+            // Models tab mirrors the catalog page (Iter 59): known
+            // non-text models stay out of the browser.
+            .filter(|(model_id, _)| !snapshot.nontext_models.contains(model_id.as_str()))
             .map(|(model_id, offerings)| {
                 let coding = snapshot.aa_coding_index.get(model_id).copied();
                 let signals = snapshot
@@ -3599,14 +3609,7 @@ impl Router {
                         quality_tier: o.quality_tier.clone(),
                         quality_score: o.quality_score,
                         supports_decisions: o.supports_decisions,
-                        rank_score: o.rank_score,
-                        rank_quality: o.rank_quality,
-                        rank_efficiency: o.rank_efficiency,
-                        rank_popularity: o.rank_popularity,
-                        rank_activity: o.rank_activity,
                         rank_cost_task: o.rank_cost_task,
-                        rank_basis: o.rank_basis.clone(),
-                        rank_ruleset: o.rank_ruleset.clone(),
                         throughput_tps: o.throughput_tps,
                         latency_ms: o.latency_ms,
                         uptime_pct: o.uptime_pct,
@@ -3618,11 +3621,6 @@ impl Router {
             })
             .collect();
         models.sort_by(|a, b| a.0.cmp(&b.0));
-        let top: Vec<(String, pennyrouter_catalog::TopModel)> = snapshot
-            .top_models
-            .iter()
-            .map(|(id, entry)| (id.clone(), entry.clone()))
-            .collect();
         let artifact_version = snapshot.artifact_version.clone();
         drop(snapshot);
         let ranking = self.ranking.read().unwrap_or_else(|e| e.into_inner());
@@ -3731,7 +3729,6 @@ impl Router {
             ranking: rank_rows,
             free_offers: free_rows,
             sessions,
-            top,
         }
     }
 }
@@ -3792,11 +3789,7 @@ pub struct PreviewCandidate {
     pub throttled: bool,
     pub rank_index: Option<usize>,
     pub sticky_match: bool,
-    /// Published value score, when the offering carries one.
-    pub rank_score: Option<f64>,
-    /// 1-based ordinal in score-desc order over the full preview
-    /// pool (Iter 46); `None` when unscored.
-    pub score_rank: Option<usize>,
+    pub intel: Option<i64>,
 }
 
 /// The pick for one session view: backend model + provider.
@@ -4271,7 +4264,6 @@ impl Router {
         now: u64,
         rank_index: Option<usize>,
         sticky_match: bool,
-        score_rank: Option<usize>,
     ) -> PreviewCandidate {
         PreviewCandidate {
             model_id: offering.model_id.clone(),
@@ -4293,8 +4285,7 @@ impl Router {
             throttled: self.is_throttled_pair(&offering.model_id, &offering.provider_name),
             rank_index,
             sticky_match,
-            rank_score: offering.rank_score,
-            score_rank,
+            intel: offering.intel,
         }
     }
 
@@ -4406,25 +4397,6 @@ impl Router {
                 display.push(sticky);
             }
         }
-        // Score ranks (Iter 46): 1-based ordinals in score-desc
-        // order over the full pool; unscored rows get none. Ties
-        // break by identity so ranks are stable across rebuilds.
-        let mut scored_idx: Vec<usize> = (0..ordered_all.len())
-            .filter(|&i| ordered_all[i].0.rank_score.is_some_and(|s| s.is_finite()))
-            .collect();
-        scored_idx.sort_by(|&a, &b| {
-            let (oa, ob) = (&ordered_all[a].0, &ordered_all[b].0);
-            ob.rank_score
-                .partial_cmp(&oa.rank_score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| oa.model_id.cmp(&ob.model_id))
-                .then_with(|| oa.provider_name.cmp(&ob.provider_name))
-                .then_with(|| oa.tag.cmp(&ob.tag))
-        });
-        let mut score_rank_by_pool: Vec<Option<usize>> = vec![None; ordered_all.len()];
-        for (pos, idx) in scored_idx.iter().enumerate() {
-            score_rank_by_pool[*idx] = Some(pos + 1);
-        }
         let candidates: Vec<PreviewCandidate> = display
             .into_iter()
             .map(|row| {
@@ -4435,14 +4407,7 @@ impl Router {
                         && s.model_id == o.model_id
                         && s.tag == o.tag
                 });
-                // Display rows borrow from the pool: the rank rides
-                // along by position. Pointer equality is exact here
-                // (no clones between), and the pool is small.
-                let score_rank = ordered_all
-                    .iter()
-                    .position(|pool| std::ptr::eq(pool, row))
-                    .and_then(|idx| score_rank_by_pool[idx]);
-                self.preview_row(o, ranking, now, *rank, is_sticky, score_rank)
+                self.preview_row(o, ranking, now, *rank, is_sticky)
             })
             .collect();
         Preview {
@@ -4570,6 +4535,7 @@ impl Router {
                     constraints.allows(&o.provider_name)
                         && free_eligible(ranking, model_id, o, now)
                         && !is_batch_model(model_id)
+                        && !snapshot.nontext_models.contains(model_id.as_str())
                         && meets_mintel(snapshot, model_id, mintel)
                 })
             })
@@ -4664,6 +4630,7 @@ impl Router {
                     && !is_batch_model(&o.model_id)
                     && (!coding_only || snapshot.bracket.contains(o.model_id.as_str()))
                     && (!agent_only || snapshot.agent_top20.contains(o.model_id.as_str()))
+                    && !snapshot.nontext_models.contains(o.model_id.as_str())
                     && (!low_only || meets_availability(o))
                     && (!coding_task_only
                         || (snapshot.bracket.contains(o.model_id.as_str())
@@ -4980,6 +4947,7 @@ impl Router {
                 constraints.allows(&o.provider_name)
                     && is_batch_model(&o.model_id)
                     && inline_cost(o).is_some_and(|cost| cost > 0.0)
+                    && !snapshot.nontext_models.contains(o.model_id.as_str())
                     && meets_mintel(snapshot, &o.model_id, mintel)
             })
             .collect();
@@ -5323,6 +5291,7 @@ fn offering_from(
     ep: &EndpointRow,
     rank: Option<&EndpointRank>,
     speed: Option<&EndpointSpeed>,
+    intel: Option<i64>,
 ) -> Offering {
     let tag = serde_json::from_str(&ep.payload)
         .ok()
@@ -5343,14 +5312,8 @@ fn offering_from(
         supports_tools: ep.supports_tools.map(|v| v != 0),
         supports_decisions: ep.supports_decisions.map(|v| v != 0),
         price_override_tokens: ep.price_override_tokens.map(|v| v.max(0) as u64),
-        rank_score: rank.and_then(|rank| rank.rank_score),
-        rank_quality: rank.and_then(|rank| rank.rank_quality),
-        rank_efficiency: rank.and_then(|rank| rank.rank_efficiency),
-        rank_popularity: rank.and_then(|rank| rank.rank_popularity),
-        rank_activity: rank.and_then(|rank| rank.rank_activity),
         rank_cost_task: rank.and_then(|rank| rank.rank_cost_task),
-        rank_basis: rank.and_then(|rank| rank.rank_basis.clone()),
-        rank_ruleset: rank.and_then(|rank| rank.rank_ruleset.clone()),
+        intel,
         throughput_tps: speed.and_then(|speed| speed.throughput_tps),
         latency_ms: speed.and_then(|speed| speed.latency_ms),
         uptime_pct: speed.and_then(|speed| speed.uptime_pct),
@@ -5634,14 +5597,8 @@ mod tests {
             supports_tools: None,
             supports_decisions: None,
             price_override_tokens: None,
-            rank_score: None,
-            rank_quality: None,
-            rank_efficiency: None,
-            rank_popularity: None,
-            rank_activity: None,
             rank_cost_task: None,
-            rank_basis: None,
-            rank_ruleset: None,
+            intel: None,
             throughput_tps: None,
             latency_ms: None,
             uptime_pct: None,
@@ -5676,7 +5633,7 @@ mod tests {
             model_signals: HashMap::new(),
             bracket: HashSet::new(),
             agent_top20: HashSet::new(),
-            top_models: HashMap::new(),
+            nontext_models: HashSet::new(),
             fetch_health: BTreeMap::new(),
             popular_models: Vec::new(),
             popular_apps: Vec::new(),
@@ -5718,7 +5675,6 @@ mod tests {
                     default: vec![entry("Dear"), entry("Ghost"), entry("Cheap")],
                     price: vec![entry("Dear"), entry("Cheap")],
                     quality: vec![entry("Dear"), entry("Cheap")],
-                    score: vec![],
                 }],
             )]
             .into_iter()
@@ -5801,7 +5757,7 @@ mod tests {
             model_signals: HashMap::new(),
             bracket: HashSet::new(),
             agent_top20: HashSet::new(),
-            top_models: HashMap::new(),
+            nontext_models: HashSet::new(),
             fetch_health: BTreeMap::new(),
             popular_models: Vec::new(),
             popular_apps: Vec::new(),
@@ -5844,7 +5800,7 @@ mod tests {
             model_signals: HashMap::new(),
             bracket: HashSet::new(),
             agent_top20: HashSet::new(),
-            top_models: HashMap::new(),
+            nontext_models: HashSet::new(),
             fetch_health: BTreeMap::new(),
             popular_models: Vec::new(),
             popular_apps: Vec::new(),
@@ -5885,7 +5841,7 @@ mod tests {
             model_signals: HashMap::new(),
             bracket: HashSet::new(),
             agent_top20: HashSet::new(),
-            top_models: HashMap::new(),
+            nontext_models: HashSet::new(),
             fetch_health: BTreeMap::new(),
             popular_models: Vec::new(),
             popular_apps: Vec::new(),
@@ -5996,7 +5952,7 @@ mod tests {
             model_signals: HashMap::new(),
             bracket: HashSet::new(),
             agent_top20: HashSet::new(),
-            top_models: HashMap::new(),
+            nontext_models: HashSet::new(),
             fetch_health: BTreeMap::new(),
             popular_models: Vec::new(),
             popular_apps: Vec::new(),
@@ -6030,7 +5986,7 @@ mod tests {
                 model_signals: HashMap::new(),
                 bracket: HashSet::new(),
                 agent_top20: HashSet::new(),
-                top_models: HashMap::new(),
+                nontext_models: HashSet::new(),
                 fetch_health: BTreeMap::new(),
                 popular_models: Vec::new(),
                 popular_apps: Vec::new(),
@@ -6070,7 +6026,7 @@ mod tests {
                     model_signals: HashMap::new(),
                     bracket: HashSet::new(),
                     agent_top20: HashSet::new(),
-                    top_models: HashMap::new(),
+                    nontext_models: HashSet::new(),
                     fetch_health: BTreeMap::new(),
                     popular_models: Vec::new(),
                     popular_apps: Vec::new(),
@@ -6125,7 +6081,7 @@ mod tests {
                 model_signals: HashMap::new(),
                 bracket: HashSet::new(),
                 agent_top20: HashSet::new(),
-                top_models: HashMap::new(),
+                nontext_models: HashSet::new(),
                 fetch_health: BTreeMap::new(),
                 popular_models: Vec::new(),
                 popular_apps: Vec::new(),
@@ -6163,7 +6119,7 @@ mod tests {
                 model_signals: HashMap::new(),
                 bracket: HashSet::new(),
                 agent_top20: HashSet::new(),
-                top_models: HashMap::new(),
+                nontext_models: HashSet::new(),
                 fetch_health: BTreeMap::new(),
                 popular_models: Vec::new(),
                 popular_apps: Vec::new(),
@@ -6192,7 +6148,7 @@ mod tests {
             model_signals: HashMap::new(),
             bracket: HashSet::new(),
             agent_top20: HashSet::new(),
-            top_models: HashMap::new(),
+            nontext_models: HashSet::new(),
             fetch_health: BTreeMap::new(),
             popular_models: Vec::new(),
             popular_apps: Vec::new(),
@@ -6226,7 +6182,7 @@ mod tests {
             model_signals: HashMap::new(),
             bracket: HashSet::new(),
             agent_top20: HashSet::new(),
-            top_models: HashMap::new(),
+            nontext_models: HashSet::new(),
             fetch_health: BTreeMap::new(),
             popular_models: Vec::new(),
             popular_apps: Vec::new(),
@@ -6262,7 +6218,7 @@ mod tests {
             model_signals: HashMap::new(),
             bracket: HashSet::new(),
             agent_top20: HashSet::new(),
-            top_models: HashMap::new(),
+            nontext_models: HashSet::new(),
             fetch_health: BTreeMap::new(),
             popular_models: Vec::new(),
             popular_apps: Vec::new(),
@@ -6411,7 +6367,7 @@ mod tests {
             model_signals: HashMap::new(),
             bracket: HashSet::new(),
             agent_top20: HashSet::new(),
-            top_models: HashMap::new(),
+            nontext_models: HashSet::new(),
             fetch_health: BTreeMap::new(),
             artifact_version: None,
             popular_models: Vec::new(),
@@ -6775,7 +6731,7 @@ mod tests {
                 model_signals: HashMap::new(),
                 bracket: HashSet::new(),
                 agent_top20: HashSet::new(),
-                top_models: HashMap::new(),
+                nontext_models: HashSet::new(),
                 fetch_health: BTreeMap::new(),
                 popular_models: Vec::new(),
                 popular_apps: Vec::new(),
@@ -6896,7 +6852,7 @@ mod tests {
                 model_signals: HashMap::new(),
                 bracket: HashSet::new(),
                 agent_top20: HashSet::new(),
-                top_models: HashMap::new(),
+                nontext_models: HashSet::new(),
                 fetch_health: BTreeMap::new(),
                 popular_models: Vec::new(),
                 popular_apps: Vec::new(),
@@ -6928,7 +6884,7 @@ mod tests {
                 model_signals: HashMap::new(),
                 bracket: HashSet::new(),
                 agent_top20: HashSet::new(),
-                top_models: HashMap::new(),
+                nontext_models: HashSet::new(),
                 fetch_health: BTreeMap::new(),
                 popular_models: Vec::new(),
                 popular_apps: Vec::new(),
@@ -7120,7 +7076,7 @@ mod tests {
             model_signals: HashMap::new(),
             bracket: HashSet::new(),
             agent_top20: HashSet::new(),
-            top_models: HashMap::new(),
+            nontext_models: HashSet::new(),
             fetch_health: BTreeMap::new(),
             popular_models: Vec::new(),
             popular_apps: Vec::new(),

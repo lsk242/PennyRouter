@@ -293,34 +293,10 @@ fn run() -> Result<(), String> {
             }
         }
     }
-    // Task Code share (Iter 42): the endpoint is assumed from the
-    // datasets family, so a 404 means "not offered" (info), while
-    // any other failure warns — either way the sync continues.
-    match std::env::var("RANKINGS_API_KEY")
-        .ok()
-        .filter(|k| !k.is_empty())
-    {
-        None => println!("no RANKINGS_API_KEY: publishing without task shares"),
-        Some(key) => match pennyrouter_catalog::fetch_task_share("https://openrouter.ai", &key) {
-            Ok(share) => {
-                println!(
-                    "task code share: {}",
-                    share
-                        .code_share
-                        .map(|s| format!("{s:.3}"))
-                        .unwrap_or_else(|| "unknown".to_string())
-                );
-                pennyrouter_catalog::store_task_share(&catalog, &share)
-                    .map_err(|e| e.to_string())?;
-                pennyrouter_catalog::record_fetch_health(&catalog, "task")
-                    .map_err(|e| e.to_string())?;
-            }
-            Err(e) if e.to_string().contains("404") => {
-                println!("task-rankings not offered by the Data API: publishing without it")
-            }
-            Err(e) => println!("task share fetch failed ({e}): publishing without it"),
-        },
-    }
+    // NOTE (Iter 60): a `task-rankings` dataset was probed here in
+    // Iter 42, but OpenRouter never offered it (verified 404) and
+    // nothing ever read the share — removed instead of logging noise
+    // every sync.
     // AA headline indexes + versions + cost/task (Iter 42): keyed by
     // AA_API_KEY, independent of the OpenRouter datasets above.
     match std::env::var("AA_API_KEY").ok().filter(|k| !k.is_empty()) {
@@ -343,9 +319,9 @@ fn run() -> Result<(), String> {
             }
         }
     }
-    // Popularity lands before processing (Iter 34): the value score
-    // reads the window as a per-model factor.
-    let (scored, ranked) = if args.process {
+    // Popularity lands before processing: the pool pass reads the
+    // window for bracket/agent membership.
+    let (scored, costed) = if args.process {
         let summary = run_processing(&catalog, &fetched_at).map_err(|e| e.to_string())?;
         (summary.scored, summary.ranked)
     } else {
@@ -363,7 +339,7 @@ fn run() -> Result<(), String> {
     let _ = fs::remove_file(&work_db);
 
     let stage = if args.process {
-        format!(" (processed, {scored} scored offline, {ranked} ranked)")
+        format!(" (processed, {scored} scored offline, {costed} task-costed)")
     } else {
         String::new()
     };

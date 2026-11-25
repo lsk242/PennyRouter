@@ -4,15 +4,10 @@
 //! later (Phase 2b) behind the same per-endpoint update.
 
 use crate::benchmarks::{read_benchmark_code, read_benchmark_intel};
-use crate::popular::{read_activity, ModelActivity, AGENT_TOP_N};
-use crate::rank_score::{
-    self, RankInputs, BRACKET_MIN_SHARE, BRACKET_PERFORMANCE_FLOOR, BRACKET_TOP_N, RULESET_VERSION,
-    THINK_MAX_COST_TASK,
-};
+use crate::popular::{read_activity, ModelActivity, AGENT_TOP_N, BRACKET_MIN_SHARE, BRACKET_TOP_N};
 use crate::score_offline::OfflineScorer;
 use crate::store::{
-    Catalog, EndpointIndex, EndpointRank, EndpointScore, EndpointSpeed, ModelIndex,
-    ModelPopularity, ModelSignals,
+    Catalog, EndpointIndex, EndpointRank, EndpointScore, EndpointSpeed, ModelIndex, ModelPopularity,
 };
 use crate::{AaModel, Error};
 use serde_json::{json, Value};
@@ -25,46 +20,28 @@ pub struct ProcessSummary {
     pub ranked: usize,
 }
 
-/// One endpoint's inputs to the value score, collected while its
-/// indexed columns are written (Iter 34). The rows read before the
-/// update still hold NULLs, so the score is computed from these
-/// values, never re-read.
+/// Tokens per reference task (Iter 34): the catalog blend prices one
+/// task at this many blended tokens. AA's own task cost wins over
+/// the blend wherever the direct fetch carried a positive figure.
+const TASK_TOKENS: f64 = 10_000.0;
+
+/// One endpoint's inputs to the task-cost pass, collected while its
+/// indexed columns are written. The rows read before the update
+/// still hold NULLs, so the cost is computed from these staged
+/// values instead of re-reading the row.
 struct PendingRank {
     id: i64,
-    model_id: String,
-    provider_name: String,
-    tag: Option<String>,
-    precision_class: Option<String>,
     cost_per_token: Option<f64>,
     aa_cost_per_task: Option<f64>,
-    decision: bool,
 }
 
-/// Per-model facts the bracket/flag pass needs (Iter 43), captured
-/// while the model loop still holds the raw inputs: the joined slug,
-/// the pre-gate intel story, and whether activity measured the model.
+/// Per-model facts the pool pass needs, captured while the model
+/// loop still holds the raw inputs: the joined slug plus AA's own
+/// task cost (the cost pass reads it per endpoint).
 #[derive(Default)]
 struct ModelFacts {
     slug: String,
-    intel_present: bool,
-    intel_version: Option<String>,
-    activity_present: bool,
     aa_cost: Option<f64>,
-}
-
-/// One v2-scored offering (Iter 43): the identity plus the
-/// components the bracket ends and the TOP rollup read. Only scored
-/// offerings land here.
-struct ScoredOffering {
-    model_id: String,
-    provider_name: String,
-    tag: Option<String>,
-    cost_task: f64,
-    performance: f64,
-    efficiency: f64,
-    activity: f64,
-    basis: &'static str,
-    score: f64,
 }
 
 /// Extract indexed values for every endpoint, plus per-model
@@ -94,7 +71,6 @@ pub fn run_processing(catalog: &Catalog, processed_at: &str) -> Result<ProcessSu
         let aa_by_normalized = normalized_aa_index(&aa_models);
         let current_version = crate::read_aa_intel_version(catalog);
         let activity = read_activity(catalog);
-        let mut signals: HashMap<String, ModelSignals> = HashMap::new();
         let mut facts: HashMap<String, ModelFacts> = HashMap::new();
         for model in catalog.all_models()? {
             let payload: Value = serde_json::from_str(&model.payload)?;
@@ -171,6 +147,10 @@ pub fn run_processing(catalog: &Catalog, processed_at: &str) -> Result<ProcessSu
             };
             catalog.update_model_index(&model.model_id, &index)?;
             catalog.update_model_intel_version(&model.model_id, stored_version.as_deref())?;
+            catalog.update_model_modalities(
+                &model.model_id,
+                extract_output_modalities(&payload).as_deref(),
+            )?;
             let tokens = popular
                 .get(slug)
                 .or_else(|| popular.get(&model.model_id))
@@ -198,27 +178,10 @@ pub fn run_processing(catalog: &Catalog, processed_at: &str) -> Result<ProcessSu
                 model_activity.map(|a| a.level),
                 model_activity.map(|a| a.trend),
             )?;
-            signals.insert(
-                model.model_id.clone(),
-                ModelSignals {
-                    aa_intelligence_index: index.aa_intelligence_index,
-                    aa_coding_index: index.aa_coding_index,
-                    aa_agentic_index: index.aa_agentic_index,
-                    aa_cost_per_task: index.aa_cost_per_task,
-                    aa_intel_version: stored_version.clone(),
-                    activity_level: model_activity.map(|a| a.level),
-                    activity_trend: model_activity.map(|a| a.trend),
-                    popularity_tokens: tokens.map(|tokens| tokens as i64),
-                    popularity_share: share,
-                },
-            );
             facts.insert(
                 model.model_id.clone(),
                 ModelFacts {
                     slug: slug.to_string(),
-                    intel_present: intel.is_some(),
-                    intel_version,
-                    activity_present: model_activity.is_some(),
                     aa_cost: aa.and_then(|aa| aa.cost_per_task),
                 },
             );
@@ -265,10 +228,6 @@ pub fn run_processing(catalog: &Catalog, processed_at: &str) -> Result<ProcessSu
             )?;
             pending.push(PendingRank {
                 id: ep.id,
-                model_id: ep.model_id.clone(),
-                provider_name: ep.provider_name.clone(),
-                tag: crate::endpoint_tag(&payload).map(str::to_string),
-                precision_class: index.precision_class.clone(),
                 // Static discount only: promo windows are evaluated at
                 // ranking rebuild time, not here.
                 cost_per_token: crate::price::effective_cost(
@@ -280,34 +239,18 @@ pub fn run_processing(catalog: &Catalog, processed_at: &str) -> Result<ProcessSu
                     index.promo_discount.unwrap_or(0.0),
                 ),
                 // AA's own task cost wins over the catalog blend
-                // wherever the direct fetch carried it (v2): the
-                // model loop already joined it, so the cost and the
+                // wherever the direct fetch carried it: the model
+                // loop already joined it, so the cost and the
                 // indexes always come from the same record.
                 aa_cost_per_task: facts.get(&ep.model_id).and_then(|f| f.aa_cost),
-                decision: index.supports_decisions == Some(1),
             });
             processed += 1;
         }
         catalog.set_meta("processed_at", processed_at)?;
         catalog.set_meta("processed_count", &processed.to_string())?;
         let scored = run_offline_scoring(catalog, &endpoints, processed_at)?;
-        let (ranked, scored_offers) = run_rank_scoring(
-            catalog,
-            &pending,
-            &signals,
-            current_version.as_deref(),
-            processed_at,
-        )?;
-        run_brackets(
-            catalog,
-            &pending,
-            &scored_offers,
-            &signals,
-            &facts,
-            &activity,
-            &popular,
-            current_version.as_deref(),
-        )?;
+        let ranked = run_cost_task(catalog, &pending)?;
+        run_pools(catalog, &facts, &activity, &popular)?;
         Ok(ProcessSummary {
             processed,
             scored,
@@ -316,107 +259,50 @@ pub fn run_processing(catalog: &Catalog, processed_at: &str) -> Result<ProcessSu
     })
 }
 
-/// Value-score pass (Iter 34, v2 since Iter 43): deterministic, no
-/// model calls. Runs after the indexes and offline tiers so it reads
-/// the same facts the UI shows. Rows without an index or a price get
-/// no score — never a zero, which would sort them below measured bad
-/// models. v2 rows carry activity + cost/task and leave popularity
-/// NULL; returns the scored offerings for the bracket pass.
-fn run_rank_scoring(
-    catalog: &Catalog,
-    pending: &[PendingRank],
-    signals: &HashMap<String, ModelSignals>,
-    current_version: Option<&str>,
-    processed_at: &str,
-) -> Result<(usize, Vec<ScoredOffering>), Error> {
-    let mut ranked = 0;
-    let mut scored = Vec::new();
+/// Task-cost pass (Iter 57; the value score is gone): one stored
+/// cost-per-task per endpoint — AA's own figure when positive,
+/// else the catalog blend. `coding/task` routes on it; the UIs
+/// display it. Unpriceable rows keep NULL, never zero. Returns the
+/// priced count.
+fn run_cost_task(catalog: &Catalog, pending: &[PendingRank]) -> Result<usize, Error> {
+    let mut priced = 0;
     for item in pending {
-        let model = signals.get(&item.model_id);
-        let out = rank_score::score(&RankInputs {
-            coding: model.and_then(|m| m.aa_coding_index),
-            intelligence: model.and_then(|m| m.aa_intelligence_index),
-            agentic: model.and_then(|m| m.aa_agentic_index),
-            intel_version: model.and_then(|m| m.aa_intel_version.as_deref()),
-            current_version,
-            precision_class: item.precision_class.as_deref(),
-            cost_per_token: item.cost_per_token,
-            aa_cost_per_task: item.aa_cost_per_task,
-            activity_level: model.and_then(|m| m.activity_level),
-            activity_trend: model.and_then(|m| m.activity_trend),
-            decision: item.decision,
-        });
-        if let Some(out) = &out {
-            ranked += 1;
-            scored.push(ScoredOffering {
-                model_id: item.model_id.clone(),
-                provider_name: item.provider_name.clone(),
-                tag: item.tag.clone(),
-                cost_task: out.cost_task,
-                performance: out.quality,
-                efficiency: out.efficiency,
-                activity: out.activity,
-                basis: out.basis,
-                score: out.score,
-            });
+        let cost_task = task_cost(item.aa_cost_per_task, item.cost_per_token);
+        if cost_task.is_some() {
+            priced += 1;
         }
         catalog.update_endpoint_rank(
             item.id,
             &EndpointRank {
-                rank_score: out.as_ref().map(|o| o.score),
-                rank_quality: out.as_ref().map(|o| o.quality),
-                rank_efficiency: out.as_ref().map(|o| o.efficiency),
-                rank_popularity: None,
-                rank_activity: out.as_ref().map(|o| o.activity),
-                rank_cost_task: out.as_ref().map(|o| o.cost_task),
-                rank_basis: out.as_ref().map(|o| o.basis.to_string()),
-                rank_ruleset: Some(RULESET_VERSION.to_string()),
-                ranked_at: Some(processed_at.to_string()),
+                rank_cost_task: cost_task,
             },
         )?;
     }
-    catalog.set_meta("ranked_at", processed_at)?;
-    catalog.set_meta("ranked_count", &ranked.to_string())?;
-    catalog.set_meta("rank_ruleset", RULESET_VERSION)?;
-    Ok((ranked, scored))
+    Ok(priced)
 }
 
-/// Top-usage bracket + flags + TOP rollup (Iter 43): runs on the
-/// scored offerings. Members rank top-N by activity level with an
-/// absolute recent-token share at or above the minimum, and at
-/// least one v2-scored offering; the low end is the cheapest
-/// member offering at/above the performance floor, the think end
-/// the best member performance under the spend cap. Writes the
-/// `bracket` summary and the per-model `top_models` rollup (generic
-/// models only — `:batch` variants are not routable picks). Empty
-/// bracket (no activity or no scores) is a valid outcome: the
-/// gateway falls back to legacy ordering.
-#[allow(clippy::too_many_arguments)]
-fn run_brackets(
+/// Task-cost selection: AA's figure when positive, else the blend
+/// at TASK_TOKENS tokens. AA zeros are missing data, not free
+/// models (Iter 54); negative or non-finite inputs never produce a
+/// cost.
+fn task_cost(aa_cost: Option<f64>, cost_per_token: Option<f64>) -> Option<f64> {
+    aa_cost.filter(|c| c.is_finite() && *c > 0.0).or_else(|| {
+        cost_per_token
+            .and_then(|cost| (cost.is_finite() && cost >= 0.0).then_some(cost * TASK_TOKENS))
+    })
+}
+
+/// Usage pools (Iter 43, pools-only since Iter 57): the bracket
+/// (top-N activity with a minimum absolute share) behind `coding`
+/// and the agent top-20 behind `agent`, resolved to catalog model
+/// ids (slug or id). Pure usage — no score requirement. Empty
+/// without activity/popularity data (the tiers fail closed).
+fn run_pools(
     catalog: &Catalog,
-    pending: &[PendingRank],
-    scored: &[ScoredOffering],
-    signals: &HashMap<String, ModelSignals>,
     facts: &HashMap<String, ModelFacts>,
     activity: &HashMap<String, ModelActivity>,
     popular: &HashMap<String, u64>,
-    current_version: Option<&str>,
 ) -> Result<(), Error> {
-    // Best scored offering per model: max score, provider-stable.
-    let mut best: HashMap<&str, &ScoredOffering> = HashMap::new();
-    for offer in scored {
-        best.entry(offer.model_id.as_str())
-            .and_modify(|cur| {
-                if offer.score.total_cmp(&cur.score) == std::cmp::Ordering::Greater
-                    || (offer.score == cur.score
-                        && (offer.provider_name.as_str(), offer.tag.as_deref())
-                            < (cur.provider_name.as_str(), cur.tag.as_deref()))
-                {
-                    *cur = offer;
-                }
-            })
-            .or_insert(offer);
-    }
     // Activity rank by level, best first; absolute shares from the
     // recent-window token sums.
     let mut by_level: Vec<(&String, f64)> =
@@ -431,8 +317,7 @@ fn run_brackets(
     let mut members: Vec<String> = facts
         .iter()
         .filter(|(id, f)| {
-            best.contains_key(id.as_str())
-                && (top_slugs.contains(f.slug.as_str()) || top_slugs.contains(id.as_str()))
+            (top_slugs.contains(f.slug.as_str()) || top_slugs.contains(id.as_str()))
                 && popular
                     .get(&f.slug)
                     .or_else(|| popular.get(*id))
@@ -443,62 +328,12 @@ fn run_brackets(
         .map(|(id, _)| id.clone())
         .collect();
     members.sort();
-    let in_bracket: HashSet<&str> = members.iter().map(String::as_str).collect();
-    let low_end = scored
-        .iter()
-        .filter(|o| {
-            in_bracket.contains(o.model_id.as_str()) && o.performance >= BRACKET_PERFORMANCE_FLOOR
-        })
-        .min_by(|a, b| {
-            a.cost_task
-                .total_cmp(&b.cost_task)
-                .then_with(|| a.model_id.cmp(&b.model_id))
-                .then_with(|| a.provider_name.cmp(&b.provider_name))
-        });
-    // max_by takes the LAST maximum on ties, so the stability
-    // tie-breaks run reversed: smallest model/provider wins.
-    let think_end = scored
-        .iter()
-        .filter(|o| in_bracket.contains(o.model_id.as_str()) && o.cost_task <= THINK_MAX_COST_TASK)
-        .max_by(|a, b| {
-            a.performance
-                .total_cmp(&b.performance)
-                .then_with(|| a.score.total_cmp(&b.score))
-                .then_with(|| b.model_id.cmp(&a.model_id))
-                .then_with(|| b.provider_name.cmp(&a.provider_name))
-        });
-    let mut priceable: HashSet<&str> = HashSet::new();
-    for item in pending {
-        if item.cost_per_token.is_some()
-            || item
-                .aa_cost_per_task
-                .is_some_and(|c| c.is_finite() && c >= 0.0)
-        {
-            priceable.insert(item.model_id.as_str());
-        }
-    }
-    let end_json = |end: Option<&&ScoredOffering>| match end {
-        Some(offer) => json!({
-            "model": offer.model_id,
-            "provider": offer.provider_name,
-            "tag": offer.tag,
-            "cost_task": offer.cost_task,
-            "performance": offer.performance,
-            "score": offer.score,
-        }),
-        None => Value::Null,
-    };
     catalog.set_meta(
         "bracket",
         &json!({
-            "ruleset": RULESET_VERSION,
             "top_n": BRACKET_TOP_N,
             "min_share": BRACKET_MIN_SHARE,
-            "floor": BRACKET_PERFORMANCE_FLOOR,
-            "think_cap": THINK_MAX_COST_TASK,
             "members": members,
-            "low_end": end_json(low_end.as_ref()),
-            "think_end": end_json(think_end.as_ref()),
         })
         .to_string(),
     )?;
@@ -534,97 +369,12 @@ fn run_brackets(
     catalog.set_meta(
         "agent_top20",
         &json!({
-            "ruleset": RULESET_VERSION,
             "top_n": AGENT_TOP_N,
             "members": agent.iter().map(|(id, _)| id).collect::<Vec<_>>(),
         })
         .to_string(),
     )?;
-    let mut ids: Vec<&String> = facts.keys().collect();
-    ids.sort();
-    let mut top = serde_json::Map::new();
-    for id in ids {
-        if id.ends_with(":batch") {
-            continue;
-        }
-        // facts and signals cover every model row; a missing entry
-        // can only mean a caller bug, and debug builds say so.
-        let f = &facts[id.as_str()];
-        let is_top = top_slugs.contains(f.slug.as_str()) || top_slugs.contains(id.as_str());
-        let scored_here = best.contains_key(id.as_str());
-        let flags = model_flags(
-            f,
-            scored_here,
-            priceable.contains(id.as_str()),
-            !activity.is_empty(),
-            is_top,
-            current_version,
-        );
-        let entry = match best.get(id.as_str()) {
-            Some(offer) => json!({
-                "score": offer.score,
-                "quality": offer.performance,
-                "efficiency": offer.efficiency,
-                "activity": offer.activity,
-                "cost_task": offer.cost_task,
-                "basis": offer.basis,
-                "level": signals.get(id.as_str()).and_then(|s| s.activity_level),
-                "trend": signals.get(id.as_str()).and_then(|s| s.activity_trend),
-                "bracket": in_bracket.contains(id.as_str()),
-                "flags": flags,
-            }),
-            None => json!({
-                "score": Value::Null,
-                "quality": Value::Null,
-                "efficiency": Value::Null,
-                "activity": Value::Null,
-                "cost_task": Value::Null,
-                "basis": Value::Null,
-                "level": signals.get(id.as_str()).and_then(|s| s.activity_level),
-                "trend": signals.get(id.as_str()).and_then(|s| s.activity_trend),
-                "bracket": false,
-                "flags": flags,
-            }),
-        };
-        top.insert(id.clone(), entry);
-    }
-    catalog.set_meta("top_models", &Value::Object(top).to_string())?;
     Ok(())
-}
-
-/// Per-model data-quality flags (Iter 43), fixed order: `no-price`
-/// (nothing priceable to score), `no-activity` (unmeasured while
-/// others were), `stale-version` (intel version known-old),
-/// `no-current-score` (intel exists but versionless while a current
-/// version is known), `popular-but-unscored` (top usage, no score).
-/// Version/activity flags fire only when the reference data exists —
-/// keyless syncs flag nothing for missing aux datasets.
-fn model_flags(
-    facts: &ModelFacts,
-    scored: bool,
-    priceable: bool,
-    activity_known: bool,
-    is_top: bool,
-    current: Option<&str>,
-) -> Vec<&'static str> {
-    let mut flags = Vec::new();
-    if !priceable {
-        flags.push("no-price");
-    }
-    if activity_known && !facts.activity_present {
-        flags.push("no-activity");
-    }
-    if let Some(current) = current {
-        match &facts.intel_version {
-            Some(version) if version != current => flags.push("stale-version"),
-            None if facts.intel_present => flags.push("no-current-score"),
-            _ => {}
-        }
-    }
-    if is_top && !scored {
-        flags.push("popular-but-unscored");
-    }
-    flags
 }
 
 /// Join an AA record to a catalog model: exact slug first, then the
@@ -663,76 +413,10 @@ fn normalized_aa_index(aa: &HashMap<String, AaModel>) -> BTreeMap<String, &AaMod
     index
 }
 
-/// One TOP-rollup entry (Iter 43): a generic model's best score
-/// plus the components, activity, bracket flag, and data-quality
-/// flags behind it. Read by the TOP tab and the gateway metrics.
-#[derive(Debug, Clone, Default)]
-pub struct TopModel {
-    pub score: Option<f64>,
-    pub quality: Option<f64>,
-    pub efficiency: Option<f64>,
-    pub activity: Option<f64>,
-    pub cost_task: Option<f64>,
-    pub basis: Option<String>,
-    pub level: Option<f64>,
-    pub trend: Option<f64>,
-    pub bracket: bool,
-    pub flags: Vec<String>,
-}
-
-/// Model-level TOP rollup (Iter 46): every generic model with its
-/// best score and flags. Missing or unparseable (old artifacts,
-/// keyless syncs) reads as empty; malformed entries drop
-/// individually.
-pub fn read_top_models(catalog: &Catalog) -> HashMap<String, TopModel> {
-    catalog
-        .get_meta("top_models")
-        .ok()
-        .flatten()
-        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
-        .and_then(|v| v.as_object().cloned())
-        .map(|map| {
-            map.into_iter()
-                .filter_map(|(model, v)| {
-                    if !v.is_object() {
-                        return None;
-                    }
-                    let num = |key: &str| v.get(key).and_then(Value::as_f64);
-                    Some((
-                        model,
-                        TopModel {
-                            score: num("score"),
-                            quality: num("quality"),
-                            efficiency: num("efficiency"),
-                            activity: num("activity"),
-                            cost_task: num("cost_task"),
-                            basis: v.get("basis").and_then(Value::as_str).map(str::to_string),
-                            level: num("level"),
-                            trend: num("trend"),
-                            bracket: v.get("bracket").and_then(Value::as_bool).unwrap_or(false),
-                            flags: v
-                                .get("flags")
-                                .and_then(Value::as_array)
-                                .map(|flags| {
-                                    flags
-                                        .iter()
-                                        .filter_map(Value::as_str)
-                                        .map(str::to_string)
-                                        .collect()
-                                })
-                                .unwrap_or_default(),
-                        },
-                    ))
-                })
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
 /// In-bracket model ids for the gateway (Iter 44): the `bracket`
 /// summary's member list. Missing or unparseable (old artifacts,
-/// keyless syncs, empty brackets) reads as empty — the gateway then
-/// routes legacy.
+/// keyless syncs, empty brackets) reads as empty — the coding
+/// tiers then fail closed.
 pub fn read_bracket_members(catalog: &Catalog) -> HashSet<String> {
     catalog
         .get_meta("bracket")
@@ -914,6 +598,23 @@ fn extract_aa_cost_per_task(model_payload: &Value) -> Option<f64> {
 
 /// One live metric from an endpoint payload (Iter 34): a finite,
 /// non-negative number, else None. Missing is unknown, never zero.
+/// Output modalities (Iter 59): `architecture.output_modalities`
+/// as a string list. Missing or malformed reads as absent —
+/// unknown passes text gates.
+fn extract_output_modalities(payload: &Value) -> Option<Vec<String>> {
+    payload
+        .get("architecture")?
+        .get("output_modalities")?
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(str::to_string))
+                .collect()
+        })
+        .filter(|list: &Vec<String>| !list.is_empty())
+}
+
 fn extract_metric(payload: &Value, key: &str) -> Option<f64> {
     let value = match payload.get(key)? {
         Value::Number(n) => n.as_f64()?,

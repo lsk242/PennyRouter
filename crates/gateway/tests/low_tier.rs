@@ -33,6 +33,8 @@ fn build_db(path: &std::path::Path) {
         ("m/ok", "Ok", 1e-7, Some(99.5), Some(40.0), Some(50)),
         ("m/free", "Freebie", 0.0, None, None, Some(10)),
         ("m/trap:batch", "Batchy", 1e-9, None, None, None),
+        ("m/audio", "AudioP", 1e-9, None, None, None),
+        ("m/audiofree", "FreeAudio", 0.0, None, None, None),
     ] {
         catalog
             .insert_model(&ModelRow {
@@ -124,6 +126,14 @@ fn build_db(path: &std::path::Path) {
                 .unwrap();
         }
     }
+    // Audio-output models: measured non-text, excluded everywhere
+    // despite winning on price.
+    catalog
+        .update_model_modalities("m/audio", Some(&["text".to_string(), "audio".to_string()]))
+        .unwrap();
+    catalog
+        .update_model_modalities("m/audiofree", Some(&["audio".to_string()]))
+        .unwrap();
 }
 
 async fn spawn_gateway(upstream: SocketAddr, db: &std::path::Path) -> SocketAddr {
@@ -203,7 +213,8 @@ async fn low_routes_cheapest_paid_skipping_flaky() {
 
     // Flaky (uptime 45) and Stalled (0 tok/s) are cheaper but gated
     // out; Cheap (unknown telemetry, no tier at all) wins with no
-    // floor to check. Free and :batch traps never serve.
+    // floor to check. Free, :batch, and audio-output traps never
+    // serve.
     let res = post_chat(gw, "openrouter/pair/low").await;
     assert_eq!(res.status(), StatusCode::OK);
     assert_eq!(provider_of(&res), "Cheap");
@@ -212,6 +223,21 @@ async fn low_routes_cheapest_paid_skipping_flaky() {
         guard.models.get("Cheap").map(String::as_str),
         Some("m/cheap")
     );
+}
+
+#[tokio::test]
+async fn free_skips_nontext_models() {
+    let db = scratch_db("free-text");
+    build_db(&db);
+    let seen = Arc::new(Mutex::new(Upstream::default()));
+    let mock = spawn_mock(mock_app(seen.clone())).await;
+    let gw = spawn_gateway(mock, &db).await;
+
+    // FreeAudio is free but audio-output: the free tier serves the
+    // text freebie instead.
+    let res = post_chat(gw, "openrouter/pair/free").await;
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(provider_of(&res), "Freebie");
 }
 
 #[tokio::test]

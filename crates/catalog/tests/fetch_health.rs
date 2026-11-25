@@ -28,6 +28,6 @@ fn record_read_round_trip_per_group() {
     // The known groups are exactly what the sync records.
     assert_eq!(
         FETCH_SOURCES,
-        &["aa", "popularity", "benchmarks", "apps", "task"]
+        &["aa", "popularity", "benchmarks", "apps"]
     );
 }

@@ -134,7 +134,11 @@ session.
   Tiers are disjoint: zero-cost serves
   `free` only, and `:batch` variants serve the `batch` tier only
   (async pricing can't serve interactive requests, so every
-  interactive leg excludes them). Per-key daily free caps
+  interactive leg excludes them). Tiers are text-only, too
+  (Iter 59): models whose measured output modalities are anything
+  but text (audio/image/video) serve no virtual tier except the
+  decision ones (which require the `decisions` output instead);
+  unknown modalities pass. Per-key daily free caps
   live upstream, not here: OpenRouter's `GET /api/v1/key` reports each
   key's `free_model_daily_requests` used/limit/remaining, and an
   exhausted key surfaces as 429s — which the free leg already turns

@@ -1,8 +1,8 @@
 //! SQLite store: open/init, inserts, and read queries.
 
 use crate::schema::{
-    DDL, ENDPOINT_INDEXED_COLUMNS, ENDPOINT_RENAMED_COLUMNS, LEGACY_SCORE_META_KEYS,
-    MODEL_INDEXED_COLUMNS, SCHEMA_VERSION,
+    DDL, ENDPOINT_DROPPED_COLUMNS, ENDPOINT_INDEXED_COLUMNS, ENDPOINT_RENAMED_COLUMNS,
+    LEGACY_SCORE_META_KEYS, MODEL_INDEXED_COLUMNS, SCHEMA_VERSION,
 };
 use crate::Error;
 use rusqlite::{params, Connection, OptionalExtension, Row};
@@ -90,27 +90,17 @@ pub struct EndpointSpeed {
     pub uptime_pct: Option<f64>,
 }
 
-/// Value-score components for one endpoint (Iter 34; activity +
-/// cost-task from Iter 43). Stored rather than recomputed so the UI
-/// can show the arithmetic and a later gateway can read the score
-/// with one column. `rank-v1` rows carry `rank_popularity`;
-/// `rank-v2` rows carry `rank_activity` + `rank_cost_task` and leave
-/// popularity NULL — `rank_ruleset` tells which is live.
+/// Stored cost-per-task for one endpoint (Iter 34; the only
+/// survivor of the value score since Iter 57): AA's figure when
+/// positive, else the catalog blend. `coding/task` routes on it.
 #[derive(Clone, Default)]
 pub struct EndpointRank {
-    pub rank_score: Option<f64>,
-    pub rank_quality: Option<f64>,
-    pub rank_efficiency: Option<f64>,
-    pub rank_popularity: Option<f64>,
-    pub rank_activity: Option<f64>,
     pub rank_cost_task: Option<f64>,
-    pub rank_basis: Option<String>,
-    pub rank_ruleset: Option<String>,
-    pub ranked_at: Option<String>,
 }
 
-/// Per-model signals the value score reads (Iter 34; activity +
-/// intel version from Iter 43).
+/// Per-model signals the UIs read (Iter 34; activity + intel
+/// version from Iter 43): AA indexes, AA cost per task,
+/// popularity, activity.
 #[derive(Clone, Debug, Default)]
 pub struct ModelSignals {
     pub aa_intelligence_index: Option<i64>,
@@ -291,6 +281,14 @@ impl Catalog {
             if !self.has_column("endpoints", name)? {
                 self.conn
                     .execute_batch(&format!("ALTER TABLE endpoints ADD COLUMN {name} {ty}"))?;
+            }
+        }
+        // v11 drops the value-score columns (Iter 57): present on v10
+        // databases, absent on fresh v11 ones.
+        for name in ENDPOINT_DROPPED_COLUMNS {
+            if self.has_column("endpoints", name)? {
+                self.conn
+                    .execute_batch(&format!("ALTER TABLE endpoints DROP COLUMN {name}"))?;
             }
         }
         for (name, ty) in MODEL_INDEXED_COLUMNS {
@@ -502,27 +500,55 @@ impl Catalog {
         Ok(())
     }
 
-    /// Fill the value-score columns of one endpoint (Iter 34).
+    /// Fill the stored task cost of one endpoint (Iter 34; slimmed
+    /// to the single column in Iter 57).
     pub fn update_endpoint_rank(&self, id: i64, rank: &EndpointRank) -> Result<(), Error> {
         self.conn.execute(
-            "UPDATE endpoints SET rank_score = ?1, rank_quality = ?2,
-             rank_efficiency = ?3, rank_popularity = ?4, rank_activity = ?5,
-             rank_cost_task = ?6, rank_basis = ?7, rank_ruleset = ?8,
-             ranked_at = ?9 WHERE id = ?10",
-            params![
-                rank.rank_score,
-                rank.rank_quality,
-                rank.rank_efficiency,
-                rank.rank_popularity,
-                rank.rank_activity,
-                rank.rank_cost_task,
-                rank.rank_basis,
-                rank.rank_ruleset,
-                rank.ranked_at,
-                id
-            ],
+            "UPDATE endpoints SET rank_cost_task = ?1 WHERE id = ?2",
+            params![rank.rank_cost_task, id],
         )?;
         Ok(())
+    }
+
+    /// Fill the output-modalities column of one model (Iter 59):
+    /// the `architecture.output_modalities` array as JSON, NULL
+    /// when the payload carries none.
+    pub fn update_model_modalities(
+        &self,
+        model_id: &str,
+        modalities: Option<&[String]>,
+    ) -> Result<(), Error> {
+        let raw =
+            modalities.map(|list| serde_json::to_string(list).unwrap_or_else(|_| "[]".to_string()));
+        self.conn.execute(
+            "UPDATE models SET output_modalities = ?1 WHERE model_id = ?2",
+            params![raw, model_id],
+        )?;
+        Ok(())
+    }
+
+    /// Output modalities per model id (Iter 59): unparseable or
+    /// missing entries read as absent (unknown passes text gates).
+    pub fn model_modalities(&self) -> Result<HashMap<String, Vec<String>>, Error> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT model_id, output_modalities FROM models")?;
+        let rows = stmt.query_map([], |r| {
+            let id: String = r.get(0)?;
+            let raw: Option<String> = r.get(1)?;
+            let list: Option<Vec<String>> = raw
+                .and_then(|raw| serde_json::from_str(&raw).ok())
+                .filter(|list: &Vec<String>| !list.is_empty());
+            Ok((id, list))
+        })?;
+        let mut out = HashMap::new();
+        for row in rows {
+            let (id, list) = row?;
+            if let Some(list) = list {
+                out.insert(id, list);
+            }
+        }
+        Ok(out)
     }
 
     /// Fill the popularity columns of one model (Iter 34).
@@ -594,25 +620,17 @@ impl Catalog {
             .map_err(Error::from)
     }
 
-    /// Value-score components per endpoint id (Iter 34).
+    /// Stored task cost per endpoint id (Iter 34; slimmed to the
+    /// single column in Iter 57).
     pub fn endpoint_ranks(&self) -> Result<HashMap<i64, EndpointRank>, Error> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, rank_score, rank_quality, rank_efficiency, rank_popularity,
-             rank_activity, rank_cost_task, rank_basis, rank_ruleset, ranked_at FROM endpoints",
-        )?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, rank_cost_task FROM endpoints")?;
         let rows = stmt.query_map([], |r| {
             Ok((
                 r.get::<_, i64>(0)?,
                 EndpointRank {
-                    rank_score: r.get(1)?,
-                    rank_quality: r.get(2)?,
-                    rank_efficiency: r.get(3)?,
-                    rank_popularity: r.get(4)?,
-                    rank_activity: r.get(5)?,
-                    rank_cost_task: r.get(6)?,
-                    rank_basis: r.get(7)?,
-                    rank_ruleset: r.get(8)?,
-                    ranked_at: r.get(9)?,
+                    rank_cost_task: r.get(1)?,
                 },
             ))
         })?;
@@ -739,7 +757,7 @@ mod tests {
         catalog.init().unwrap();
         assert_eq!(
             catalog.get_meta("schema_version").unwrap().as_deref(),
-            Some("10")
+            Some("12")
         );
         assert_eq!(catalog.counts().unwrap(), (0, 0));
     }

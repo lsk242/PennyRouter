@@ -46,6 +46,11 @@ pub const POPULAR_MODELS_TOP_N: usize = 10;
 /// variants excluded. The `agent` tier serves the cheapest offering
 /// across the resolved models.
 pub const AGENT_TOP_N: usize = 20;
+/// Usage-bracket membership (Iter 43, pools-only since Iter 57):
+/// top slugs by activity level with an absolute recent-token share
+/// at or above the minimum resolve to the `coding` pool.
+pub const BRACKET_TOP_N: usize = 25;
+pub const BRACKET_MIN_SHARE: f64 = 0.005;
 /// Hot apps shown on `/ui` (the API publishes no per-app models).
 pub const POPULAR_APPS_TOP_N: usize = 10;
 
@@ -151,39 +156,6 @@ pub fn fetch_app_rankings(
 /// One app-rankings fetch: names by volume plus the citation.
 pub struct AppList {
     pub apps: Vec<(String, u64, u64)>,
-    pub as_of: Option<String>,
-}
-
-/// Task traffic share for the Code macro-category (Iter 42): sampled
-/// relative shares per task. The endpoint shape is assumed from the
-/// datasets family (`task-rankings` with dated rows); a 404 or a
-/// shape mismatch warns and publishes without it — auxiliary data
-/// must never fail a sync.
-pub fn fetch_task_share(base_url: &str, api_key: &str) -> Result<TaskShare, Error> {
-    let base = base_url.trim_end_matches('/');
-    let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(60))
-        .build()?;
-    let (end, start) = rankings_window();
-    let body = get_json(
-        &client,
-        &format!("{base}/api/v1/datasets/task-rankings?start_date={start}&end_date={end}"),
-        api_key,
-    )?;
-    Ok(TaskShare {
-        code_share: aggregate_task_code_share(&body),
-        as_of: body
-            .get("meta")
-            .and_then(|meta| meta.get("as_of"))
-            .and_then(Value::as_str)
-            .map(str::to_string),
-    })
-}
-
-/// Task share fetch: the Code fraction plus the citation. `None`
-/// means the response carried no usable task rows.
-pub struct TaskShare {
-    pub code_share: Option<f64>,
     pub as_of: Option<String>,
 }
 
@@ -330,41 +302,6 @@ pub fn aggregate_activity(body: &Value) -> Vec<(String, ModelActivity)> {
     out
 }
 
-/// Code macro-category share of task traffic (Iter 42): rows name a
-/// task (`task`, `category`, or `name`) with `total_tokens` counts;
-/// the share is Code tokens over all tokens. Labels match
-/// case-insensitively on `code`/`coding`. No usable rows means
-/// `None` — a missing dataset is unknown, never zero share.
-pub fn aggregate_task_code_share(body: &Value) -> Option<f64> {
-    let mut code = 0u64;
-    let mut total = 0u64;
-    let mut any = false;
-    for row in data_rows(body) {
-        let label = row
-            .get("task")
-            .or_else(|| row.get("category"))
-            .or_else(|| row.get("name"))
-            .and_then(Value::as_str)
-            .map(|s| s.trim().to_lowercase());
-        let tokens = row.get("total_tokens").and_then(|v| match v {
-            Value::String(s) => s.parse().ok(),
-            Value::Number(n) => n.as_u64(),
-            _ => None,
-        });
-        if let (Some(label), Some(tokens)) = (label, tokens) {
-            any = true;
-            total += tokens;
-            if label == "code" || label == "coding" {
-                code += tokens;
-            }
-        }
-    }
-    if !any || total == 0 {
-        return None;
-    }
-    Some(code as f64 / total as f64)
-}
-
 fn data_rows(body: &Value) -> impl Iterator<Item = &Value> {
     body.get("data")
         .and_then(Value::as_array)
@@ -498,16 +435,6 @@ pub fn store_app_list(catalog: &Catalog, key: &str, list: &AppList) -> Result<()
     Ok(())
 }
 
-/// Persist the task Code share (Iter 42): one fraction plus the
-/// citation. `None` stores nothing — unknown stays unknown.
-pub fn store_task_share(catalog: &Catalog, share: &TaskShare) -> Result<(), Error> {
-    if let Some(code) = share.code_share {
-        catalog.set_meta("task_code_share", &code.to_string())?;
-        catalog.set_meta("task_code_as_of", share.as_of.as_deref().unwrap_or(""))?;
-    }
-    Ok(())
-}
-
 /// Stored activity by slug. Missing or unparseable (old artifacts,
 /// keyless syncs) reads as empty; malformed entries drop
 /// individually.
@@ -547,16 +474,6 @@ pub fn read_app_list(catalog: &Catalog, key: &str) -> Vec<String> {
         .iter()
         .filter_map(|a| a.get("name")?.as_str().map(str::to_string))
         .collect()
-}
-
-/// Stored task Code share. Missing or unparseable reads as `None`.
-pub fn read_task_code_share(catalog: &Catalog) -> Option<f64> {
-    catalog
-        .get_meta("task_code_share")
-        .ok()
-        .flatten()
-        .and_then(|raw| raw.parse::<f64>().ok())
-        .filter(|share| share.is_finite() && (0.0..=1.0).contains(share))
 }
 
 /// Full popularity window as slug -> tokens. Missing or unparseable
@@ -736,24 +653,7 @@ mod tests {
     }
 
     #[test]
-    fn task_code_share_counts_code_tokens() {
-        let body = json!({"data": [
-            {"task": "Code", "total_tokens": 30u64},
-            {"category": "coding", "total_tokens": "10"},
-            {"name": "Chat", "total_tokens": 60u64},
-            {"task": "Code", "total_tokens": "junk"},
-            {"total_tokens": 5u64},
-        ]});
-        assert_eq!(aggregate_task_code_share(&body), Some(0.4));
-        assert_eq!(aggregate_task_code_share(&json!({})), None);
-        assert_eq!(
-            aggregate_task_code_share(&json!({"data": [{"task": "Code"}]})),
-            None
-        );
-    }
-
-    #[test]
-    fn activity_app_list_and_task_share_round_trip() {
+    fn activity_app_list_round_trip() {
         let dir = std::env::temp_dir().join(format!("popular-42-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -761,7 +661,6 @@ mod tests {
         catalog.init().unwrap();
         assert!(read_activity(&catalog).is_empty());
         assert!(read_app_list(&catalog, "trending").is_empty());
-        assert_eq!(read_task_code_share(&catalog), None);
         store_popularity(
             &catalog,
             &Popularity {
@@ -796,16 +695,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(read_app_list(&catalog, "trending"), vec!["Hot".to_string()]);
-        store_task_share(
-            &catalog,
-            &TaskShare {
-                code_share: Some(0.25),
-                as_of: Some("t".to_string()),
-            },
-        )
-        .unwrap();
-        assert_eq!(read_task_code_share(&catalog), Some(0.25));
-        // Malformed entries drop; out-of-range shares reject.
+        // Malformed entries drop.
         catalog
             .set_meta(
                 "activity_tokens",
@@ -813,8 +703,6 @@ mod tests {
             )
             .unwrap();
         assert_eq!(read_activity(&catalog).len(), 1);
-        catalog.set_meta("task_code_share", "7").unwrap();
-        assert_eq!(read_task_code_share(&catalog), None);
     }
 
     #[test]

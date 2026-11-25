@@ -1162,4 +1162,81 @@ only when pulled forward deliberately.
   full workspace green (441 passed). fmt + clippy `-D warnings`
   via the extracted toolchain, clean.
 
-## After Iter 54
+## Iter 55 — Full-width debug UI (done)
+
+- Goal: every debug UI screen uses the full viewport width.
+- Value: wide ranking tables stop squeezing into 88rem.
+- Shipped: `.wrap` rule in `crates/gateway/templates/ui.html`
+  changed from `max-width: 88rem` to `width: 100%` (prose
+  `max-width` kept for readability).
+- Test: suite unaffected (no width asserts); served page
+  carries the new rule; full workspace green (441 passed).
+
+## Iter 56 — Score display sweep (done)
+
+- Goal: take the value score out of every screen; order the
+  catalog table by usage, then price.
+- Value: no more command-a-plus-style nonsense ranks anywhere
+  operators look; tables mirror what routing actually reads.
+- Shipped: catalog + gateway models tables show
+  intel/cost-task/usage (stored task cost, activity level) and
+  sort usage-desc/cost-asc; TOP tabs, score arithmetic, calc
+  rows, inspector score rank, preview score keys, and score
+  gauges deleted; overview shows usage pools + rerouted gap
+  warnings; ranking-doc score ordering unpublished.
+- Test: rewritten catalog-ui + gateway UI suites + metrics
+  suite; full workspace green (438 passed). fmt + clippy `-D
+  warnings` via the extracted toolchain, clean.
+
+## Iter 57 — Score computation sweep (done)
+
+- Goal: delete the value-score computation, columns, and metas;
+  keep the task-cost pass and pure-usage pools.
+- Value: -1600 lines; the sync writes only what routing and the
+  UIs read; schema v11 drops 8 dead columns with a tested
+  v10→v11 migration (task costs survive).
+- Shipped: `rank_score.rs`, bracket ends, TOP rollup, flags,
+  `ranked_*`/`rank_ruleset` metas deleted; `EndpointRank` slimmed
+  to `rank_cost_task`; bracket membership is pure usage (no score
+  requirement); pool metas shed the ruleset stamp.
+- Test: rewritten process suite (cost/gates/pools/migration) +
+  slimmed fixtures; full workspace green (423 passed). fmt +
+  clippy `-D warnings` via the extracted toolchain, clean.
+
+## Iter 58 — UI round (done)
+
+- Goal: promo as %, intel everywhere, model page links.
+- Value: tables match the routing inputs at a glance.
+- Shipped: inspector promo renders `75%` (server + JS);
+  `Offering` carries intel into the inspector column + preview
+  JSON; every model row links to its OpenRouter page (base id,
+  new tab).
+- Test: UI asserts (intel/link/percent); full workspace green
+  (423 passed). fmt + clippy `-D warnings` via the extracted
+  toolchain, clean.
+
+## Iter 59 — TEXT modality filter (done)
+
+- Goal: audio/image/video-output models serve nothing and show
+  nowhere; decision tiers stay decisions-only.
+- Value: a $0 music model stops looking like a free chat model.
+- Shipped: `output_modalities` column (schema v12, JSON array,
+  fail-open on unknown); all virtual tiers except
+  `decision`/`decision/free` require text-only output; both
+  models tables hide measured non-text rows.
+- Test: extraction/storage + low/free exclusion + hidden rows;
+  full workspace green (425 passed). fmt + clippy `-D warnings`
+  via the extracted toolchain, clean.
+
+## Iter 60 — Drop dead task-rankings fetch (done)
+
+- Goal: stop probing a dataset that never existed.
+- Value: one less confusing log line and wasted request per sync.
+- Shipped: `fetch_task_share`/`TaskShare`/aggregation/store/read
+  + exports + the `task` fetch-health group deleted after
+  verifying the 404 live and zero readers.
+- Test: health-groups assert updated; full workspace green
+  (424 passed). fmt + clippy `-D warnings` via the extracted
+  toolchain, clean.
+
+## After Iter 60

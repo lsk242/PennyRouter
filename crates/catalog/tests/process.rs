@@ -307,7 +307,7 @@ fn migration_v1_to_current_preserves_data() {
     assert_eq!(eps[0].quantization, None);
     assert_eq!(
         catalog.get_meta("schema_version").unwrap().as_deref(),
-        Some("10")
+        Some("12")
     );
 
     // Migrated models carry the new AA columns (NULL until reprocessed).
@@ -919,7 +919,7 @@ fn migration_v6_to_v7_renames_scoring_columns() {
     assert_eq!(catalog.get_meta("judged_count").unwrap(), None);
     assert_eq!(
         catalog.get_meta("schema_version").unwrap().as_deref(),
-        Some("10")
+        Some("12")
     );
 }
 
@@ -958,15 +958,15 @@ fn migration_v8_to_v9_adds_quantization_column() {
     assert_eq!(catalog.endpoints_for("m/id").unwrap()[0].quantization, None);
     assert_eq!(
         catalog.get_meta("schema_version").unwrap().as_deref(),
-        Some("10")
+        Some("12")
     );
 }
 
-/// Iter 34 (v2 since Iter 43): processing writes the value score
-/// from the AA index, the effective price, the precision class, and
-/// the activity window (neutral when unmeasured).
+/// Iter 34 (slimmed Iter 57): processing writes one task cost
+/// per endpoint — AA's figure when positive, else the catalog
+/// blend. Unpriceable rows keep NULL.
 #[test]
-fn processing_writes_value_scores() {
+fn processing_writes_task_costs() {
     let dir = common::scratch("rank-score");
     let db = dir.join("work.db");
     let catalog = Catalog::open(&db).unwrap();
@@ -1024,7 +1024,7 @@ fn processing_writes_value_scores() {
                 "latency_last_30m":250,"throughput_last_30m":120,"uptime_last_30m":99.5}"#,
         ))
         .unwrap();
-    // Free: efficiency is 1, so the score is quality × activity.
+    // Free: zero blend prices a zero task.
     catalog
         .insert_endpoint(&endpoint(
             "a/cheap",
@@ -1053,7 +1053,7 @@ fn processing_writes_value_scores() {
 
     let summary = run_processing(&catalog, PROCESSED_AT).unwrap();
     assert_eq!(summary.processed, 4);
-    assert_eq!(summary.ranked, 2);
+    assert_eq!(summary.ranked, 3);
 
     let eps = catalog.endpoints_for("a/cheap").unwrap();
     let priced = &eps[0];
@@ -1065,38 +1065,21 @@ fn processing_writes_value_scores() {
     assert_eq!(speed.uptime_pct, Some(99.5));
 
     let ranks = catalog.endpoint_ranks().unwrap();
-    let rank = &ranks[&priced.id];
-    assert_eq!(rank.rank_basis.as_deref(), Some("coding"));
-    assert_eq!(rank.rank_ruleset.as_deref(), Some("rank-v2"));
-    assert_eq!(rank.ranked_at.as_deref(), Some(PROCESSED_AT));
-    // quality = 60 × 0.97 (fp8)
-    assert!((rank.rank_quality.unwrap() - 58.2).abs() < 1e-9);
     // cost/task = 0.5·1e-6 + 0.4·5e-6 + 0.05·5e-8 + 0.05·1.25e-6, ×10k
-    let cost_task = 0.02565;
-    let efficiency = 0.01 / (cost_task + 0.01);
-    assert!((rank.rank_efficiency.unwrap() - efficiency).abs() < 1e-9);
-    // No activity data: the neutral factor, and v2 leaves the v1
-    // popularity column NULL.
-    assert_eq!(rank.rank_popularity, None);
-    assert!((rank.rank_activity.unwrap() - 1.0 / 1.1).abs() < 1e-9);
-    assert!((rank.rank_cost_task.unwrap() - cost_task).abs() < 1e-9);
-    assert!((rank.rank_score.unwrap() - 58.2 * efficiency / 1.1).abs() < 1e-6);
+    let rank = &ranks[&priced.id];
+    assert!((rank.rank_cost_task.unwrap() - 0.02565).abs() < 1e-9);
 
-    // Free offering: full price credit.
+    // Free offering: zero blend prices a zero task.
     let free = &eps[1];
-    let free_rank = &ranks[&free.id];
-    assert_eq!(free_rank.rank_efficiency, Some(1.0));
-    assert!((free_rank.rank_score.unwrap() - 58.2 / 1.1).abs() < 1e-9);
+    assert_eq!(ranks[&free.id].rank_cost_task, Some(0.0));
 
-    // Unpriced offering: evaluated, but no score.
+    // Unpriced offering: evaluated, but no cost.
     let unpriced = &eps[2];
-    let unpriced_rank = &ranks[&unpriced.id];
-    assert_eq!(unpriced_rank.rank_score, None);
-    assert_eq!(unpriced_rank.rank_ruleset.as_deref(), Some("rank-v2"));
+    assert_eq!(ranks[&unpriced.id].rank_cost_task, None);
 
-    // No index: no score even though it is priced.
+    // No index needed anymore: priced means costed.
     let none = &catalog.endpoints_for("b/none").unwrap()[0];
-    assert_eq!(ranks[&none.id].rank_score, None);
+    assert!((ranks[&none.id].rank_cost_task.unwrap() - 0.01).abs() < 1e-9);
 
     // Popularity is stored per model, keyed by canonical_slug.
     let signals = catalog.model_signals().unwrap();
@@ -1104,16 +1087,6 @@ fn processing_writes_value_scores() {
     assert_eq!(signals["a/cheap"].popularity_share, Some(1.0));
     assert_eq!(signals["b/none"].popularity_share, Some(0.5));
     assert_eq!(signals["a/cheap"].aa_coding_index, Some(60));
-
-    // Meta records the pass.
-    assert_eq!(
-        catalog.get_meta("ranked_count").unwrap().as_deref(),
-        Some("2")
-    );
-    assert_eq!(
-        catalog.get_meta("rank_ruleset").unwrap().as_deref(),
-        Some("rank-v2")
-    );
 }
 
 /// Iter 43 helpers: version-gated models with priced fp16
@@ -1199,36 +1172,24 @@ fn version_gate_current_in_stale_out_missing_null() {
 
     run_processing(&catalog, PROCESSED_AT).unwrap();
 
-    // Current in: scored on the intel basis, version stored.
+    // Current in: index + version stored.
     let signals = catalog.model_signals().unwrap();
     assert_eq!(signals["m/current"].aa_intelligence_index, Some(70));
     assert_eq!(signals["m/current"].aa_intel_version.as_deref(), Some("5"));
-    let ranks = catalog.endpoint_ranks().unwrap();
-    let current = &catalog.endpoints_for("m/current").unwrap()[0];
-    let rank = &ranks[&current.id];
-    assert_eq!(rank.rank_basis.as_deref(), Some("intel"));
-    assert!(rank.rank_score.is_some());
-    // Stale out: gated to NULL, flagged.
+    // Stale out: gated to NULL.
     assert_eq!(signals["m/stale"].aa_intelligence_index, None);
     assert_eq!(signals["m/stale"].aa_intel_version, None);
-    let stale = &catalog.endpoints_for("m/stale").unwrap()[0];
-    assert_eq!(ranks[&stale.id].rank_score, None);
     // Unversioned under a known current: gated out too.
     assert_eq!(signals["m/unversioned"].aa_intelligence_index, None);
-    let unv = &catalog.endpoints_for("m/unversioned").unwrap()[0];
-    assert_eq!(ranks[&unv.id].rank_score, None);
-    // Flags explain each outcome.
-    let top: serde_json::Value =
-        serde_json::from_str(&catalog.get_meta("top_models").unwrap().unwrap()).unwrap();
-    assert!(top["m/current"]["flags"].as_array().unwrap().is_empty());
-    assert_eq!(
-        top["m/stale"]["flags"],
-        serde_json::json!(["stale-version"])
-    );
-    assert_eq!(
-        top["m/unversioned"]["flags"],
-        serde_json::json!(["no-current-score"])
-    );
+    // Task costs don't need intel: every priced endpoint is costed.
+    let ranks = catalog.endpoint_ranks().unwrap();
+    for model in ["m/current", "m/stale", "m/unversioned"] {
+        let ep = &catalog.endpoints_for(model).unwrap()[0];
+        assert!(
+            (ranks[&ep.id].rank_cost_task.unwrap() - 0.01).abs() < 1e-9,
+            "{model} costed"
+        );
+    }
 }
 
 /// Iter 43: without a known current version the gate stays open —
@@ -1249,11 +1210,7 @@ fn version_gate_open_without_current() {
     assert_eq!(signals["m/plain"].aa_intelligence_index, Some(70));
     let ep = &catalog.endpoints_for("m/plain").unwrap()[0];
     let ranks = catalog.endpoint_ranks().unwrap();
-    assert_eq!(ranks[&ep.id].rank_basis.as_deref(), Some("intel"));
-    assert!(ranks[&ep.id].rank_score.is_some());
-    let top: serde_json::Value =
-        serde_json::from_str(&catalog.get_meta("top_models").unwrap().unwrap()).unwrap();
-    assert!(top["m/plain"]["flags"].as_array().unwrap().is_empty());
+    assert!((ranks[&ep.id].rank_cost_task.unwrap() - 0.01).abs() < 1e-9);
 }
 
 /// Iter 43: AA direct records join by exact slug or normalized id,
@@ -1302,17 +1259,18 @@ fn aa_direct_join_overrides_and_cost_wins() {
     let ranks = catalog.endpoint_ranks().unwrap();
     let ep = &catalog.endpoints_for("m/aa-exact").unwrap()[0];
     assert_eq!(ranks[&ep.id].rank_cost_task, Some(0.005));
-    assert!((ranks[&ep.id].rank_efficiency.unwrap() - 0.01 / 0.015).abs() < 1e-9);
 }
 
-/// Iter 43: the bracket takes top usage with absolute share and a
-/// score; ends, flags, and the TOP rollup follow.
+/// Iter 43 (pools-only since Iter 57): the bracket takes top
+/// usage with absolute share — no score requirement. Ghost joins
+/// despite being unpriceable; tiny misses the share floor; quiet
+/// is unmeasured.
 #[test]
-fn brackets_ends_flags_and_top_rollup() {
+fn bracket_takes_top_usage_with_share() {
     let (_dir, catalog) = v2_db("v2-bracket");
     // big: popular, good, cheap. mid: popular, best, pricier. tiny:
-    // scored but below the share floor. ghost: popular but
-    // unpriceable (unscored). quiet: scored but unmeasured.
+    // below the share floor. ghost: popular but unpriceable.
+    // quiet: unmeasured.
     for (id, coding, price) in [
         ("m/big", 60, Some("0.0000002")),
         ("m/mid", 90, Some("0.000001")),
@@ -1351,36 +1309,52 @@ fn brackets_ends_flags_and_top_rollup() {
 
     let bracket: serde_json::Value =
         serde_json::from_str(&catalog.get_meta("bracket").unwrap().unwrap()).unwrap();
-    // tiny (0.09% share) misses the 0.5% floor; ghost is unscored.
-    assert_eq!(bracket["members"], serde_json::json!(["m/big", "m/mid"]));
-    // low end: cheapest at/above quality 40 → big ($0.002/task).
-    assert_eq!(bracket["low_end"]["model"], serde_json::json!("m/big"));
-    // think end: best performance under $0.05/task → mid (90).
-    assert_eq!(bracket["think_end"]["model"], serde_json::json!("m/mid"));
-    let top: serde_json::Value =
-        serde_json::from_str(&catalog.get_meta("top_models").unwrap().unwrap()).unwrap();
-    assert_eq!(top["m/big"]["bracket"], serde_json::json!(true));
-    assert!(top["m/big"]["flags"].as_array().unwrap().is_empty());
-    assert_eq!(top["m/tiny"]["bracket"], serde_json::json!(false));
+    // tiny (0.09% share) misses the 0.5% floor; quiet is unmeasured.
     assert_eq!(
-        top["m/ghost"]["flags"],
-        serde_json::json!(["no-price", "popular-but-unscored"])
+        bracket["members"],
+        serde_json::json!(["m/big", "m/ghost", "m/mid"])
     );
-    assert_eq!(top["m/quiet"]["flags"], serde_json::json!(["no-activity"]));
+    assert_eq!(bracket["top_n"], serde_json::json!(25));
+    assert!(bracket.get("low_end").is_none(), "no ends anymore");
+    assert!(
+        catalog.get_meta("top_models").unwrap().is_none(),
+        "no TOP rollup anymore"
+    );
 }
 
-/// Iter 43: the v9→v10 jump adds the activity, version, and v2 rank
-/// columns (NULL until the next processing run) and bumps the
-/// version. Re-init is idempotent.
+/// Iter 57: the v10→v11 jump drops the value-score columns
+/// (keeping the task cost), deletes the retired metas, and bumps
+/// the version. Re-init is idempotent.
 #[test]
-fn migration_v9_to_v10_adds_score_columns() {
+fn migration_v10_to_v11_drops_score_columns() {
     use rusqlite::{params, Connection};
 
-    let dir = common::scratch("migrate-v10");
-    let db = dir.join("v9.db");
+    let dir = common::scratch("migrate-v11");
+    let db = dir.join("v10.db");
     {
         let conn = Connection::open(&db).unwrap();
         conn.execute_batch(pennyrouter_catalog::V1_DDL).unwrap();
+        // v10 shape: all rank columns present.
+        for column in [
+            "rank_score",
+            "rank_quality",
+            "rank_efficiency",
+            "rank_popularity",
+            "rank_activity",
+            "rank_cost_task",
+            "rank_basis",
+            "rank_ruleset",
+            "ranked_at",
+        ] {
+            let ty = if column == "rank_basis" || column == "rank_ruleset" || column == "ranked_at"
+            {
+                "TEXT"
+            } else {
+                "REAL"
+            };
+            conn.execute_batch(&format!("ALTER TABLE endpoints ADD COLUMN {column} {ty}"))
+                .unwrap();
+        }
         conn.execute(
             "INSERT INTO models (model_id, name, source, payload, fetched_at)
              VALUES (?1, 'n', 'openrouter', '{}', 't')",
@@ -1388,13 +1362,19 @@ fn migration_v9_to_v10_adds_score_columns() {
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO endpoints (model_id, provider_name, payload, fetched_at)
-             VALUES (?1, 'p', '{}', 't')",
+            "INSERT INTO endpoints (model_id, provider_name, payload, fetched_at,
+                                    rank_score, rank_cost_task)
+             VALUES (?1, 'p', '{}', 't', 36.0, 0.01)",
             params!["m/id"],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO sync_meta (key, value) VALUES ('schema_version', '9')",
+            "INSERT INTO sync_meta (key, value) VALUES ('schema_version', '10')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_meta (key, value) VALUES ('top_models', '{}')",
             [],
         )
         .unwrap();
@@ -1403,16 +1383,36 @@ fn migration_v9_to_v10_adds_score_columns() {
     let catalog = Catalog::open(&db).unwrap();
     catalog.init().unwrap();
     catalog.init().unwrap();
-    let signals = catalog.model_signals().unwrap();
-    assert_eq!(signals["m/id"].activity_level, None);
-    assert_eq!(signals["m/id"].aa_intel_version, None);
+    // Score columns are gone; the task cost survives.
     let ranks = catalog.endpoint_ranks().unwrap();
     let ep = &catalog.endpoints_for("m/id").unwrap()[0];
-    assert_eq!(ranks[&ep.id].rank_activity, None);
-    assert_eq!(ranks[&ep.id].rank_cost_task, None);
+    assert_eq!(ranks[&ep.id].rank_cost_task, Some(0.01));
+    let conn = Connection::open(&db).unwrap();
+    let columns: Vec<String> = conn
+        .prepare("PRAGMA table_info(endpoints)")
+        .unwrap()
+        .query_map([], |r| r.get::<_, String>(1))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    for dropped in [
+        "rank_score",
+        "rank_quality",
+        "rank_efficiency",
+        "rank_popularity",
+        "rank_activity",
+        "rank_basis",
+        "rank_ruleset",
+        "ranked_at",
+    ] {
+        assert!(!columns.contains(&dropped.to_string()), "{dropped} gone");
+    }
+    assert!(columns.contains(&"rank_cost_task".to_string()));
+    // Retired metas are deleted; version bumped.
+    assert_eq!(catalog.get_meta("top_models").unwrap(), None);
     assert_eq!(
         catalog.get_meta("schema_version").unwrap().as_deref(),
-        Some("10")
+        Some("12")
     );
 }
 
@@ -1489,12 +1489,11 @@ fn benchmark_backfill_fills_missing_intelligence_only() {
         "missing embedded score backfilled by slug"
     );
 
-    // The backfilled model now scores on the intel basis instead of
-    // going unscored.
+    // The backfilled model keeps its priced task cost like any
+    // other model.
     let ranks = catalog.endpoint_ranks().unwrap();
     let gap = &catalog.endpoints_for("b/gap").unwrap()[0];
-    assert_eq!(ranks[&gap.id].rank_basis.as_deref(), Some("intel"));
-    assert!(ranks[&gap.id].rank_score.is_some());
+    assert!(ranks[&gap.id].rank_cost_task.is_some());
 }
 
 /// Iter 49: the agent pool ranks the top-20 usage slugs excluding
@@ -1590,4 +1589,48 @@ fn agent_pool_empty_without_popularity() {
         serde_json::from_str(&catalog.get_meta("agent_top20").unwrap().unwrap()).unwrap();
     assert_eq!(agent["members"], serde_json::json!([]));
     assert!(pennyrouter_catalog::read_agent_top20(&catalog).is_empty());
+}
+
+/// Iter 59: `architecture.output_modalities` lands in its own
+/// column; missing reads as absent (unknown passes text gates).
+#[test]
+fn processing_stores_output_modalities() {
+    let (_dir, catalog) = v2_db("v2-modalities");
+    let model = |id: &str, arch: &str| ModelRow {
+        model_id: id.into(),
+        name: id.into(),
+        source: "test".into(),
+        payload: format!("{{\"id\":\"{id}\",{arch}}}"),
+        fetched_at: "t".into(),
+    };
+    catalog
+        .insert_model(&model(
+            "m/text",
+            "\"architecture\":{\"output_modalities\":[\"text\"]}",
+        ))
+        .unwrap();
+    catalog
+        .insert_model(&model(
+            "m/multi",
+            "\"architecture\":{\"output_modalities\":[\"text\",\"audio\"]}",
+        ))
+        .unwrap();
+    catalog
+        .insert_model(&model("m/bare", "\"description\":\"no architecture\""))
+        .unwrap();
+    for id in ["m/text", "m/multi", "m/bare"] {
+        catalog
+            .insert_endpoint(&v2_endpoint(id, "P", Some("0.000001")))
+            .unwrap();
+    }
+
+    run_processing(&catalog, PROCESSED_AT).unwrap();
+
+    let modalities = catalog.model_modalities().unwrap();
+    assert_eq!(modalities.get("m/text"), Some(&vec!["text".to_string()]));
+    assert_eq!(
+        modalities.get("m/multi"),
+        Some(&vec!["text".to_string(), "audio".to_string()])
+    );
+    assert_eq!(modalities.get("m/bare"), None);
 }

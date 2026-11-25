@@ -1,13 +1,14 @@
-//! Schema v10: fixed core columns + raw JSON payloads + indexed columns
+//! Schema v12: fixed core columns + raw JSON payloads + indexed columns
 //! (deterministic from Phase 2a, model-scored from Phase 2b, tool
 //! support from Iter 22, decision-modality support from Iter 24,
 //! Artificial Analysis indexes from Iter 31, scoring-audit rename
-//! from Iter 32, speed/availability + value score from Iter 34,
-//! exact raw quantization from Iter 36, score-v2 activity +
-//! intel-version columns from Iter 43).
+//! from Iter 32, speed/availability + task cost from Iter 34 (the
+//! rest of the value score dropped in Iter 57), exact raw
+//! quantization from Iter 36, score-v2 activity + intel-version
+//! columns from Iter 43, output modalities from Iter 59).
 
 /// Current schema version, recorded in `sync_meta` on init.
-pub const SCHEMA_VERSION: u32 = 10;
+pub const SCHEMA_VERSION: u32 = 12;
 
 pub const DDL: &str = "
 CREATE TABLE IF NOT EXISTS models (
@@ -24,7 +25,8 @@ CREATE TABLE IF NOT EXISTS models (
     activity_level        REAL,
     activity_trend        REAL,
     popularity_tokens     INTEGER,
-    popularity_share      REAL
+    popularity_share      REAL,
+    output_modalities     TEXT
 );
 CREATE TABLE IF NOT EXISTS endpoints (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -51,15 +53,7 @@ CREATE TABLE IF NOT EXISTS endpoints (
     latency_ms        REAL,
     throughput_tps    REAL,
     uptime_pct        REAL,
-    rank_score        REAL,
-    rank_quality      REAL,
-    rank_efficiency   REAL,
-    rank_popularity   REAL,
-    rank_activity     REAL,
     rank_cost_task    REAL,
-    rank_basis        TEXT,
-    rank_ruleset      TEXT,
-    ranked_at         TEXT,
     FOREIGN KEY (model_id) REFERENCES models(model_id)
 );
 CREATE INDEX IF NOT EXISTS idx_endpoints_model ON endpoints(model_id);
@@ -92,15 +86,21 @@ pub const ENDPOINT_INDEXED_COLUMNS: &[(&str, &str)] = &[
     ("latency_ms", "REAL"),
     ("throughput_tps", "REAL"),
     ("uptime_pct", "REAL"),
-    ("rank_score", "REAL"),
-    ("rank_quality", "REAL"),
-    ("rank_efficiency", "REAL"),
-    ("rank_popularity", "REAL"),
-    ("rank_activity", "REAL"),
     ("rank_cost_task", "REAL"),
-    ("rank_basis", "TEXT"),
-    ("rank_ruleset", "TEXT"),
-    ("ranked_at", "TEXT"),
+];
+
+/// Endpoint columns dropped in v11 (Iter 57: the value-score
+/// components). Migration drops them when present so v10 verdicts
+/// narrow to the surviving task-cost column.
+pub const ENDPOINT_DROPPED_COLUMNS: &[&str] = &[
+    "rank_score",
+    "rank_quality",
+    "rank_efficiency",
+    "rank_popularity",
+    "rank_activity",
+    "rank_basis",
+    "rank_ruleset",
+    "ranked_at",
 ];
 
 /// Indexed columns on `models` (Iter 31) — mirrors the endpoints
@@ -116,6 +116,7 @@ pub const MODEL_INDEXED_COLUMNS: &[(&str, &str)] = &[
     ("activity_trend", "REAL"),
     ("popularity_tokens", "INTEGER"),
     ("popularity_share", "REAL"),
+    ("output_modalities", "TEXT"),
 ];
 
 /// Endpoint columns renamed in v7 (Iter 32: judging → scoring), as
@@ -139,6 +140,12 @@ pub const LEGACY_SCORE_META_KEYS: &[&str] = &[
     "judge_backend",
     "judge_calls",
     "judge_spend_usd",
+    // Value-score metas retired in v11 (Iter 57): nothing writes or
+    // reads them anymore.
+    "top_models",
+    "rank_ruleset",
+    "ranked_at",
+    "ranked_count",
 ];
 
 /// Phase 1 layout, kept so the migration test can build a legacy DB.
