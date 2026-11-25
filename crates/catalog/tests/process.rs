@@ -1179,8 +1179,14 @@ fn v2_endpoint(model_id: &str, provider: &str, price: Option<&str>) -> EndpointR
 fn version_gate_current_in_stale_out_missing_null() {
     let (_dir, catalog) = v2_db("v2-gate");
     for (id, aa) in [
-        ("m/current", "\"intelligence_index\":70,\"intelligence_index_version\":\"5\""),
-        ("m/stale", "\"intelligence_index\":70,\"intelligence_index_version\":\"4\""),
+        (
+            "m/current",
+            "\"intelligence_index\":70,\"intelligence_index_version\":\"5\"",
+        ),
+        (
+            "m/stale",
+            "\"intelligence_index\":70,\"intelligence_index_version\":\"4\"",
+        ),
         ("m/unversioned", "\"intelligence_index\":70"),
         ("m/none", ""),
     ] {
@@ -1196,10 +1202,7 @@ fn version_gate_current_in_stale_out_missing_null() {
     // Current in: scored on the intel basis, version stored.
     let signals = catalog.model_signals().unwrap();
     assert_eq!(signals["m/current"].aa_intelligence_index, Some(70));
-    assert_eq!(
-        signals["m/current"].aa_intel_version.as_deref(),
-        Some("5")
-    );
+    assert_eq!(signals["m/current"].aa_intel_version.as_deref(), Some("5"));
     let ranks = catalog.endpoint_ranks().unwrap();
     let current = &catalog.endpoints_for("m/current").unwrap()[0];
     let rank = &ranks[&current.id];
@@ -1218,7 +1221,10 @@ fn version_gate_current_in_stale_out_missing_null() {
     let top: serde_json::Value =
         serde_json::from_str(&catalog.get_meta("top_models").unwrap().unwrap()).unwrap();
     assert!(top["m/current"]["flags"].as_array().unwrap().is_empty());
-    assert_eq!(top["m/stale"]["flags"], serde_json::json!(["stale-version"]));
+    assert_eq!(
+        top["m/stale"]["flags"],
+        serde_json::json!(["stale-version"])
+    );
     assert_eq!(
         top["m/unversioned"]["flags"],
         serde_json::json!(["no-current-score"])
@@ -1265,7 +1271,11 @@ fn aa_direct_join_overrides_and_cost_wins() {
         .insert_model(&v2_model("vnd/dated-model-20260101", "\"coding_index\":50"))
         .unwrap();
     catalog
-        .insert_endpoint(&v2_endpoint("vnd/dated-model-20260101", "P", Some("0.000002")))
+        .insert_endpoint(&v2_endpoint(
+            "vnd/dated-model-20260101",
+            "P",
+            Some("0.000002"),
+        ))
         .unwrap();
     catalog
         .set_meta(
@@ -1312,7 +1322,9 @@ fn brackets_ends_flags_and_top_rollup() {
         catalog
             .insert_model(&v2_model(id, &format!("\"coding_index\":{coding}")))
             .unwrap();
-        catalog.insert_endpoint(&v2_endpoint(id, "P", price)).unwrap();
+        catalog
+            .insert_endpoint(&v2_endpoint(id, "P", price))
+            .unwrap();
     }
     // Ghost is popular but unpriceable: no pricing block at all.
     catalog

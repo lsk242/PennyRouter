@@ -932,7 +932,9 @@ async fn ui_models_tab_mirrors_catalog_models_page() {
     assert!(inspector.contains("#1 (30.0)"), "Exp ranked first");
     assert!(inspector.contains("#2 (10.0)"), "Cheap ranked second");
     let preview: serde_json::Value = client()
-        .get(format!("http://{gw}/ui/preview?model=openrouter/pair/low&top=5"))
+        .get(format!(
+            "http://{gw}/ui/preview?model=openrouter/pair/low&top=5"
+        ))
         .send()
         .await
         .unwrap()
@@ -991,7 +993,10 @@ async fn ui_models_top_tab_mirrors_catalog_page() {
     let alpha = models.find("top/alpha").unwrap();
     let beta = models.find("top/beta").unwrap();
     let ghost = models.find("top/ghost").unwrap();
-    assert!(alpha < beta && beta < ghost, "bracket score-desc, flagged last");
+    assert!(
+        alpha < beta && beta < ghost,
+        "bracket score-desc, flagged last"
+    );
     for line in [
         "rank_score = 80.00 × 0.5000 × 0.9000 = 36.0",
         "activity   = 0.9000 × (1 + +0.1000) / 1.10 = 0.9000",

@@ -1224,7 +1224,7 @@ async fn ui_page(State(state): State<AppState>, Query(params): Query<UiParams>) 
         });
         flagged.sort_by(|a, b| a.0.cmp(&b.0));
         let rows: Vec<&(String, pennyrouter_catalog::TopModel)> =
-            bracket.into_iter().chain(flagged.into_iter()).collect();
+            bracket.into_iter().chain(flagged).collect();
         if rows.is_empty() {
             page.push_str("<p>No models match this tab.</p>");
             return;
@@ -3027,7 +3027,9 @@ async fn smart_completion(
                     )
                     .await;
                     record_throttle(state, router, &retry_decision, &response);
-                    state.metrics.routing_order(retry_decision.ordering, "smart");
+                    state
+                        .metrics
+                        .routing_order(retry_decision.ordering, "smart");
                     return with_smart_headers(
                         with_routed_headers(response, &retry_decision),
                         &ctx,
@@ -3098,7 +3100,7 @@ async fn smart_completion(
                     .await;
                     record_throttle(state, router, &decision, &response);
                     state.metrics.routing_order(decision.ordering, "smart");
-            with_smart_headers(with_routed_headers(response, &decision), &ctx)
+                    with_smart_headers(with_routed_headers(response, &decision), &ctx)
                 }
                 Err(rejection) => with_smart_headers(rejection_response(&rejection), &ctx),
             }

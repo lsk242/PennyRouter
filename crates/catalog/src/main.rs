@@ -240,11 +240,8 @@ fn run() -> Result<(), String> {
                 }
                 Err(e) => println!("benchmarks fetch failed ({e}): publishing without backfill"),
             }
-            match pennyrouter_catalog::fetch_benchmarks_task(
-                "https://openrouter.ai",
-                &key,
-                "code",
-            ) {
+            match pennyrouter_catalog::fetch_benchmarks_task("https://openrouter.ai", &key, "code")
+            {
                 Ok(code) => {
                     println!("benchmarks: {} code rows", code.intelligence.len());
                     pennyrouter_catalog::store_task_benchmarks(&catalog, "code", &code)

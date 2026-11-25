@@ -367,9 +367,13 @@ fn artifact_dir(test: &str) -> std::path::PathBuf {
             r#"{"ruleset":"rank-v2","members":["top/alpha","top/beta"]}"#,
         )
         .unwrap();
-    catalog.set_meta("aa_as_of", "2026-11-24T10:00:00Z").unwrap();
+    catalog
+        .set_meta("aa_as_of", "2026-11-24T10:00:00Z")
+        .unwrap();
     catalog.set_meta("aa_intel_version", "5").unwrap();
-    catalog.set_meta("popular_as_of", "2026-11-24T09:00:00Z").unwrap();
+    catalog
+        .set_meta("popular_as_of", "2026-11-24T09:00:00Z")
+        .unwrap();
     catalog
         .set_meta(
             "fetch_health",
@@ -863,7 +867,10 @@ fn top_tab_lists_bracket_with_arithmetic_and_flags() {
     let alpha = top.find("top/alpha").unwrap();
     let beta = top.find("top/beta").unwrap();
     let ghost = top.find("top/ghost").unwrap();
-    assert!(alpha < beta && beta < ghost, "bracket score-desc, flagged last");
+    assert!(
+        alpha < beta && beta < ghost,
+        "bracket score-desc, flagged last"
+    );
     for line in [
         "rank_score = 80.00 × 0.5000 × 0.9000 = 36.0",
         "activity   = 0.9000 × (1 + +0.1000) / 1.10 = 0.9000",
@@ -903,7 +910,10 @@ fn overview_shows_bracket_counts_and_fetch_health() {
 
     let index = get(&server, "/");
     assert!(index.contains("Top-usage bracket"), "bracket section");
-    assert!(index.contains("<td>2</td><td>0</td><td>1</td>"), "2 in, 0 stale, 1 popular");
+    assert!(
+        index.contains("<td>2</td><td>0</td><td>1</td>"),
+        "2 in, 0 stale, 1 popular"
+    );
     assert!(index.contains("Fetch health"), "health section");
     assert!(index.contains("Artificial Analysis"), "AA row");
     assert!(index.contains("2026-11-24T10:00:00Z"), "AA citation");
@@ -937,10 +947,16 @@ fn top_tab_empty_artifact_degrades_gracefully() {
 
     let top = get(&server, "/models?tab=top");
     assert!(top.contains("200 OK"), "got: {top}");
-    assert!(top.contains("No TOP data in this artifact"), "explains itself");
+    assert!(
+        top.contains("No TOP data in this artifact"),
+        "explains itself"
+    );
     assert!(!top.contains("NaN"), "no NaN");
     let index = get(&server, "/");
-    assert!(index.contains("No TOP data in this artifact"), "overview explains");
+    assert!(
+        index.contains("No TOP data in this artifact"),
+        "overview explains"
+    );
     assert!(index.contains("never"), "health reads never fetched");
 }
 

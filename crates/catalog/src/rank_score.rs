@@ -105,9 +105,7 @@ pub fn activity_factor(level: Option<f64>, trend: Option<f64>) -> f64 {
     let Some(level) = level.filter(|l| l.is_finite() && *l >= 0.0) else {
         return ACTIVITY_UNKNOWN;
     };
-    let trend = trend
-        .filter(|t| t.is_finite() && *t >= 0.0)
-        .unwrap_or(1.0);
+    let trend = trend.filter(|t| t.is_finite() && *t >= 0.0).unwrap_or(1.0);
     let boost = (trend - 1.0).clamp(-TREND_BOOST_MAX, TREND_BOOST_MAX);
     level.clamp(0.0, 1.0) * (1.0 + boost) / (1.0 + TREND_BOOST_MAX)
 }
@@ -298,15 +296,15 @@ mod tests {
             activity_factor(Some(0.5), Some(1.5))
         );
         // Garbage levels read as missing; garbage trends read flat.
-        assert_eq!(
-            activity_factor(Some(f64::NAN), Some(3.0)),
-            ACTIVITY_UNKNOWN
-        );
+        assert_eq!(activity_factor(Some(f64::NAN), Some(3.0)), ACTIVITY_UNKNOWN);
         assert_eq!(
             activity_factor(Some(0.5), Some(f64::NAN)),
             activity_factor(Some(0.5), Some(1.0))
         );
-        assert_eq!(activity_factor(Some(5.0), Some(1.0)), activity_factor(Some(1.0), Some(1.0)));
+        assert_eq!(
+            activity_factor(Some(5.0), Some(1.0)),
+            activity_factor(Some(1.0), Some(1.0))
+        );
     }
 
     #[test]

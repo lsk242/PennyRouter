@@ -347,15 +347,12 @@ pub fn aggregate_task_code_share(body: &Value) -> Option<f64> {
             Value::Number(n) => n.as_u64(),
             _ => None,
         });
-        match (label, tokens) {
-            (Some(label), Some(tokens)) => {
-                any = true;
-                total += tokens;
-                if label == "code" || label == "coding" {
-                    code += tokens;
-                }
+        if let (Some(label), Some(tokens)) = (label, tokens) {
+            any = true;
+            total += tokens;
+            if label == "code" || label == "coding" {
+                code += tokens;
             }
-            _ => {}
         }
     }
     if !any || total == 0 {

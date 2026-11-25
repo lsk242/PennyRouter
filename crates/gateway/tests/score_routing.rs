@@ -210,11 +210,7 @@ fn build_db_legacy(path: &std::path::Path) {
     }
 }
 
-async fn spawn_gateway(
-    upstream: SocketAddr,
-    db: &std::path::Path,
-    mode: OrderMode,
-) -> SocketAddr {
+async fn spawn_gateway(upstream: SocketAddr, db: &std::path::Path, mode: OrderMode) -> SocketAddr {
     let router = Arc::new(
         pennyrouter_gateway::routing::Router::load(db)
             .expect("router loads")
@@ -300,7 +296,10 @@ async fn low_picks_cheapest_above_floor_in_bracket() {
     assert_eq!(res.status(), StatusCode::OK);
     assert_eq!(provider_of(&res), "Cheap");
     let guard = seen.lock().unwrap();
-    assert_eq!(guard.models.get("Cheap").map(String::as_str), Some("m/pop-cheap"));
+    assert_eq!(
+        guard.models.get("Cheap").map(String::as_str),
+        Some("m/pop-cheap")
+    );
 }
 
 #[tokio::test]
@@ -315,7 +314,10 @@ async fn think_picks_best_under_cap() {
     assert_eq!(res.status(), StatusCode::OK);
     assert_eq!(provider_of(&res), "Best");
     let guard = seen.lock().unwrap();
-    assert_eq!(guard.models.get("Best").map(String::as_str), Some("m/pop-best"));
+    assert_eq!(
+        guard.models.get("Best").map(String::as_str),
+        Some("m/pop-best")
+    );
 }
 
 #[tokio::test]
@@ -427,11 +429,7 @@ fn previews_match_score_routing() {
     assert!(low.rejection.is_none(), "{:?}", low.rejection);
     assert_eq!(low.fresh.as_ref().unwrap().provider, "Cheap");
     // Below-floor and out-of-bracket offerings never list.
-    let models: Vec<&str> = low
-        .candidates
-        .iter()
-        .map(|c| c.model_id.as_str())
-        .collect();
+    let models: Vec<&str> = low.candidates.iter().map(|c| c.model_id.as_str()).collect();
     assert_eq!(models, vec!["m/pop-cheap", "m/pop-best", "m/pop-pricey"]);
     let think = router.preview("openrouter/pair/think", None, 5);
     assert_eq!(think.fresh.as_ref().unwrap().provider, "Best");
@@ -480,11 +478,7 @@ async fn legacy_mode_routes_full_list_legacy() {
     let low = router.preview("openrouter/pair/low", None, 5);
     assert!(low.rejection.is_none(), "{:?}", low.rejection);
     assert_eq!(low.fresh.as_ref().unwrap().provider, "Sneaky");
-    let models: Vec<&str> = low
-        .candidates
-        .iter()
-        .map(|c| c.model_id.as_str())
-        .collect();
+    let models: Vec<&str> = low.candidates.iter().map(|c| c.model_id.as_str()).collect();
     assert_eq!(
         models,
         vec![

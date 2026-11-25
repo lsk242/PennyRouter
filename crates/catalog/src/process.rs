@@ -111,7 +111,10 @@ pub fn run_processing(catalog: &Catalog, processed_at: &str) -> Result<ProcessSu
             // one), then the backfill (unversioned). The gate below
             // NULLs whatever isn't provably current.
             let merged = aa
-                .and_then(|aa| aa.intelligence.map(|index| (index, current_version.clone())))
+                .and_then(|aa| {
+                    aa.intelligence
+                        .map(|index| (index, current_version.clone()))
+                })
                 .or_else(|| {
                     extract_aa_index(&payload, "intelligence_index")
                         .map(|index| (index, extract_aa_version(&payload)))
@@ -456,9 +459,7 @@ fn run_brackets(
     // tie-breaks run reversed: smallest model/provider wins.
     let think_end = scored
         .iter()
-        .filter(|o| {
-            in_bracket.contains(o.model_id.as_str()) && o.cost_task <= THINK_MAX_COST_TASK
-        })
+        .filter(|o| in_bracket.contains(o.model_id.as_str()) && o.cost_task <= THINK_MAX_COST_TASK)
         .max_by(|a, b| {
             a.performance
                 .total_cmp(&b.performance)
@@ -667,10 +668,7 @@ pub fn read_top_models(catalog: &Catalog) -> HashMap<String, TopModel> {
                             efficiency: num("efficiency"),
                             activity: num("activity"),
                             cost_task: num("cost_task"),
-                            basis: v
-                                .get("basis")
-                                .and_then(Value::as_str)
-                                .map(str::to_string),
+                            basis: v.get("basis").and_then(Value::as_str).map(str::to_string),
                             level: num("level"),
                             trend: num("trend"),
                             bracket: v.get("bracket").and_then(Value::as_bool).unwrap_or(false),
@@ -1178,7 +1176,10 @@ mod tests {
 
     #[test]
     fn slug_normalization_strips_dates_not_versions() {
-        assert_eq!(normalize_slug("claude-opus-5.5-20260921"), "claude-opus-5-5");
+        assert_eq!(
+            normalize_slug("claude-opus-5.5-20260921"),
+            "claude-opus-5-5"
+        );
         assert_eq!(normalize_slug("gpt_6.1-terra"), "gpt-6-1-terra");
         assert_eq!(normalize_slug("llama-3"), "llama-3");
         assert_eq!(normalize_slug("m"), "m");
@@ -1203,14 +1204,24 @@ mod tests {
         );
         // Dated OpenRouter id meets the bare AA slug.
         assert_eq!(
-            join_aa(&aa, &index, "z-ai/glm-5.3-flash-20260826", "z-ai/glm-5.3-flash-20260826")
-                .map(|m| m.slug.as_str()),
+            join_aa(
+                &aa,
+                &index,
+                "z-ai/glm-5.3-flash-20260826",
+                "z-ai/glm-5.3-flash-20260826"
+            )
+            .map(|m| m.slug.as_str()),
             None,
         );
         assert_eq!(
-            join_aa(&aa, &index, "glm-5-flash-20260826", "x/glm-5-flash-20260826")
-                .unwrap()
-                .slug,
+            join_aa(
+                &aa,
+                &index,
+                "glm-5-flash-20260826",
+                "x/glm-5-flash-20260826"
+            )
+            .unwrap()
+            .slug,
             "glm-5-flash"
         );
         // No fuzzy name matching.

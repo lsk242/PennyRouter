@@ -127,11 +127,13 @@ fn get_bytes(
 /// another page follows. Stops at `total_pages` even when `has_more`
 /// lies, so a confused pager can't spin to the cap.
 fn aggregate_page(body: &Value, page: u32) -> (Vec<AaModel>, Option<String>, bool) {
-    let version = body.get("intelligence_index_version").and_then(|v| match v {
-        Value::String(s) if !s.is_empty() => Some(s.clone()),
-        Value::Number(n) => Some(n.to_string()),
-        _ => None,
-    });
+    let version = body
+        .get("intelligence_index_version")
+        .and_then(|v| match v {
+            Value::String(s) if !s.is_empty() => Some(s.clone()),
+            Value::Number(n) => Some(n.to_string()),
+            _ => None,
+        });
     let total_pages = body
         .get("pagination")
         .and_then(|p| p.get("total_pages"))
@@ -249,10 +251,7 @@ pub fn read_aa_models(catalog: &Catalog) -> HashMap<String, AaModel> {
                         slug.clone(),
                         AaModel {
                             slug,
-                            name: v
-                                .get("name")
-                                .and_then(Value::as_str)
-                                .map(str::to_string),
+                            name: v.get("name").and_then(Value::as_str).map(str::to_string),
                             intelligence: v.get("aa_intel_index").and_then(Value::as_i64),
                             coding: v.get("aa_coding_index").and_then(Value::as_i64),
                             agentic: v.get("aa_agentic_index").and_then(Value::as_i64),
@@ -345,10 +344,7 @@ mod tests {
         let numbered = json!({"intelligence_index_version": 5,
             "pagination": {"page": 2, "total_pages": 2, "has_more": true},
             "data": []});
-        assert_eq!(
-            aggregate_page(&numbered, 2).1.as_deref(),
-            Some("5")
-        );
+        assert_eq!(aggregate_page(&numbered, 2).1.as_deref(), Some("5"));
         assert!(!aggregate_page(&numbered, 2).2);
         assert!(aggregate_page(&json!({}), 1).0.is_empty());
     }
@@ -388,10 +384,7 @@ mod tests {
         assert_eq!(alpha.cost_per_task, Some(0.0123));
         assert_eq!(alpha.price_input_m, Some(1.5));
         assert_eq!(alpha.price_output_m, None);
-        assert_eq!(
-            read_aa_intel_version(&catalog).as_deref(),
-            Some("4.3")
-        );
+        assert_eq!(read_aa_intel_version(&catalog).as_deref(), Some("4.3"));
         assert_eq!(
             catalog.get_meta("aa_as_of").unwrap().as_deref(),
             Some("2026-11-20T00:00:00Z")

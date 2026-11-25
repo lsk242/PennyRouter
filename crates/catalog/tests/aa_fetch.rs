@@ -44,11 +44,7 @@ fn stub_server(
                 let n = stream.read(&mut buf).unwrap();
                 assert!(n > 0, "stub server: client closed mid-request");
                 raw.extend_from_slice(&buf[..n]);
-                if let Some(i) = raw
-                    .windows(4)
-                    .position(|w| w == b"\r\n\r\n")
-                    .map(|i| i + 4)
-                {
+                if let Some(i) = raw.windows(4).position(|w| w == b"\r\n\r\n").map(|i| i + 4) {
                     break i;
                 }
             };

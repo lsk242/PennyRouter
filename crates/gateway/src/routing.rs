@@ -1986,8 +1986,7 @@ impl Router {
         // oriented sort the direct path uses for Default). Long-tail
         // (Iter 45): models outside the bracket skip the ranking and
         // go cheapest-first; no bracket data means no long-tail.
-        let long_tail =
-            !snapshot.bracket.is_empty() && !snapshot.bracket.contains(model_id);
+        let long_tail = !snapshot.bracket.is_empty() && !snapshot.bracket.contains(model_id);
         let ranking = self.ranking.read().unwrap_or_else(|e| e.into_inner());
         let class = majority_class_owned(&candidates);
         let ranked = (!long_tail)
@@ -2564,10 +2563,11 @@ impl Router {
                         .is_some_and(|q| q >= pennyrouter_catalog::BRACKET_PERFORMANCE_FLOOR)
                         && o.rank_cost_task.is_some()
                 }
-                _ => o
-                    .rank_cost_task
-                    .is_some_and(|c| c <= pennyrouter_catalog::THINK_MAX_COST_TASK)
-                    && o.rank_quality.is_some(),
+                _ => {
+                    o.rank_cost_task
+                        .is_some_and(|c| c <= pennyrouter_catalog::THINK_MAX_COST_TASK)
+                        && o.rank_quality.is_some()
+                }
             })
             .collect();
         if floored.is_empty() {
@@ -2601,9 +2601,7 @@ impl Router {
         if budgeted.is_empty() {
             return Err(RouteRejection {
                 code: "budget_exceeded",
-                message: format!(
-                    "no in-bracket {tier_name} tier offering fits the price ceiling"
-                ),
+                message: format!("no in-bracket {tier_name} tier offering fits the price ceiling"),
             });
         }
         let candidates = self.skip_throttled(budgeted);
@@ -3169,9 +3167,9 @@ impl Router {
                     // on the full pool: a cooled pin re-serves only
                     // when nothing fresh remains).
                     let fresh_elsewhere = free.iter().any(|o| {
-                        !(o.provider_name == pin.provider
-                            && o.precision_class == pin.precision_class)
-                            && !self.is_throttled_pair(&o.model_id, &o.provider_name)
+                        !(self.is_throttled_pair(&o.model_id, &o.provider_name)
+                            || o.provider_name == pin.provider
+                                && o.precision_class == pin.precision_class)
                     });
                     let mine: Vec<&Offering> = if fresh_elsewhere {
                         mine.into_iter()
@@ -4393,12 +4391,7 @@ impl Router {
         // order over the full pool; unscored rows get none. Ties
         // break by identity so ranks are stable across rebuilds.
         let mut scored_idx: Vec<usize> = (0..ordered_all.len())
-            .filter(|&i| {
-                ordered_all[i]
-                    .0
-                    .rank_score
-                    .is_some_and(|s| s.is_finite())
-            })
+            .filter(|&i| ordered_all[i].0.rank_score.is_some_and(|s| s.is_finite()))
             .collect();
         scored_idx.sort_by(|&a, &b| {
             let (oa, ob) = (&ordered_all[a].0, &ordered_all[b].0);
@@ -4700,14 +4693,13 @@ impl Router {
         // out-of-bracket cheapest — mirroring the routing cascade.
         // Without bracket data (or in legacy mode) the whole pool
         // lists legacy.
-        let (inside, outside): (Vec<&Offering>, Vec<&Offering>) = if snapshot.bracket.is_empty()
-            || self.default_ordering != OrderMode::ScoreFirst
-        {
-            (base, Vec::new())
-        } else {
-            base.into_iter()
-                .partition(|o| snapshot.bracket.contains(o.model_id.as_str()))
-        };
+        let (inside, outside): (Vec<&Offering>, Vec<&Offering>) =
+            if snapshot.bracket.is_empty() || self.default_ordering != OrderMode::ScoreFirst {
+                (base, Vec::new())
+            } else {
+                base.into_iter()
+                    .partition(|o| snapshot.bracket.contains(o.model_id.as_str()))
+            };
         let floored: Vec<&Offering> = inside
             .into_iter()
             .filter(|o| Self::quality_rank(o.quality_tier.as_deref()) >= Self::tier_floor(tier))
@@ -4802,10 +4794,11 @@ impl Router {
                         .is_some_and(|q| q >= pennyrouter_catalog::BRACKET_PERFORMANCE_FLOOR)
                         && o.rank_cost_task.is_some()
                 }
-                _ => o
-                    .rank_cost_task
-                    .is_some_and(|c| c <= pennyrouter_catalog::THINK_MAX_COST_TASK)
-                    && o.rank_quality.is_some(),
+                _ => {
+                    o.rank_cost_task
+                        .is_some_and(|c| c <= pennyrouter_catalog::THINK_MAX_COST_TASK)
+                        && o.rank_quality.is_some()
+                }
             })
             .collect();
         if sorted.is_empty() {
@@ -5134,8 +5127,7 @@ impl Router {
         let class = majority_class_owned(&budgeted);
         // Long-tail (Iter 45): models outside the bracket skip the
         // ranking and list cheapest-first, like routing.
-        let long_tail =
-            !snapshot.bracket.is_empty() && !snapshot.bracket.contains(model_id);
+        let long_tail = !snapshot.bracket.is_empty() && !snapshot.bracket.contains(model_id);
         let ranked = (!long_tail)
             .then(|| {
                 ranking
@@ -6604,7 +6596,9 @@ mod tests {
             })
         );
         assert_eq!(
-            parse_virtual("openrouter/pair/coding/minindex/50").unwrap().minindex,
+            parse_virtual("openrouter/pair/coding/minindex/50")
+                .unwrap()
+                .minindex,
             Some(50)
         );
         // No `/fallback/` suffix of their own, like `low`/`think`.
@@ -7303,7 +7297,10 @@ mod tests {
     #[test]
     fn ordering_flag_defaults_and_rejects_unknown() {
         assert_eq!(parse_ordering(None), Ok(OrderMode::ScoreFirst));
-        assert_eq!(parse_ordering(Some("score_first")), Ok(OrderMode::ScoreFirst));
+        assert_eq!(
+            parse_ordering(Some("score_first")),
+            Ok(OrderMode::ScoreFirst)
+        );
         assert_eq!(parse_ordering(Some("legacy")), Ok(OrderMode::Legacy));
         assert_eq!(OrderMode::default(), OrderMode::ScoreFirst);
         for bad in ["Score_First", "LEGACY", "both", "0"] {

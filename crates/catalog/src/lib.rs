@@ -28,8 +28,8 @@ pub use aa::{
     fetch_aa_models, read_aa_intel_version, read_aa_models, store_aa_models, AaModel, AaModels,
 };
 pub use artifact::{
-    now_rfc3339, publish, read_fetch_health, record_fetch_health, sha256_hex, verify,
-    Manifest, FETCH_SOURCES,
+    now_rfc3339, publish, read_fetch_health, record_fetch_health, sha256_hex, verify, Manifest,
+    FETCH_SOURCES,
 };
 pub use benchmarks::{
     aggregate_intelligence, aggregate_openrouter_evals, aggregate_task_index, fetch_benchmarks,
@@ -39,11 +39,11 @@ pub use benchmarks::{
 pub use fetch::{fetch_openrouter, fetch_openrouter_extra, Fetched};
 pub use popular::{
     aggregate_activity, aggregate_apps, aggregate_models, aggregate_models_all,
-    aggregate_task_code_share, fetch_app_rankings, fetch_popularity, fetch_task_share, read_activity,
-    read_app_list, read_popular_tokens, read_popularity, read_task_code_share,
-    split_ranking_windows, store_app_list, store_popularity, store_task_share, AppList, ModelActivity,
-    Popularity, TaskShare, POPULAR_APPS_TOP_N, POPULAR_MODELS_TOP_N, RANKINGS_SPAN_DAYS,
-    RANKINGS_WINDOW_DAYS,
+    aggregate_task_code_share, fetch_app_rankings, fetch_popularity, fetch_task_share,
+    read_activity, read_app_list, read_popular_tokens, read_popularity, read_task_code_share,
+    split_ranking_windows, store_app_list, store_popularity, store_task_share, AppList,
+    ModelActivity, Popularity, TaskShare, POPULAR_APPS_TOP_N, POPULAR_MODELS_TOP_N,
+    RANKINGS_SPAN_DAYS, RANKINGS_WINDOW_DAYS,
 };
 pub use price::{
     balanced_profile, builtin_profiles, effective_cost, fmt_price_per_m, resolve_discount, Promos,
@@ -59,9 +59,9 @@ pub use rank::{
 };
 pub use rank_score::{
     activity_factor, compare as compare_rank, cost_per_task, efficiency, precision_factor,
-    RankInputs, RankKey, RankScore, ACTIVITY_UNKNOWN, BRACKET_MIN_SHARE,
-    BRACKET_PERFORMANCE_FLOOR, BRACKET_TOP_N, COST_HALF_CREDIT, POP_WEIGHT,
-    RULESET_VERSION as RANK_RULESET_VERSION, TASK_TOKENS, THINK_MAX_COST_TASK, TREND_BOOST_MAX,
+    RankInputs, RankKey, RankScore, ACTIVITY_UNKNOWN, BRACKET_MIN_SHARE, BRACKET_PERFORMANCE_FLOOR,
+    BRACKET_TOP_N, COST_HALF_CREDIT, POP_WEIGHT, RULESET_VERSION as RANK_RULESET_VERSION,
+    TASK_TOKENS, THINK_MAX_COST_TASK, TREND_BOOST_MAX,
 };
 pub use schema::{SCHEMA_VERSION, V1_DDL};
 pub use score::{

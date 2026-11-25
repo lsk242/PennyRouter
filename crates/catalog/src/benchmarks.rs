@@ -193,8 +193,10 @@ pub fn store_benchmarks(catalog: &Catalog, benchmarks: &Benchmarks) -> Result<()
 
 /// Persist one task slice (Iter 42): `intelligence` keeps the
 /// historical `benchmark_intel` keys; `code` takes `benchmark_code`
-/// + `benchmark_code_as_of`. Unknown tasks are a caller bug and
-/// fail loudly instead of writing a mystery key.
+/// + `benchmark_code_as_of`.
+///
+/// Unknown tasks are a caller bug and fail loudly instead of writing
+/// a mystery key.
 pub fn store_task_benchmarks(
     catalog: &Catalog,
     task_type: &str,
@@ -203,7 +205,11 @@ pub fn store_task_benchmarks(
     let (scores_key, as_of_key) = match task_type {
         "intelligence" => ("benchmark_intel", "benchmark_as_of"),
         "code" => ("benchmark_code", "benchmark_code_as_of"),
-        _ => return Err(Error::Fetch(format!("unknown benchmark task {task_type:?}"))),
+        _ => {
+            return Err(Error::Fetch(format!(
+                "unknown benchmark task {task_type:?}"
+            )))
+        }
     };
     let scores: serde_json::Map<String, Value> = benchmarks
         .intelligence

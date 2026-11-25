@@ -334,10 +334,7 @@ impl Metrics {
         for source in pennyrouter_catalog::FETCH_SOURCES {
             let ok = fetch.contains_key(*source);
             sync.insert((source.to_string(), "ok".to_string()), u64::from(ok));
-            sync.insert(
-                (source.to_string(), "missing".to_string()),
-                u64::from(!ok),
-            );
+            sync.insert((source.to_string(), "missing".to_string()), u64::from(!ok));
         }
         if let Ok(mut guard) = self.score_models.lock() {
             *guard = models;

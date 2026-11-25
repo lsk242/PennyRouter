@@ -4,7 +4,9 @@
 //! fail closed instead of silently serving the full list.
 
 use axum::{body::Bytes, http::StatusCode, routing::post, Router};
-use pennyrouter_catalog::{Catalog, EndpointIndex, EndpointRow, EndpointScore, ModelIndex, ModelRow};
+use pennyrouter_catalog::{
+    Catalog, EndpointIndex, EndpointRow, EndpointScore, ModelIndex, ModelRow,
+};
 use std::{
     collections::HashMap,
     net::SocketAddr,
@@ -152,7 +154,8 @@ fn mock_app(seen: Arc<Mutex<Upstream>>) -> Router {
                 order.clone(),
                 json["model"].as_str().unwrap_or("?").to_string(),
             );
-            seen.providers.insert(order.clone(), json["provider"].clone());
+            seen.providers
+                .insert(order.clone(), json["provider"].clone());
             (
                 StatusCode::OK,
                 [("content-type", "application/json")],
@@ -214,7 +217,10 @@ async fn coding_think_routes_best_quality_in_bracket() {
     assert_eq!(res.status(), StatusCode::OK);
     assert_eq!(provider_of(&res), "Best");
     let guard = seen.lock().unwrap();
-    assert_eq!(guard.models.get("Best").map(String::as_str), Some("m/pop-best"));
+    assert_eq!(
+        guard.models.get("Best").map(String::as_str),
+        Some("m/pop-best")
+    );
 }
 
 #[tokio::test]
@@ -246,11 +252,12 @@ async fn coding_privacy_and_minindex_and_fallback_target() {
     let res = post_chat(gw, "openrouter/pair/privacy/coding").await;
     assert_eq!(res.status(), StatusCode::OK);
     assert_eq!(provider_of(&res), "Cheap");
-    let guard = seen.lock().unwrap();
-    let provider = guard.providers.get("Cheap").cloned().unwrap();
-    assert_eq!(provider["zdr"], serde_json::json!(true));
-    assert_eq!(provider["data_collection"], serde_json::json!("deny"));
-    drop(guard);
+    {
+        let guard = seen.lock().unwrap();
+        let provider = guard.providers.get("Cheap").cloned().unwrap();
+        assert_eq!(provider["zdr"], serde_json::json!(true));
+        assert_eq!(provider["data_collection"], serde_json::json!("deny"));
+    }
 
     // Minindex floor 85 drops Cheap (60): Best (90) serves.
     let res = post_chat(gw, "openrouter/pair/coding/minindex/85").await;
@@ -275,7 +282,11 @@ fn coding_previews_list_bracket_only() {
     assert!(
         coding.candidates.iter().all(|c| c.model_id != "m/obscure"),
         "out-of-bracket never lists: {:?}",
-        coding.candidates.iter().map(|c| &c.model_id).collect::<Vec<_>>()
+        coding
+            .candidates
+            .iter()
+            .map(|c| &c.model_id)
+            .collect::<Vec<_>>()
     );
     let think = router.preview("openrouter/pair/coding/think", None, 5);
     assert_eq!(think.fresh.as_ref().unwrap().provider, "Best");
@@ -284,7 +295,10 @@ fn coding_previews_list_bracket_only() {
     build_db(&db, false);
     let router = pennyrouter_gateway::routing::Router::load(&db).expect("router loads");
     let empty = router.preview("openrouter/pair/coding", None, 5);
-    assert_eq!(empty.rejection.as_ref().unwrap().code, "no_eligible_offering");
+    assert_eq!(
+        empty.rejection.as_ref().unwrap().code,
+        "no_eligible_offering"
+    );
 }
 
 #[tokio::test]

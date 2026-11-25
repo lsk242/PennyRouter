@@ -33,13 +33,7 @@ fn put_model(catalog: &Catalog, model: &str) {
         .unwrap();
 }
 
-fn put_offering(
-    catalog: &Catalog,
-    model: &str,
-    provider: &str,
-    price: f64,
-    tier: Option<&str>,
-) {
+fn put_offering(catalog: &Catalog, model: &str, provider: &str, price: f64, tier: Option<&str>) {
     catalog
         .insert_endpoint(&EndpointRow {
             id: 0,
@@ -112,7 +106,10 @@ fn build_db_tail(path: &std::path::Path) {
     put_offering(&catalog, "m/rare", "RareCheap", 1e-7, None);
     put_offering(&catalog, "m/rare", "RareDear", 9e-7, Some("high"));
     catalog
-        .set_meta("bracket", r#"{"ruleset":"rank-v2","members":["m/popular"]}"#)
+        .set_meta(
+            "bracket",
+            r#"{"ruleset":"rank-v2","members":["m/popular"]}"#,
+        )
         .unwrap();
 }
 

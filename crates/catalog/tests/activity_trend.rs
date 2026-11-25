@@ -5,8 +5,8 @@
 //! test calls the network.
 
 use pennyrouter_catalog::{
-    aggregate_activity, aggregate_models_all, read_activity, split_ranking_windows, store_popularity,
-    Catalog, Popularity,
+    aggregate_activity, aggregate_models_all, read_activity, split_ranking_windows,
+    store_popularity, Catalog, Popularity,
 };
 use serde_json::{json, Value};
 

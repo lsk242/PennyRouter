@@ -835,13 +835,7 @@ fn fin(value: Option<f64>) -> Option<f64> {
 /// score-desc, then flagged outsiders slug-asc. `?q=` filters model
 /// ids, `?min=` keeps scores at/above a threshold (unparseable
 /// means no floor, unscored rows fail a set floor).
-fn top_body(
-    db: &Catalog,
-    version: &str,
-    tabs: &str,
-    search: &str,
-    min: Option<&String>,
-) -> String {
+fn top_body(db: &Catalog, version: &str, tabs: &str, search: &str, min: Option<&String>) -> String {
     let entries = pennyrouter_catalog::read_top_models(db);
     let floor: Option<f64> = min.and_then(|m| m.parse().ok());
     let mut body = format!(
@@ -883,8 +877,7 @@ fn top_body(
             .then_with(|| a.0.cmp(b.0))
     });
     flagged.sort_by(|a, b| a.0.cmp(b.0));
-    let rows: Vec<(&String, &TopModel)> =
-        bracket.into_iter().chain(flagged.into_iter()).collect();
+    let rows: Vec<(&String, &TopModel)> = bracket.into_iter().chain(flagged).collect();
     if rows.is_empty() {
         body.push_str("<p>No models match this tab.</p>");
         return body;
