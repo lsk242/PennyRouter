@@ -26,8 +26,5 @@ fn record_read_round_trip_per_group() {
     catalog.set_meta("fetch_health", "junk").unwrap();
     assert!(read_fetch_health(&catalog).is_empty());
     // The known groups are exactly what the sync records.
-    assert_eq!(
-        FETCH_SOURCES,
-        &["aa", "popularity", "benchmarks", "apps"]
-    );
+    assert_eq!(FETCH_SOURCES, &["aa", "popularity", "benchmarks", "apps"]);
 }
