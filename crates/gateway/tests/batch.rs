@@ -535,3 +535,96 @@ fn interactive_previews_never_list_batch_variants() {
     let think = router.preview("openrouter/pair/think", None, 5);
     assert_eq!(think.fresh.as_ref().unwrap().provider, "Good");
 }
+
+/// Iter 61: decisions models charge input only — no completion
+/// price. Both scopes judge and order on the input price, so a
+/// prompt-only model serves where a blend would leave it
+/// unpriceable.
+#[tokio::test]
+async fn decision_tiers_price_on_input_only() {
+    let db = scratch_db("decision-input");
+    {
+        let _ = std::fs::remove_file(&db);
+        let catalog = Catalog::open(&db).unwrap();
+        catalog.init().unwrap();
+        // (model, provider, prompt, completion, decisions)
+        for (model, provider, prompt, completion, decisions) in [
+            ("m/judge", "JudgeP", Some(2e-7), None, Some(1)),
+            ("m/judgefree", "JudgeF", Some(0.0), None, Some(1)),
+            ("m/chat", "ChatP", Some(1e-8), Some(1e-8), Some(0)),
+        ] {
+            catalog
+                .insert_model(&ModelRow {
+                    model_id: model.to_string(),
+                    name: model.to_string(),
+                    source: "test".to_string(),
+                    payload: "{}".to_string(),
+                    fetched_at: "t".to_string(),
+                })
+                .unwrap();
+            catalog
+                .insert_endpoint(&EndpointRow {
+                    id: 0,
+                    model_id: model.to_string(),
+                    provider_name: provider.to_string(),
+                    payload: "{}".to_string(),
+                    fetched_at: "t".to_string(),
+                    price_prompt: None,
+                    price_completion: None,
+                    price_cache_read: None,
+                    price_cache_write: None,
+                    precision_class: None,
+                    quantization: None,
+                    promo_discount: None,
+                    processed_at: None,
+                    supports_tools: None,
+                    supports_decisions: None,
+                    quality_tier: None,
+                    quality_score: None,
+                    scored_at: None,
+                    score_model: None,
+                    score_prompt: None,
+                    price_override_tokens: None,
+                })
+                .unwrap();
+            let id = catalog.endpoints_for(model).unwrap()[0].id;
+            catalog
+                .update_endpoint_index(
+                    id,
+                    &EndpointIndex {
+                        price_prompt: prompt,
+                        price_completion: completion,
+                        price_cache_read: None,
+                        price_cache_write: None,
+                        precision_class: Some("fp16".to_string()),
+                        quantization: None,
+                        promo_discount: None,
+                        processed_at: "t".to_string(),
+                        supports_tools: None,
+                        supports_decisions: decisions,
+                        price_override_tokens: None,
+                    },
+                )
+                .unwrap();
+        }
+    }
+    let seen = Arc::new(Mutex::new(Upstream::default()));
+    let mock = spawn_mock(mock_app(seen.clone())).await;
+    let gw = spawn_gateway(mock, &db).await;
+
+    // Paid scope: the prompt-only judge serves; the cheaper chat
+    // model is not decisions-capable.
+    let res = post_chat(gw, "openrouter/pair/decision").await;
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(provider_of(&res), "JudgeP");
+    // Free scope: the zero-input judge serves.
+    let res = post_chat(gw, "openrouter/pair/decision/free").await;
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(provider_of(&res), "JudgeF");
+
+    let router = pennyrouter_gateway::routing::Router::load(&db).expect("router loads");
+    let paid = router.preview("openrouter/pair/decision", None, 5);
+    assert_eq!(paid.fresh.as_ref().unwrap().provider, "JudgeP");
+    let free = router.preview("openrouter/pair/decision/free", None, 5);
+    assert_eq!(free.fresh.as_ref().unwrap().provider, "JudgeF");
+}

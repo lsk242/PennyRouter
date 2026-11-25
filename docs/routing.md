@@ -152,7 +152,9 @@ session.
 - Decision tier (Iter 24): `openrouter/pair/[privacy/]decision`
   routes to the cheapest decisions-capable offering (behavior-scoring
   models, `architecture.output_modalities` containing `"decisions"`,
-  schema v5); `decision/free` scopes it to zero-cost with the same
+  schema v5), judged and ordered on input price only — scoring
+  models charge no output tokens (Iter 61); `decision/free` scopes
+  it to zero-cost with the same
   free semantics, and `decision/free/fallback/<tier>` falls back past
   exhaustion like the free tier. No quality floor and no precision
   class requirement (scoring endpoints report `unknown`

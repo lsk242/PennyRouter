@@ -372,6 +372,25 @@ fn is_nontext_output(modalities: &[String]) -> bool {
     !modalities.iter().all(|m| m == "text")
 }
 
+/// Decisions price (Iter 61): behavior-scoring models charge input
+/// only (no output tokens), promo-adjusted like the blend. `None`
+/// when the prompt price is unknown.
+fn decision_cost(offering: &Offering) -> Option<f64> {
+    offering
+        .price_prompt
+        .map(|prompt| prompt * (1.0 - offering.promo_discount.unwrap_or(0.0).clamp(0.0, 1.0)))
+}
+
+/// Decisions ordering (Iter 61): cheapest input price first, then
+/// identity.
+fn decision_order(a: &Offering, b: &Offering) -> std::cmp::Ordering {
+    decision_cost(a)
+        .partial_cmp(&decision_cost(b))
+        .unwrap_or(std::cmp::Ordering::Equal)
+        .then_with(|| a.model_id.cmp(&b.model_id))
+        .then_with(|| a.provider_name.cmp(&b.provider_name))
+}
+
 /// Parse one `mintel` value: digits only, `0..=100` (leading zeros
 /// allowed, e.g. `050` == 50). Signs, decimals, and empty values fail.
 fn parse_mintel_value(value: &str) -> Option<u8> {
@@ -2844,9 +2863,10 @@ impl Router {
     /// by default, zero-cost only under the `/free` scope. No quality
     /// floor (decision models are unscored) and no
     /// precision-class requirement (scoring endpoints report
-    /// `unknown` quantization; capability match replaces it). Same
-    /// tool, budget, throttle, stickiness, and deterministic
-    /// tie-breaks as the other cross-model picks.
+    /// `unknown` quantization; capability match replaces it). Cost
+    /// is input-only (Iter 61): scoring models charge no output
+    /// tokens. Same tool, budget, throttle, stickiness, and
+    /// deterministic tie-breaks as the other cross-model picks.
     fn decide_decision(
         &self,
         snapshot: &Snapshot,
@@ -2870,9 +2890,10 @@ impl Router {
                     && !is_batch_model(&o.model_id)
                     // Tiers are disjoint by design, like `low`/`think`:
                     // the bare scope serves paid only, zero-cost serves
-                    // the `/free` scope.
-                    && (free_only || inline_cost(o).is_some_and(|cost| cost > 0.0))
+                    // the `/free` scope — on input price (Iter 61).
+                    && (free_only || decision_cost(o).is_some_and(|cost| cost > 0.0))
                     && (!free_only
+                        || decision_cost(o) == Some(0.0)
                         || free_eligible(ranking.as_ref(), &o.model_id, o, now))
                     && meets_mintel(snapshot, &o.model_id, mintel)
             })
@@ -2920,13 +2941,9 @@ impl Router {
         if let Some(key) = &key {
             if let Some(pin) = self.lookup_pin(key) {
                 // Same cheapest-first comparator as the fresh pick below.
-                if let Some(pick) = Self::pinned_pick(&candidates, &pin, |a, b| {
-                    inline_cost(a)
-                        .partial_cmp(&inline_cost(b))
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                        .then_with(|| a.model_id.cmp(&b.model_id))
-                        .then_with(|| a.provider_name.cmp(&b.provider_name))
-                }) {
+                if let Some(pick) =
+                    Self::pinned_pick(&candidates, &pin, |a, b| decision_order(a, b))
+                {
                     return Ok(Decision {
                         model_id: pick.model_id.clone(),
                         provider: pick.provider_name.clone(),
@@ -2943,13 +2960,7 @@ impl Router {
         }
         let pick = candidates
             .into_iter()
-            .min_by(|a, b| {
-                inline_cost(a)
-                    .partial_cmp(&inline_cost(b))
-                    .unwrap_or(std::cmp::Ordering::Equal)
-                    .then_with(|| a.model_id.cmp(&b.model_id))
-                    .then_with(|| a.provider_name.cmp(&b.provider_name))
-            })
+            .min_by(|a, b| decision_order(a, b))
             .ok_or_else(|| RouteRejection {
                 code: "no_eligible_offering",
                 message: format!("no decisions-capable {scope}offering is currently eligible"),
@@ -2964,7 +2975,7 @@ impl Router {
                 "tier 'decision': cheapest decisions-capable offering ({cost_scope}); no quality floor, \
                  no precision-class requirement (capability match replaces it); \
                  eligible = decisions-capable + non-batch model + provider allow + tools + context + budget; \
-                 effective cost = balanced prompt/completion/cache blend, promo applied; \
+                 cost = input price only (no output tokens), promo applied; \
                  tie-break cost, model id, provider; throttle-skipped;{} \
                  later requests keep this provider (sticky).",
                 mintel_note(mintel),
@@ -4875,8 +4886,10 @@ impl Router {
                 constraints.allows(&o.provider_name)
                     && o.supports_decisions == Some(true)
                     && !is_batch_model(&o.model_id)
-                    && (free_only || inline_cost(o).is_some_and(|cost| cost > 0.0))
-                    && (!free_only || free_eligible(ranking, &o.model_id, o, now))
+                    && (free_only || decision_cost(o).is_some_and(|cost| cost > 0.0))
+                    && (!free_only
+                        || decision_cost(o) == Some(0.0)
+                        || free_eligible(ranking, &o.model_id, o, now))
                     && meets_mintel(snapshot, &o.model_id, mintel)
             })
             .collect();
@@ -4897,13 +4910,7 @@ impl Router {
             };
         }
         let mut sorted: Vec<&Offering> = base;
-        sorted.sort_by(|a, b| {
-            inline_cost(a)
-                .partial_cmp(&inline_cost(b))
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.model_id.cmp(&b.model_id))
-                .then_with(|| a.provider_name.cmp(&b.provider_name))
-        });
+        sorted.sort_by(|a, b| decision_order(a, b));
         let ordered_all: Vec<(Offering, Option<usize>)> = sorted
             .into_iter()
             .enumerate()

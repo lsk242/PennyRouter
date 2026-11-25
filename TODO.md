@@ -424,5 +424,9 @@ cheap judge model, classifier-based routing.
       dataset 404s and nothing read the share; fetch, store,
       readers, exports, and the `task` health group removed.
       Test: suite green (424 passed).
+- [x] **Iter 61 — Decision input-only pricing.** Both decision
+      scopes judge and order on prompt price (no output tokens),
+      so prompt-only models serve. Test: prompt-only fixture
+      for both scopes; full workspace green (425 passed).
 
-## After Iter 60
+## After Iter 61

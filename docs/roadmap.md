@@ -1239,4 +1239,16 @@ only when pulled forward deliberately.
   (424 passed). fmt + clippy `-D warnings` via the extracted
   toolchain, clean.
 
-## After Iter 60
+## Iter 61 — Decision input-only pricing (done)
+
+- Goal: decisions models (input price only) serve both scopes.
+- Value: a prompt-only model no longer falls through both legs
+  for lack of a blendable cost.
+- Shipped: `decision_cost` (promo-adjusted prompt price) drives
+  the bare-scope paid check, the free-scope zero check, and both
+  orderings (route + preview).
+- Test: prompt-only fixture (paid + free + non-decisions decoy)
+  for route and preview; full workspace green (425 passed).
+  fmt + clippy `-D warnings` via the extracted toolchain, clean.
+
+## After Iter 61
