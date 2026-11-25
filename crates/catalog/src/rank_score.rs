@@ -1,11 +1,20 @@
-//! Deterministic value score (Iter 34): maximum intelligence for the
-//! lowest price, with no AI and no external ranking service.
+//! Deterministic value score (Iter 34, v2 since Iter 43): maximum
+//! intelligence for the lowest price, with no AI and no external
+//! ranking service.
 //!
-//! `rank_score = quality × efficiency × popularity`, all bounded:
+//! `rank_score = quality × efficiency × activity`, all bounded:
 //! quality is the Artificial Analysis index (coding first) times a
 //! precision factor, efficiency is a saturating curve anchored at the
-//! live median cost per task, and popularity is a ≤10% factor. Speed
-//! and availability never enter the score — they break ties.
+//! live median cost per task, and activity is the recent usage share
+//! times a bounded trend multiplier. Speed and availability never
+//! enter the score — they break ties.
+//!
+//! v2 changes since `rank-v1`: usage reads measured activity
+//! (level × trend) instead of the popularity-window share; the
+//! intelligence index counts only on the current test version
+//! (stale or unversioned intel is NULL once a version is known);
+//! and AA's own cost/task wins over the catalog blend wherever the
+//! fetch carries it.
 //!
 //! Every constant is declared here, not read from the environment: a
 //! score must mean the same thing on every rebuild. `RULESET_VERSION`
@@ -16,7 +25,7 @@ use crate::rank::{asc_nulls_last, desc_nulls_last};
 use std::cmp::Ordering;
 
 /// Ruleset behind the score, carried in `rank_ruleset`.
-pub const RULESET_VERSION: &str = "rank-v1";
+pub const RULESET_VERSION: &str = "rank-v2";
 
 /// Tokens in one canonical task: the balanced workload profile's mix
 /// (5k input / 4k output / 0.5k cache read / 0.5k cache write).
@@ -27,8 +36,33 @@ pub const TASK_TOKENS: f64 = 10_000.0;
 /// curve is centred on the real distribution.
 pub const COST_HALF_CREDIT: f64 = 0.01;
 
-/// Maximum popularity contribution: a top model gains at most 10%.
+/// Maximum popularity contribution under `rank-v1` (kept for the
+/// legacy formula display; v2 reads activity instead).
 pub const POP_WEIGHT: f64 = 0.10;
+
+/// Trend boost bound: activity moves at most ±10% on trend — usage
+/// orders models, but a spike never doubles a score.
+pub const TREND_BOOST_MAX: f64 = 0.10;
+
+/// Activity factor without measured activity: the v1-missing
+/// neutral (`1/1.1`). Unknown usage neither boosts nor zeroes the
+/// score; the `no-activity` flag carries the gap.
+pub const ACTIVITY_UNKNOWN: f64 = 1.0 / 1.1;
+
+/// Top-usage bracket (Iter 43): models ranked by activity level
+/// enter at this rank (1-based) or better, with an absolute
+/// recent-token share at or above `BRACKET_MIN_SHARE`, and at
+/// least one v2-scored offering.
+pub const BRACKET_TOP_N: usize = 25;
+pub const BRACKET_MIN_SHARE: f64 = 0.005;
+
+/// Performance floor for the bracket's low end: quality (index ×
+/// precision factor) at or above this, matching the standard-tier
+/// cutoff, so `low` never anchors on a weak model.
+pub const BRACKET_PERFORMANCE_FLOOR: f64 = 40.0;
+
+/// Max spend for the bracket's think end, $/task.
+pub const THINK_MAX_COST_TASK: f64 = 0.05;
 
 /// Quality discount for serving a model below its benchmarked
 /// precision. AA benchmarks the reference model; a quantized endpoint
@@ -62,50 +96,79 @@ pub fn efficiency(cost_per_task: Option<f64>) -> Option<f64> {
     Some(COST_HALF_CREDIT / (cost + COST_HALF_CREDIT))
 }
 
-/// Popularity factor in `0.909..=1.0`, normalized so a top-quality
-/// free model still scores exactly 100. Absent popularity is a zero
-/// share: no bonus, and the same factor as a model nobody uses.
-pub fn popularity_factor(share: Option<f64>) -> f64 {
-    let share = share.unwrap_or(0.0).clamp(0.0, 1.0);
-    (1.0 + POP_WEIGHT * share) / (1.0 + POP_WEIGHT)
+/// Usage factor in `0..=1`: the recent level times a bounded
+/// trend multiplier, normalized by the max multiplier so a top
+/// rising model with full quality and efficiency still scores
+/// exactly 100. Absent activity is the v1-missing neutral
+/// (`ACTIVITY_UNKNOWN`).
+pub fn activity_factor(level: Option<f64>, trend: Option<f64>) -> f64 {
+    let Some(level) = level.filter(|l| l.is_finite() && *l >= 0.0) else {
+        return ACTIVITY_UNKNOWN;
+    };
+    let trend = trend
+        .filter(|t| t.is_finite() && *t >= 0.0)
+        .unwrap_or(1.0);
+    let boost = (trend - 1.0).clamp(-TREND_BOOST_MAX, TREND_BOOST_MAX);
+    level.clamp(0.0, 1.0) * (1.0 + boost) / (1.0 + TREND_BOOST_MAX)
 }
 
 /// Inputs for one offering. `decision` switches the basis: behaviour
 /// models are not benchmarked for coding, so they read the agentic
-/// index and skip the precision discount.
+/// index and skip the precision discount. `intel_version` is the
+/// test version behind `intelligence` (`None` = unversioned);
+/// `current_version` is the sync's current version (`None` =
+/// unknown, the gate stays open).
 pub struct RankInputs<'a> {
     pub coding: Option<i64>,
     pub intelligence: Option<i64>,
     pub agentic: Option<i64>,
+    pub intel_version: Option<&'a str>,
+    pub current_version: Option<&'a str>,
     pub precision_class: Option<&'a str>,
     pub cost_per_token: Option<f64>,
-    pub popularity_share: Option<f64>,
+    pub aa_cost_per_task: Option<f64>,
+    pub activity_level: Option<f64>,
+    pub activity_trend: Option<f64>,
     pub decision: bool,
 }
 
 /// One computed score plus the components it was built from, so the
-/// UI can show the arithmetic without re-deriving it.
+/// UI can show the arithmetic without re-deriving it. `cost_task` is
+/// the exact task cost the efficiency used (AA's number when the
+/// fetch carried it, else the catalog blend).
 #[derive(Debug, Clone, PartialEq)]
 pub struct RankScore {
     pub score: f64,
     pub quality: f64,
     pub efficiency: f64,
-    pub popularity: f64,
+    pub activity: f64,
+    pub cost_task: f64,
     pub basis: &'static str,
 }
 
 /// Score one offering. `None` when the model has no usable index or
 /// the offering has no price: an unmeasured model must never sort
-/// below a measured bad one.
+/// below a measured bad one. Intelligence counts only on the
+/// current test version once a version is known — stale or
+/// unversioned intel falls through to coding/agentic or to no
+/// score, never in as itself.
 pub fn score(inputs: &RankInputs) -> Option<RankScore> {
+    let gated_intel = match (inputs.intelligence, inputs.current_version) {
+        // Version unknown: the gate stays open (keyless or
+        // failed-fetch syncs score like v1).
+        (index, None) => index,
+        // Version known: only the current version counts.
+        (Some(index), Some(current)) if inputs.intel_version == Some(current) => Some(index),
+        _ => None,
+    };
     let (basis, index) = if inputs.decision {
-        match (inputs.agentic, inputs.intelligence) {
+        match (inputs.agentic, gated_intel) {
             (Some(value), _) => ("agentic", value),
             (None, Some(value)) => ("intel", value),
             _ => return None,
         }
     } else {
-        match (inputs.coding, inputs.intelligence, inputs.agentic) {
+        match (inputs.coding, gated_intel, inputs.agentic) {
             (Some(value), _, _) => ("coding", value),
             (None, Some(value), _) => ("intel", value),
             (None, None, Some(value)) => ("agentic", value),
@@ -118,13 +181,18 @@ pub fn score(inputs: &RankInputs) -> Option<RankScore> {
         precision_factor(inputs.precision_class)
     };
     let quality = index.clamp(0, 100) as f64 * factor;
-    let efficiency = efficiency(cost_per_task(inputs.cost_per_token))?;
-    let popularity = popularity_factor(inputs.popularity_share);
+    let cost_task = inputs
+        .aa_cost_per_task
+        .filter(|c| c.is_finite() && *c >= 0.0)
+        .or_else(|| cost_per_task(inputs.cost_per_token))?;
+    let efficiency = efficiency(Some(cost_task))?;
+    let activity = activity_factor(inputs.activity_level, inputs.activity_trend);
     Some(RankScore {
-        score: quality * efficiency * popularity,
+        score: quality * efficiency * activity,
         quality,
         efficiency,
-        popularity,
+        activity,
+        cost_task,
         basis,
     })
 }
@@ -167,9 +235,13 @@ mod tests {
             coding: Some(60),
             intelligence: Some(70),
             agentic: Some(80),
+            intel_version: Some("5"),
+            current_version: Some("5"),
             precision_class: Some("fp8"),
             cost_per_token: Some(1.2825e-6),
-            popularity_share: Some(0.42),
+            aa_cost_per_task: None,
+            activity_level: Some(1.0),
+            activity_trend: Some(1.0),
             decision: false,
         }
     }
@@ -207,17 +279,34 @@ mod tests {
     }
 
     #[test]
-    fn popularity_is_bounded_and_absent_is_neutral() {
-        // Absent and zero share are the same: no bonus.
-        assert_eq!(popularity_factor(None), popularity_factor(Some(0.0)));
-        assert!((popularity_factor(None) - 1.0 / 1.1).abs() < 1e-12);
-        // Normalized by 1 + POP_WEIGHT so the top model still scores 100.
-        assert!((popularity_factor(Some(1.0)) - 1.0).abs() < 1e-12);
-        let mid = popularity_factor(Some(0.5));
-        assert!(mid > 0.95 && mid < 1.0, "got {mid}");
-        // Out-of-range shares clamp instead of inflating the score.
-        assert_eq!(popularity_factor(Some(5.0)), 1.0);
-        assert_eq!(popularity_factor(Some(-5.0)), popularity_factor(Some(0.0)));
+    fn activity_is_bounded_and_absent_is_neutral() {
+        // Absent activity is the v1-missing neutral, not zero.
+        assert_eq!(activity_factor(None, None), ACTIVITY_UNKNOWN);
+        assert!((ACTIVITY_UNKNOWN - 1.0 / 1.1).abs() < 1e-12);
+        // Top flat model sits at 1/1.1; only a maxed boost
+        // reaches exactly 1.0, so 100 stays the ceiling.
+        assert!((activity_factor(Some(1.0), Some(1.0)) - 1.0 / 1.1).abs() < 1e-12);
+        assert_eq!(activity_factor(Some(1.0), Some(2.0)), 1.0);
+        // Rising beats flat beats falling at equal level.
+        let rising = activity_factor(Some(0.5), Some(3.0));
+        let flat = activity_factor(Some(0.5), Some(1.0));
+        let falling = activity_factor(Some(0.5), Some(0.25));
+        assert!(rising > flat && flat > falling);
+        // The boost clamps at ±10%: a 10x spike ties a mild rise.
+        assert_eq!(
+            activity_factor(Some(0.5), Some(10.0)),
+            activity_factor(Some(0.5), Some(1.5))
+        );
+        // Garbage levels read as missing; garbage trends read flat.
+        assert_eq!(
+            activity_factor(Some(f64::NAN), Some(3.0)),
+            ACTIVITY_UNKNOWN
+        );
+        assert_eq!(
+            activity_factor(Some(0.5), Some(f64::NAN)),
+            activity_factor(Some(0.5), Some(1.0))
+        );
+        assert_eq!(activity_factor(Some(5.0), Some(1.0)), activity_factor(Some(1.0), Some(1.0)));
     }
 
     #[test]
@@ -226,8 +315,42 @@ mod tests {
         assert_eq!(out.basis, "coding");
         assert!((out.quality - 58.2).abs() < 1e-9);
         assert!((out.efficiency - 0.4381).abs() < 1e-3);
-        assert!((out.popularity - 0.9473).abs() < 1e-3);
-        assert!((out.score - 24.1).abs() < 0.1, "got {}", out.score);
+        assert!((out.activity - 1.0 / 1.1).abs() < 1e-9);
+        assert!((out.cost_task - 0.012825).abs() < 1e-9);
+        assert!((out.score - 23.2).abs() < 0.1, "got {}", out.score);
+    }
+
+    #[test]
+    fn version_gate_current_in_stale_out_missing_null() {
+        let mut input = inputs();
+        input.coding = None;
+        input.agentic = None;
+        // Current version: intel counts.
+        assert_eq!(score(&input).unwrap().basis, "intel");
+        // Stale version: excluded, and nothing else to fall back to.
+        input.intel_version = Some("4");
+        assert_eq!(score(&input), None);
+        // Unversioned intel under a known current: excluded too.
+        input.intel_version = None;
+        assert_eq!(score(&input), None);
+        // Version unknown (keyless): the gate stays open, legacy
+        // behavior — unversioned intel counts.
+        input.current_version = None;
+        assert_eq!(score(&input).unwrap().basis, "intel");
+    }
+
+    #[test]
+    fn aa_cost_per_task_wins_when_present() {
+        let mut input = inputs();
+        input.aa_cost_per_task = Some(0.005);
+        let out = score(&input).unwrap();
+        assert_eq!(out.cost_task, 0.005);
+        assert!((out.efficiency - 0.01 / 0.015).abs() < 1e-9);
+        // Invalid AA costs fall back to the catalog blend.
+        input.aa_cost_per_task = Some(-1.0);
+        assert!((score(&input).unwrap().cost_task - 0.012825).abs() < 1e-9);
+        input.aa_cost_per_task = Some(f64::NAN);
+        assert!((score(&input).unwrap().cost_task - 0.012825).abs() < 1e-9);
     }
 
     #[test]
@@ -270,12 +393,12 @@ mod tests {
     }
 
     #[test]
-    fn free_offering_scores_on_quality_and_popularity_only() {
+    fn free_offering_scores_on_quality_and_activity_only() {
         let mut input = inputs();
         input.cost_per_token = Some(0.0);
         let out = score(&input).unwrap();
         assert_eq!(out.efficiency, 1.0);
-        assert!((out.score - 58.2 * out.popularity).abs() < 1e-9);
+        assert!((out.score - 58.2 * out.activity).abs() < 1e-9);
     }
 
     #[test]

@@ -4,6 +4,7 @@
 //! The catalog sync is a separate process from the gateway; this crate owns
 //! the DB format both sides share. See `docs/catalog-sync-architecture.md`.
 
+mod aa;
 mod artifact;
 mod benchmarks;
 mod fetch;
@@ -23,30 +24,44 @@ mod score_openrouter;
 mod store;
 mod sync;
 
-pub use artifact::{now_rfc3339, publish, sha256_hex, verify, Manifest};
+pub use aa::{
+    fetch_aa_models, read_aa_intel_version, read_aa_models, store_aa_models, AaModel, AaModels,
+};
+pub use artifact::{
+    now_rfc3339, publish, read_fetch_health, record_fetch_health, sha256_hex, verify,
+    Manifest, FETCH_SOURCES,
+};
 pub use benchmarks::{
-    aggregate_intelligence, fetch_benchmarks, read_benchmark_intel, store_benchmarks, Benchmarks,
+    aggregate_intelligence, aggregate_openrouter_evals, aggregate_task_index, fetch_benchmarks,
+    fetch_benchmarks_task, read_benchmark_code, read_benchmark_intel, read_openrouter_evals,
+    store_benchmarks, store_openrouter_evals, store_task_benchmarks, Benchmarks, OpenRouterEvals,
 };
 pub use fetch::{fetch_openrouter, fetch_openrouter_extra, Fetched};
 pub use popular::{
-    aggregate_apps, aggregate_models, aggregate_models_all, fetch_popularity, read_popular_tokens,
-    read_popularity, store_popularity, Popularity, POPULAR_APPS_TOP_N, POPULAR_MODELS_TOP_N,
+    aggregate_activity, aggregate_apps, aggregate_models, aggregate_models_all,
+    aggregate_task_code_share, fetch_app_rankings, fetch_popularity, fetch_task_share, read_activity,
+    read_app_list, read_popular_tokens, read_popularity, read_task_code_share,
+    split_ranking_windows, store_app_list, store_popularity, store_task_share, AppList, ModelActivity,
+    Popularity, TaskShare, POPULAR_APPS_TOP_N, POPULAR_MODELS_TOP_N, RANKINGS_SPAN_DAYS,
     RANKINGS_WINDOW_DAYS,
 };
 pub use price::{
     balanced_profile, builtin_profiles, effective_cost, fmt_price_per_m, resolve_discount, Promos,
     WorkloadProfile,
 };
-pub use process::{run_processing, ProcessSummary};
+pub use process::{
+    read_bracket_members, read_top_models, run_processing, ProcessSummary, TopModel,
+};
 pub use rank::{
     compare as compare_signals, load_ranking_doc, publish_ranking, rank_catalog, verify_ranking,
     Assist, ClassRanking, FreeOffer, RankEntry, RankOrientation, RankingDocument, RankingManifest,
     Signals, TrendStats, Trends,
 };
 pub use rank_score::{
-    compare as compare_rank, cost_per_task, efficiency, popularity_factor, precision_factor,
-    RankInputs, RankKey, RankScore, COST_HALF_CREDIT, POP_WEIGHT,
-    RULESET_VERSION as RANK_RULESET_VERSION, TASK_TOKENS,
+    activity_factor, compare as compare_rank, cost_per_task, efficiency, precision_factor,
+    RankInputs, RankKey, RankScore, ACTIVITY_UNKNOWN, BRACKET_MIN_SHARE,
+    BRACKET_PERFORMANCE_FLOOR, BRACKET_TOP_N, COST_HALF_CREDIT, POP_WEIGHT,
+    RULESET_VERSION as RANK_RULESET_VERSION, TASK_TOKENS, THINK_MAX_COST_TASK, TREND_BOOST_MAX,
 };
 pub use schema::{SCHEMA_VERSION, V1_DDL};
 pub use score::{

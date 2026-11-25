@@ -196,6 +196,8 @@ fn run() -> Result<(), String> {
                 );
                 pennyrouter_catalog::store_popularity(&catalog, &popularity)
                     .map_err(|e| e.to_string())?;
+                pennyrouter_catalog::record_fetch_health(&catalog, "popularity")
+                    .map_err(|e| e.to_string())?;
             }
             Err(e) => println!("popularity fetch failed ({e}): publishing without pins"),
         },
@@ -203,24 +205,146 @@ fn run() -> Result<(), String> {
     // Intelligence backfill from the benchmarks endpoint: models
     // whose embedded payload lacks a score get one from the fuller
     // dataset. Same shared key as popularity; a failed fetch warns
-    // and publishes without backfill, like pins.
+    // and publishes without backfill, like pins. The same body also
+    // yields OpenRouter-run evals (no extra call), and a second
+    // slice fetches the code task — each warns independently.
     match std::env::var("RANKINGS_API_KEY")
         .ok()
         .filter(|k| !k.is_empty())
     {
         None => println!("no RANKINGS_API_KEY: publishing without benchmark backfill"),
-        Some(key) => match pennyrouter_catalog::fetch_benchmarks("https://openrouter.ai", &key) {
-            Ok(benchmarks) => {
+        Some(key) => {
+            match pennyrouter_catalog::fetch_benchmarks("https://openrouter.ai", &key) {
+                Ok(benchmarks) => {
+                    println!(
+                        "benchmarks: {} intelligence rows (as of {})",
+                        benchmarks.intelligence.len(),
+                        benchmarks.as_of.as_deref().unwrap_or("unknown")
+                    );
+                    pennyrouter_catalog::store_benchmarks(&catalog, &benchmarks)
+                        .map_err(|e| e.to_string())?;
+                    pennyrouter_catalog::record_fetch_health(&catalog, "benchmarks")
+                        .map_err(|e| e.to_string())?;
+                    if !benchmarks.openrouter.is_empty() {
+                        println!(
+                            "benchmarks: {} openrouter eval rows",
+                            benchmarks.openrouter.len()
+                        );
+                    }
+                    pennyrouter_catalog::store_openrouter_evals(
+                        &catalog,
+                        &benchmarks.openrouter,
+                        benchmarks.as_of.as_deref(),
+                    )
+                    .map_err(|e| e.to_string())?;
+                }
+                Err(e) => println!("benchmarks fetch failed ({e}): publishing without backfill"),
+            }
+            match pennyrouter_catalog::fetch_benchmarks_task(
+                "https://openrouter.ai",
+                &key,
+                "code",
+            ) {
+                Ok(code) => {
+                    println!("benchmarks: {} code rows", code.intelligence.len());
+                    pennyrouter_catalog::store_task_benchmarks(&catalog, "code", &code)
+                        .map_err(|e| e.to_string())?;
+                    pennyrouter_catalog::record_fetch_health(&catalog, "benchmarks")
+                        .map_err(|e| e.to_string())?;
+                }
+                Err(e) => println!("benchmarks code fetch failed ({e}): publishing without it"),
+            }
+        }
+    }
+    // Trending + coding app lists (Iter 42): display data with the
+    // same warn-and-continue contract as the pins.
+    match std::env::var("RANKINGS_API_KEY")
+        .ok()
+        .filter(|k| !k.is_empty())
+    {
+        None => println!("no RANKINGS_API_KEY: publishing without trending/coding apps"),
+        Some(key) => {
+            match pennyrouter_catalog::fetch_app_rankings(
+                "https://openrouter.ai",
+                &key,
+                "trending",
+                None,
+            ) {
+                Ok(list) => {
+                    println!("trending apps: {}", list.apps.len());
+                    pennyrouter_catalog::store_app_list(&catalog, "trending", &list)
+                        .map_err(|e| e.to_string())?;
+                    pennyrouter_catalog::record_fetch_health(&catalog, "apps")
+                        .map_err(|e| e.to_string())?;
+                }
+                Err(e) => println!("trending apps fetch failed ({e}): publishing without them"),
+            }
+            match pennyrouter_catalog::fetch_app_rankings(
+                "https://openrouter.ai",
+                &key,
+                "popular",
+                Some("coding"),
+            ) {
+                Ok(list) => {
+                    println!("coding apps: {}", list.apps.len());
+                    pennyrouter_catalog::store_app_list(&catalog, "coding", &list)
+                        .map_err(|e| e.to_string())?;
+                    pennyrouter_catalog::record_fetch_health(&catalog, "apps")
+                        .map_err(|e| e.to_string())?;
+                }
+                Err(e) => println!("coding apps fetch failed ({e}): publishing without them"),
+            }
+        }
+    }
+    // Task Code share (Iter 42): the endpoint is assumed from the
+    // datasets family, so a 404 means "not offered" (info), while
+    // any other failure warns — either way the sync continues.
+    match std::env::var("RANKINGS_API_KEY")
+        .ok()
+        .filter(|k| !k.is_empty())
+    {
+        None => println!("no RANKINGS_API_KEY: publishing without task shares"),
+        Some(key) => match pennyrouter_catalog::fetch_task_share("https://openrouter.ai", &key) {
+            Ok(share) => {
                 println!(
-                    "benchmarks: {} intelligence rows (as of {})",
-                    benchmarks.intelligence.len(),
-                    benchmarks.as_of.as_deref().unwrap_or("unknown")
+                    "task code share: {}",
+                    share
+                        .code_share
+                        .map(|s| format!("{s:.3}"))
+                        .unwrap_or_else(|| "unknown".to_string())
                 );
-                pennyrouter_catalog::store_benchmarks(&catalog, &benchmarks)
+                pennyrouter_catalog::store_task_share(&catalog, &share)
+                    .map_err(|e| e.to_string())?;
+                pennyrouter_catalog::record_fetch_health(&catalog, "task")
                     .map_err(|e| e.to_string())?;
             }
-            Err(e) => println!("benchmarks fetch failed ({e}): publishing without backfill"),
+            Err(e) if e.to_string().contains("404") => {
+                println!("task-rankings not offered by the Data API: publishing without it")
+            }
+            Err(e) => println!("task share fetch failed ({e}): publishing without it"),
         },
+    }
+    // AA headline indexes + versions + cost/task (Iter 42): keyed by
+    // AA_API_KEY, independent of the OpenRouter datasets above.
+    match std::env::var("AA_API_KEY").ok().filter(|k| !k.is_empty()) {
+        None => println!("no AA_API_KEY: publishing without AA direct indexes"),
+        Some(key) => {
+            match pennyrouter_catalog::fetch_aa_models("https://artificialanalysis.ai", &key) {
+                Ok(aa) => {
+                    println!(
+                        "aa: {} models, intel version {} (as of {})",
+                        aa.models.len(),
+                        aa.intel_version.as_deref().unwrap_or("unknown"),
+                        aa.as_of.as_deref().unwrap_or("unknown")
+                    );
+                    pennyrouter_catalog::store_aa_models(&catalog, &aa)
+                        .map_err(|e| e.to_string())?;
+                    pennyrouter_catalog::record_fetch_health(&catalog, "aa")
+                        .map_err(|e| e.to_string())?;
+                }
+                Err(e) => println!("aa fetch failed ({e}): publishing without AA direct indexes"),
+            }
+        }
     }
     // Popularity lands before processing (Iter 34): the value score
     // reads the window as a per-model factor.

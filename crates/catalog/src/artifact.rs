@@ -1,9 +1,11 @@
 //! Versioned artifact publish: DB file + manifest (version, sha256, counts).
 
 use crate::schema::SCHEMA_VERSION;
+use crate::store::Catalog;
 use crate::Error;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use time::format_description::well_known::Rfc3339;
@@ -31,6 +33,34 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 
 pub fn now_rfc3339() -> Result<String, Error> {
     Ok(OffsetDateTime::now_utc().format(&Rfc3339)?)
+}
+
+/// Sync fetch groups with health tracking (Iter 46).
+pub const FETCH_SOURCES: &[&str] = &["aa", "popularity", "benchmarks", "apps", "task"];
+
+/// Record a successful dataset fetch (Iter 46): stamps the group
+/// with now in the `fetch_health` meta object. Called after each
+/// successful store; failures leave the previous stamp (or absence)
+/// in place, so health degrades instead of lying.
+pub fn record_fetch_health(catalog: &Catalog, source: &str) -> Result<(), Error> {
+    let mut health = read_fetch_health(catalog);
+    health.insert(source.to_string(), now_rfc3339()?);
+    catalog.set_meta(
+        "fetch_health",
+        &serde_json::to_string(&health).map_err(Error::from)?,
+    )?;
+    Ok(())
+}
+
+/// Last-ok timestamps per fetch group. Missing reads as empty
+/// (never fetched or failed since).
+pub fn read_fetch_health(catalog: &Catalog) -> BTreeMap<String, String> {
+    catalog
+        .get_meta("fetch_health")
+        .ok()
+        .flatten()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default()
 }
 
 /// Atomically install `bytes` at `final_path` (Iter 11, F07): write a

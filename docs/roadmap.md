@@ -929,56 +929,129 @@ only when pulled forward deliberately.
   same manual-style note as Iter 39 — CI runs the gates.
 
 ## After Iter 41
-## Iter 42 — Score data sources (planned)
+## Iter 42 — Score data sources (done)
 
-- Goal: Fetch AA free API (indexes, version, cost/task, pricing)
+- Goal: fetch AA free API (indexes, version, cost/task, pricing)
   and OpenRouter Data API (activity trend, app-rankings, task
   classes) at ≤1 req/hour per source.
-- Value: The score stops depending on embedded payloads alone.
-- Shipped: `aa.rs` fetch + store; extended `popular.rs` /
-  `benchmarks.rs` activity + trend. Test: fixtures → parse →
-  store → read; keyless → empty.
+- Value: the score stops depending on embedded payloads alone;
+  every new dataset lands stored and cited, ready for v2 to read.
+- Shipped: `aa.rs` (paginated `x-api-key` fetch, strict parse,
+  `aa_models` + `aa_as_of` + `aa_intel_version` meta); rankings
+  span widened to recent + 3 priors in one call with pins sliced
+  back to trailing-week; `aggregate_activity` level + trend
+  (`activity_tokens`); trending/coding app lists; task Code share
+  (assumed endpoint, 404-tolerant); benchmarks code slice +
+  OpenRouter evals from the same body. Each dataset warns and
+  continues independently; keyless syncs store nothing. Env:
+  `AA_API_KEY` (example + compose).
+- Test: `aa_fetch.rs` (stub-server page walk, header, round trip,
+  keyless empty) + `activity_trend.rs` (level/trend math, skips,
+  neutral single window, pins-stay-recent, round trip) + inline
+  parse/store units; full workspace green (405 passed).
+  fmt/clippy binaries still absent here — CI runs the gates.
 - Proposal: `docs/proposals/2026-11-18-popularity-first-ranking.md`.
 
-## Iter 43 — Catalog score v2 + brackets (planned)
+## Iter 43 — Catalog score v2 + brackets (done)
 
-- Goal: Version-gated `rank-v2` (performance × efficiency ×
+- Goal: version-gated `rank-v2` (performance × efficiency ×
   activity) plus the top-usage bracket with `low`/`think` ends.
-- Value: Routing inputs become inspectable, versioned facts.
-- Shipped: `rank_score.rs` v2, bracket + flags in `process.rs`,
-  TOP rollup. Test: stale excluded; popular-unscored flagged.
+- Value: routing inputs become inspectable, versioned facts; the
+  gateway can consume score + bracket without recomputing.
+- Shipped: `rank-v2` (activity level × bounded trend boost,
+  intel version gate with legacy-open keyless behavior, AA
+  cost/task wins); AA join (exact → normalized slug, first-wins);
+  merged signals with gated-out intel NULLed; schema v9→v10
+  (`aa_intel_version`, `activity_level/trend`, `rank_activity`,
+  `rank_cost_task`); bracket (top-25 + 0.5% share + scored) with
+  low/think ends; per-model flags; `top_models` + `bracket` meta;
+  both UI breakdowns branch per ruleset; formula section documents
+  v2 with v1 legacy. Deploy the v10 gateway with/after the first
+  v10 publish (v10 rejects v9; last-good covers reloads).
+- Test: score units (gate matrix, trend math, AA-cost-wins) +
+  processing (gate/flags/ends/rollup/migration) + v2 breakdown
+  tests in both UIs; full workspace green (417 passed).
+  fmt/clippy binaries still absent here — CI runs the gates.
 
-## Iter 44 — Gateway consumes score (planned)
+## Iter 44 — Gateway consumes score (done)
 
-- Goal: Routing reads the published score/ordering only.
+- Goal: routing reads the published score/ordering only.
 - Value: `low`/`think` serve the bracket ends from one lookup;
   `lowest` keeps full-list cheapest. No new virtual IDs.
-- Shipped: Score-ordered legs, fallback chain. Test: score order
-  honored; legacy fallback intact.
+- Shipped: snapshot bracket set; score-first `low`/`think` legs
+  (cheapest-above-floor / best-under-cap over stored v2
+  components, legacy fallback when score data is missing);
+  `lowest` gains `/minindex/` tag floors, activity tie-breaks,
+  and true HTTP fail-closed (lib no longer decays its rejections
+  to passthrough, matching documented intent); preview parity
+  for all three. Deploy with/after the first v10 bracket
+  publish; old/keyless artifacts route legacy automatically.
+- Test: `score_routing.rs` (bracket ends, floor/cap rejections,
+  gates-on-score, full-list lowest, minindex filter/header,
+  activity ties, malformed floors, legacy fallback, preview
+  parity) + tag-floor parse units; full workspace green
+  (425 passed). fmt/clippy binaries still absent here — CI runs
+  the gates.
 
-## Iter 45 — Long-tail min-value fallback (planned)
+## Iter 45 — Long-tail min-value fallback (done)
 
-- Goal: For models outside the bracket, route to cheapest
+- Goal: for models outside the bracket, route to cheapest
   eligible offering per type.
-- Value: Rare models still get served at the best possible price.
-- Shipped: `decide_ordered_virtual` falls back to `Price` orientation
-  when the model is out-of-bracket. Test: rare model → cheapest.
+- Value: rare models still get served at the best possible price.
+- Shipped: legacy ordered path partitions on the bracket —
+  in-bracket takes legacy ordering, the rest falls back to
+  cheapest-first with no tier floor (rejections name the
+  fallback, code unchanged); pinned out-of-bracket models skip
+  the ranking for cheapest; no bracket data means pure legacy.
+  Preview parity for both.
+- Test: `longtail.rs` (think tail serve, member priority, pinned
+  skip/keep, clarified rejection, preview lists); full workspace
+  green (437 passed). fmt/clippy binaries still absent here — CI
+  runs the gates.
 
-## Iter 46 — UI: catalog TOP tab (planned)
+## Iter 46 — UI: catalog TOP tab (done)
 
-- Goal: Show the score, its arithmetic, and its flags in the catalog.
-- Value: Operators debug routing inputs without guessing.
-- Shipped: `/models?tab=top` (generic models, arithmetic, flags);
-  overview bracket counts + fetch health; inspector score rank.
-  Test: tab renders; flags present; metrics set.
+- Goal: show the score, its arithmetic, and its flags in the catalog.
+- Value: operators debug routing inputs without guessing.
+- Shipped: `/models?tab=top` (bracket score-desc + flagged
+  outsiders, arithmetic, `?q=` + `?min=`); overview bracket counts
+  + per-source fetch health; gateway Models tab mirrors TOP;
+  inspector score-rank column (`#N (S.S)` + JSON);
+  `pennyrouter_score_models_total` / `score_flag_total` /
+  `sync_fetch_total` gauges refreshed per snapshot.
+- Test: TOP tab + health + empty grace (both UIs), inspector
+  column, gauge series; full workspace green (443 passed).
+  fmt/clippy binaries still absent here — CI runs the gates.
 
-## Iter 47 — Default switch + validation (planned)
+## Iter 47 — Default switch + validation (done)
 
-- Goal: Make the score ordering the default for `low`/`think`,
+- Goal: make the score ordering the default for `low`/`think`,
   with rollback.
-- Value: The system routes on usage-backed value instead of
-  static tier sorts.
-- Shipped: `ROUTING_DEFAULT` flag (default: `score_first`). A/B
-  validation. Rollback path. Test: flag honored; fallback works.
+- Value: the system routes on usage-backed value instead of
+  static tier sorts; a single flag rolls back.
+- Shipped: `ROUTING_DEFAULT` (`score_first` default, `legacy`
+  forces pre-score ordering; anything else fails closed at
+  startup); every pick records its ordering;
+  `pennyrouter_routing_order_total{ordering,tier}` compares them;
+  A/B canary runbook in operations.
+- Test: flag parse units + legacy-mode routing/metrics tests;
+  invalid values verified to exit 101 pre-serve; full workspace
+  green (446 passed). fmt/clippy binaries still absent here — CI
+  runs the gates.
 
-## After Iter 47
+## Iter 48 — Coding tier family (done)
+
+- Goal: restore `openrouter/pair/coding[/think]` (+ `privacy/`)
+  as popularity-first picks alongside the score-first tiers.
+- Value: operators get the most-used bracket in legacy
+  price/quality order — more options to select, no score math.
+- Shipped: `Coding`/`CodingThink` tiers through the ordered path
+  (legacy comparators + floors, bracket-scoped pool, fail closed
+  without bracket data); `minindex` composes; valid fallback
+  targets; menu (20 ids) + inspector (16 fixed combos) list them.
+- Test: parse matrix + `coding_tiers.rs` (route/privacy/minindex/
+  fallback/empty-bracket/preview/menu); full workspace green
+  (431 passed). fmt/clippy binaries still absent here — CI runs
+  the gates.
+
+## After Iter 48

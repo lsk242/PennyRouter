@@ -213,6 +213,34 @@ static tier sorts.
 - Config flag honored; legacy fallback works.
 - Metrics compare the two orderings.
 
+## Iter 48 — Coding tier family (depends on Iter 44)
+
+**Goal:** `openrouter/pair/coding[/think]` (+ `privacy/`) as
+popularity-first picks alongside the score-first tiers.
+
+**Value:** Operators get the most-used bracket in legacy
+price/quality order — more options to select, no score math.
+
+**Shipped:**
+
+- `crates/gateway/src/routing.rs`:
+  - `Coding`/`CodingThink` tiers through `decide_ordered_virtual`
+    with the legacy comparators and floors, pool scoped to the
+    bracket; fail closed without bracket data (never a silent
+    full-list serve).
+  - `minindex` composes; valid `/fallback/` targets; no
+    `/fallback/` suffix of their own.
+  - Menu grows to 20 ids, inspector fixed combos to 16.
+- Docs: proposal revision note, routing/API/operations counts.
+
+**Tests:**
+
+- `crates/gateway/tests/coding_tiers.rs`:
+  - `coding` → cheapest in-bracket; `coding/think` → best quality
+    in-bracket; out-of-bracket traps lose both.
+  - Empty bracket fails closed (route + preview).
+  - Privacy variant, `minindex` composition, fallback target, menu.
+
 ## Dependencies
 
 ```
@@ -220,6 +248,7 @@ Iter 42 (data)
   └─▶ Iter 43 (score + brackets)
        └─▶ Iter 44 (gateway consume)
             ├─▶ Iter 45 (long-tail)
+            ├─▶ Iter 48 (coding tiers)
             └─▶ Iter 46 (TOP tab)
                  └─▶ Iter 47 (default switch)
 ```
