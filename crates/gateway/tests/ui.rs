@@ -633,6 +633,8 @@ async fn ui_prices_render_per_million_tokens() {
                     rank_quality: Some(71.0),
                     rank_efficiency: Some(0.99),
                     rank_popularity: Some(1.0),
+                    rank_activity: None,
+                    rank_cost_task: None,
                     rank_basis: Some("coding".to_string()),
                     rank_ruleset: Some("rank-v1".to_string()),
                     ranked_at: Some("t".to_string()),
@@ -734,6 +736,8 @@ async fn ui_models_tab_mirrors_catalog_models_page() {
                         rank_quality: Some(60.0),
                         rank_efficiency: Some(0.5),
                         rank_popularity: Some(1.0),
+                        rank_activity: None,
+                        rank_cost_task: None,
                         rank_basis: Some("coding".to_string()),
                         rank_ruleset: Some("rank-v1".to_string()),
                         ranked_at: Some("t".to_string()),
@@ -913,6 +917,273 @@ async fn ui_models_tab_mirrors_catalog_models_page() {
         models.contains("<a href=\"/ui?models_tab=tiers#models\" class=\"active\">"),
         "tiers tab marked active on fallback"
     );
+
+    // Iter 46: the inspector shows each candidate's score rank —
+    // Exp #1 (30.0), Cheap #2 (10.0) — over the legacy-ordered list.
+    let inspector = body
+        .split("id=\"tab-inspector\"")
+        .nth(1)
+        .and_then(|tail| tail.split("id=\"tab-sessions\"").next())
+        .expect("inspector panel sits before the sessions panel");
+    assert!(
+        inspector.contains("<th>score rank</th>"),
+        "score rank column present"
+    );
+    assert!(inspector.contains("#1 (30.0)"), "Exp ranked first");
+    assert!(inspector.contains("#2 (10.0)"), "Cheap ranked second");
+    let preview: serde_json::Value = client()
+        .get(format!(
+            "http://{gw}/ui/preview?model=openrouter/pair/low&top=5"
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let exp = preview["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["provider"] == "Exp")
+        .unwrap();
+    assert_eq!(exp["score_rank"], serde_json::json!(1));
+    assert_eq!(exp["rank_score"], serde_json::json!(30.0));
+}
+
+/// Iter 46: the gateway Models top tab mirrors the catalog UI page —
+/// same rows, order, arithmetic, and filters over the live snapshot.
+#[tokio::test]
+async fn ui_models_top_tab_mirrors_catalog_page() {
+    let _guard = lock_env().await;
+    std::env::set_var("GATEWAY_UI", "1");
+    let path = std::env::temp_dir().join(format!("gateway-ui-top-{}.db", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    {
+        let catalog = Catalog::open(&path).unwrap();
+        catalog.init().unwrap();
+        catalog
+            .set_meta(
+                "top_models",
+                r#"{"top/alpha":{"score":36.0,"quality":80.0,"efficiency":0.5,"activity":0.9,"cost_task":0.01,"basis":"coding","level":0.9,"trend":1.1,"bracket":true,"flags":[]},
+                    "top/beta":{"score":24.0,"quality":60.0,"efficiency":0.5,"activity":0.8,"cost_task":0.01,"basis":"coding","level":0.88,"trend":1.0,"bracket":true,"flags":[]},
+                    "top/ghost":{"score":null,"quality":null,"efficiency":null,"activity":null,"cost_task":null,"basis":null,"level":0.4,"trend":1.0,"bracket":false,"flags":["no-price","popular-but-unscored"]}}"#,
+            )
+            .unwrap();
+    }
+    let router = Arc::new(pennyrouter_gateway::routing::Router::load(&path).expect("loads"));
+    let state =
+        pennyrouter_gateway::AppState::new("http://127.0.0.1:9".to_string()).with_router(router);
+    let app = pennyrouter_gateway::app_with_state(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let gw = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    std::env::remove_var("GATEWAY_UI");
+
+    let body = client()
+        .get(format!("http://{gw}/ui?models_tab=top"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    let models = models_panel(&body);
+    assert!(models.contains("top (3)"), "tab count");
+    let alpha = models.find("top/alpha").unwrap();
+    let beta = models.find("top/beta").unwrap();
+    let ghost = models.find("top/ghost").unwrap();
+    assert!(
+        alpha < beta && beta < ghost,
+        "bracket score-desc, flagged last"
+    );
+    for line in [
+        "rank_score = 80.00 × 0.5000 × 0.9000 = 36.0",
+        "activity   = 0.9000 × (1 + +0.1000) / 1.10 = 0.9000",
+        "flags      = no-price, popular-but-unscored",
+        "bracket    = no",
+    ] {
+        assert!(models.contains(line), "same arithmetic: {line}");
+    }
+    assert!(
+        !models.contains("/endpoints?model=top"),
+        "model cells stay plain text, like the other tabs"
+    );
+    let beta_only = client()
+        .get(format!("http://{gw}/ui?models_tab=top&q=beta"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(beta_only.contains("top/beta"));
+    assert!(!beta_only.contains("top/alpha"));
+    let min = client()
+        .get(format!("http://{gw}/ui?models_tab=top&min=30"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    let min = models_panel(&min);
+    assert!(min.contains("top/alpha"));
+    assert!(!min.contains("top/beta"));
+
+    // No rollup at all: the tab explains itself.
+    let bare = std::env::temp_dir().join(format!("gateway-ui-top-bare-{}.db", std::process::id()));
+    let _ = std::fs::remove_file(&bare);
+    {
+        let catalog = Catalog::open(&bare).unwrap();
+        catalog.init().unwrap();
+    }
+    std::env::set_var("GATEWAY_UI", "1");
+    let router = Arc::new(pennyrouter_gateway::routing::Router::load(&bare).expect("loads"));
+    let state =
+        pennyrouter_gateway::AppState::new("http://127.0.0.1:9".to_string()).with_router(router);
+    let app = pennyrouter_gateway::app_with_state(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let gw2 = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let body = client()
+        .get(format!("http://{gw2}/ui?models_tab=top"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(models_panel(&body).contains("No TOP data in this artifact"));
+    assert!(!body.contains("NaN"), "no NaN anywhere");
+}
+
+/// Iter 43: v2 rows (activity + stored cost/task) render the v2
+/// arithmetic, same text as the catalog UI models page.
+#[tokio::test]
+async fn ui_models_v2_rows_render_activity_arithmetic() {
+    let _guard = lock_env().await;
+    std::env::set_var("GATEWAY_UI", "1");
+    let path = std::env::temp_dir().join(format!("gateway-ui-v2-{}.db", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    {
+        let catalog = Catalog::open(&path).unwrap();
+        catalog.init().unwrap();
+        catalog
+            .insert_model(&ModelRow {
+                model_id: "v2/model".to_string(),
+                name: "v2/model".to_string(),
+                source: "test".to_string(),
+                payload: "{}".to_string(),
+                fetched_at: "t".to_string(),
+            })
+            .unwrap();
+        catalog
+            .update_model_index(
+                "v2/model",
+                &ModelIndex {
+                    aa_intelligence_index: None,
+                    aa_coding_index: Some(80),
+                    aa_agentic_index: None,
+                    aa_cost_per_task: None,
+                },
+            )
+            .unwrap();
+        catalog
+            .update_model_activity("v2/model", Some(0.99), Some(1.0))
+            .unwrap();
+        catalog
+            .insert_endpoint(&EndpointRow {
+                id: 0,
+                model_id: "v2/model".to_string(),
+                provider_name: "V2Provider".to_string(),
+                payload: "{}".to_string(),
+                fetched_at: "t".to_string(),
+                price_prompt: Some(1.0),
+                price_completion: Some(2.0),
+                price_cache_read: None,
+                price_cache_write: None,
+                precision_class: Some("fp16".to_string()),
+                quantization: None,
+                promo_discount: None,
+                processed_at: Some("t".to_string()),
+                supports_tools: None,
+                supports_decisions: None,
+                quality_tier: None,
+                quality_score: None,
+                scored_at: None,
+                score_model: None,
+                score_prompt: None,
+                price_override_tokens: None,
+            })
+            .unwrap();
+        let id = catalog.endpoints_for("v2/model").unwrap()[0].id;
+        catalog
+            .update_endpoint_index(
+                id,
+                &EndpointIndex {
+                    price_prompt: Some(1.0),
+                    price_completion: Some(2.0),
+                    price_cache_read: None,
+                    price_cache_write: None,
+                    precision_class: Some("fp16".to_string()),
+                    quantization: None,
+                    promo_discount: None,
+                    processed_at: "t".to_string(),
+                    supports_tools: None,
+                    supports_decisions: None,
+                    price_override_tokens: None,
+                },
+            )
+            .unwrap();
+        catalog
+            .update_endpoint_rank(
+                id,
+                &EndpointRank {
+                    rank_score: Some(36.0),
+                    rank_quality: Some(80.0),
+                    rank_efficiency: Some(0.5),
+                    rank_popularity: None,
+                    rank_activity: Some(0.9),
+                    rank_cost_task: Some(0.01),
+                    rank_basis: Some("coding".to_string()),
+                    rank_ruleset: Some("rank-v2".to_string()),
+                    ranked_at: Some("t".to_string()),
+                },
+            )
+            .unwrap();
+    }
+    let router = Arc::new(pennyrouter_gateway::routing::Router::load(&path).expect("loads"));
+    let state =
+        pennyrouter_gateway::AppState::new("http://127.0.0.1:9".to_string()).with_router(router);
+    let app = pennyrouter_gateway::app_with_state(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let gw = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    std::env::remove_var("GATEWAY_UI");
+
+    let body = client()
+        .get(format!("http://{gw}/ui"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    let models = models_panel(&body);
+    for line in [
+        "cost/task  = $0.010000 (stored)",
+        "activity   = 0.9900 × (1 + +0.0000) / 1.10 = 0.9000",
+        "rank_score = 80.00 × 0.5000 × 0.9000 = 36.0",
+        "ruleset    = rank-v2",
+    ] {
+        assert!(models.contains(line), "v2 line present: {line}");
+    }
+    let calc = models
+        .split_once("calc — v2/model")
+        .map(|(_, tail)| &tail[..tail.len().min(1200)])
+        .unwrap();
+    assert!(!calc.contains("popularity ="), "no v1 line in v2 row");
 }
 
 #[test]

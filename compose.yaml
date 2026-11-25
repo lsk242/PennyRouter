@@ -46,6 +46,7 @@ services:
     environment:
       # Secrets only (generic config arrives via env_file above):
       # score backends + popularity-pins Data API key.
+      AA_API_KEY: ${AA_API_KEY:-}
       BASETEN_API_KEY: ${BASETEN_API_KEY:-}
       MODAL_KEY_ID: ${MODAL_KEY_ID:-}
       MODAL_KEY_SECRET: ${MODAL_KEY_SECRET:-}

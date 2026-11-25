@@ -75,13 +75,16 @@ session.
 - `lowest` (Iter 19): cheapest paid priceable offering with a known
   precision class across all models — same paid-only filter, budget,
   throttle skip, stickiness (under the full tagged id namespace),
-  and deterministic tie-breaks (cost, model id, provider) as the
-  `low` tier, minus its scored-tier floor. Fails closed like
-  virtual ids (`no_eligible_offering` 503, `budget_exceeded` 400)
-  instead of leaking the tagged id upstream; exactly-once (tags
-  never retry). Unknown base models still pass through untouched,
-  and first recognized orientation wins (`price/lowest` stays
-  same-model).
+  and deterministic tie-breaks as the `low` tier, minus its
+  scored-tier floor. Full list, bracket or not; activity level
+  breaks price ties (Iter 44), then model id, provider. An
+  optional `/minindex/<n>` tag segment floors the pool, failing
+  closed on malformed values like the virtual suffix. Fails closed
+  like virtual ids (`no_eligible_offering` 503, `budget_exceeded`
+  400) instead of leaking the tagged id upstream; exactly-once
+  (tags never retry). Unknown base models still pass through
+  untouched, and first recognized orientation wins (`price/lowest`
+  stays same-model).
 - Free-fallback chains (Iter 21): `openrouter/pair/free/fallback/<tier>`
   (`low` | `think` | `lowest` | `decision` | `batch`). Free leg first with existing free
   semantics; on free exhaustion (`no_eligible_offering`) or upstream
@@ -127,8 +130,19 @@ session.
   provider exists; other providers and unknown tiers pass through.
   `free` shares the legacy free path under its own session namespace;
   `low` picks the cheapest priceable known-class offering across
-  models; `think` picks the best quality signals across models. Tiers
-  are disjoint: zero-cost serves `free` only. Per-key daily free caps
+  models; `think` picks the best quality signals across models. When
+  the artifact carries a usage bracket and v2 scores (Iter 44),
+  both switch to score-first: `low` takes the cheapest in-bracket
+  offering at/above the performance floor, `think` the best
+  in-bracket performance under the spend cap, from the stored
+  components (unmeetable floor/cap rejects; tools, budget, context,
+  and throttle gates still apply). Missing score data falls back
+  to the legacy ordering, which serves in-bracket models first
+  and falls back to cheapest out-of-bracket with no tier floor
+  (Iter 45 long-tail). Tiers are disjoint: zero-cost serves
+  `free` only, and `:batch` variants serve the `batch` tier only
+  (async pricing can't serve interactive requests, so every
+  interactive leg excludes them). Per-key daily free caps
   live upstream, not here: OpenRouter's `GET /api/v1/key` reports each
   key's `free_model_daily_requests` used/limit/remaining, and an
   exhausted key surfaces as 429s — which the free leg already turns
@@ -154,8 +168,11 @@ session.
   catalog-sync env) nominates such ids for individual fetching.
 - Batch tier: `openrouter/pair/[privacy/]batch` routes to the cheapest
   `:batch`-variant offering (OpenRouter's async batch API pricing,
-  model ids ending in `:batch`). Paid-only keeps tier disjointness
-  (zero-cost serves `free` only); no quality floor and no
+  model ids ending in `:batch`). Batch variants serve this tier
+  exclusively: the interactive tiers (`free`/`low`/`think`/
+  `decision`/`lowest`) exclude them, even zero-cost ones, since async
+  pricing can't serve interactive requests; explicit direct or pinned
+  ids naming a variant still resolve. No quality floor and no
   precision-class requirement — the suffix is the capability match,
   like `decision`. Same tool/budget/throttle/stickiness semantics as
   the other cross-model tiers, same chat path (the body is rewritten
@@ -163,6 +180,14 @@ session.
   valid `/fallback/` target. Async processing is a caller-level
   latency tradeoff, so `batch` stays out of the smart classifier's
   tier domain.
+- Coding tiers (Iter 48): `openrouter/pair/[privacy/]coding` and
+  `.../coding/think` run the `low`/`think` legacy orderings
+  (cheapest / best quality signals, same floors) scoped to the
+  most-used (top-usage bracket) models — popularity-first picks
+  alongside the score-first `low`/`think`. No bracket data means
+  no pool, so they fail closed instead of silently serving the
+  full list. `minindex` composes; valid `/fallback/` targets;
+  no `/fallback/` suffix of their own, like `low`/`think`.
 - Decisions route (Iter 27): `POST /v1/decisions` dispatches through
   the same virtual ids (`decision`, `decision/free`,
   `decision/free/fallback/decision`) but rewrites the model only —
@@ -181,9 +206,11 @@ session.
   picks the cheapest eligible provider for that model — ranking order
   when the catalog has it, otherwise inline effective cost — with
   provider/budget/tool/throttle filtering scoped to that model's
-  offerings. `.../fallback/<tier>` falls through to the named
-  cross-model tier when the pinned leg has nothing to serve, just like
-  `free/fallback/<tier>`. Privacy/budget/auth semantics mirror the
+  offerings. Models outside the usage bracket skip the ranking and
+  go cheapest-first (Iter 45 long-tail). `.../fallback/<tier>`
+  falls through to the named cross-model tier when the pinned leg
+  has nothing to serve, just like `free/fallback/<tier>`.
+  Privacy/budget/auth semantics mirror the
   other virtual routes. An unknown model id fails closed with
   `no_eligible_offering` (503) rather than leaking the virtual name.
 - AA coding-index floor (Iter 33): an optional `/minindex/<0..=100>`
@@ -271,7 +298,7 @@ stores a pin. Throttled pins fall through exactly like the request
 path; fallback ids preview the leg that would serve; smart ids
 preview as `smart_requires_classifier` because their tier comes
 from the live classifier leg, not the local index. The `/ui` page
-renders the twelve fixed non-smart virtual combos top-3, two fixed
+renders the sixteen fixed non-smart virtual combos top-3, two fixed
 minindex combos (Iter 40), smart examples on the Classifier tab,
 plus a custom model box on top of this endpoint. Plain-request view: tools, budget,
 and only/ignore constraints are not applied, so a capped request can

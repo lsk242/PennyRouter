@@ -35,7 +35,7 @@ use pennyrouter_catalog::{
     EndpointRow, EndpointSpeed, ModelSignals, RankOrientation, RankingDocument, Signals,
     SCHEMA_VERSION,
 };
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
@@ -83,6 +83,8 @@ pub struct Offering {
     pub rank_quality: Option<f64>,
     pub rank_efficiency: Option<f64>,
     pub rank_popularity: Option<f64>,
+    pub rank_activity: Option<f64>,
+    pub rank_cost_task: Option<f64>,
     pub rank_basis: Option<String>,
     pub rank_ruleset: Option<String>,
     /// Speed/availability tie-breakers (Iter 34), display-only.
@@ -102,6 +104,17 @@ pub struct Snapshot {
     /// Per-model signals the value score reads (Iter 34): AA indexes
     /// + popularity share. Display-only for the debug UI models tab.
     pub model_signals: HashMap<String, ModelSignals>,
+    /// Top-usage bracket model ids (Iter 44): `low`/`think` serve
+    /// the bracket ends when this is non-empty, legacy ordering
+    /// otherwise. Empty on old/keyless artifacts.
+    pub bracket: HashSet<String>,
+    /// Model-level TOP rollup (Iter 46): best score + components +
+    /// flags per generic model. Display + metrics only; routing
+    /// reads the bracket set above.
+    pub top_models: HashMap<String, pennyrouter_catalog::TopModel>,
+    /// Sync fetch health (Iter 46): last-ok timestamps per fetch
+    /// group. Metrics only.
+    pub fetch_health: BTreeMap<String, String>,
     pub artifact_version: Option<String>,
     /// Pinned popular slugs (`openrouter/<slug>` menu ids) from the
     /// catalog's Data API fetch; empty on old/keyless artifacts.
@@ -138,6 +151,10 @@ pub struct Decision {
     /// AA coding-index floor this pick had to satisfy (Iter 33);
     /// echoed as `x-pennyrouter-minindex` when present.
     pub minindex: Option<u8>,
+    /// Ordering that served this pick (Iter 47): `score` /
+    /// `legacy` / `longtail` for the ordered tiers, the leg name
+    /// elsewhere. Counted per pick for A/B comparison.
+    pub ordering: &'static str,
 }
 
 /// Session pin: provider (and class) chosen by the session's first route.
@@ -241,10 +258,19 @@ pub const FREE_MODEL: &str = "openrouter/free";
 /// cheapest basic offering, `think` = best-quality offering,
 /// `decision` (Iter 24) = cheapest decisions-capable offering
 /// (behavior-scoring models), `batch` = cheapest `:batch`-variant
-/// offering (async batch API pricing). Tiers compare by the
-/// documented price metric (blended input/output/cache effective
-/// cost) with eligibility before price; FP resolution is a separate
-/// class, never a silent substitute.
+/// offering (async batch API pricing). Batch variants serve the
+/// `batch` tier exclusively — every other cross-model pick excludes
+/// them. Tiers compare by the documented price metric (blended
+/// input/output/cache effective cost) with eligibility before
+/// price; FP resolution is a separate class, never a silent
+/// substitute.
+///
+/// `coding`/`coding/think` (Iter 48) = the `low`/`think` legacy
+/// orderings (cheapest / best quality signals) scoped to the
+/// most-used (top-usage bracket) models — popularity-first picks
+/// alongside the score-first `low`/`think`. No bracket data means
+/// no pool, so they fail closed instead of silently serving the
+/// full list.
 ///
 /// `smart` (Iter 26) is not a tier but a classifier mode: the gateway
 /// calls a decision model to pick one of `free`/`lowest`/`low`
@@ -257,6 +283,8 @@ pub enum VirtualTier {
     Free,
     Low,
     Think,
+    Coding,
+    CodingThink,
     Decision,
     Batch,
     Smart,
@@ -322,6 +350,20 @@ fn parse_minindex_value(value: &str) -> Option<u8> {
     }
 }
 
+/// `minindex` floor from `lowest`-tag segments (Iter 44): the value
+/// after the first `minindex` tag (`<model>/lowest/minindex/<n>`).
+/// Absent means no floor; malformed fails closed like the virtual
+/// suffix — a `lowest` rewrite is gateway-owned either way.
+fn lowest_minindex(tags: &[String]) -> Result<Option<u8>, String> {
+    let Some(pos) = tags.iter().position(|tag| tag == "minindex") else {
+        return Ok(None);
+    };
+    let value = tags.get(pos + 1).map(String::as_str).unwrap_or("");
+    parse_minindex_value(value)
+        .map(Some)
+        .ok_or_else(|| format!("minindex must be an integer 0..100, got {value:?}"))
+}
+
 /// Split an optional `/minindex/<n>` suffix off a virtual core. An
 /// unusable segment (empty, non-numeric, out of range, or duplicated)
 /// is an error, never a silent ignore: the gateway owns this id space,
@@ -383,6 +425,8 @@ fn parse_virtual_checked(model_field: &str) -> Result<VirtualModel, VirtualParse
         "decision/free" => (VirtualTier::Decision, true),
         "low" if fallback.is_none() => (VirtualTier::Low, false),
         "think" if fallback.is_none() => (VirtualTier::Think, false),
+        "coding" if fallback.is_none() => (VirtualTier::Coding, false),
+        "coding/think" if fallback.is_none() => (VirtualTier::CodingThink, false),
         "decision" if fallback.is_none() => (VirtualTier::Decision, false),
         "batch" if fallback.is_none() => (VirtualTier::Batch, false),
         "smart" if fallback.is_none() => (VirtualTier::Smart, false),
@@ -424,13 +468,17 @@ pub fn invalid_virtual(model_field: &str) -> Option<String> {
 /// `classifier_not_configured` instead of serving. Ordered
 /// small-first: each tier's pair (base, then privacy) before the
 /// next tier up.
-pub const VIRTUAL_MODELS: [&str; 16] = [
+pub const VIRTUAL_MODELS: [&str; 20] = [
     "openrouter/pair/free",
     "openrouter/pair/privacy/free",
     "openrouter/pair/low",
     "openrouter/pair/privacy/low",
+    "openrouter/pair/coding",
+    "openrouter/pair/privacy/coding",
     "openrouter/pair/think",
     "openrouter/pair/privacy/think",
+    "openrouter/pair/coding/think",
+    "openrouter/pair/privacy/coding/think",
     "openrouter/pair/decision",
     "openrouter/pair/privacy/decision",
     "openrouter/pair/decision/free",
@@ -622,7 +670,11 @@ fn free_eligible(
 /// Batch-variant model id (OpenRouter `:batch` suffix): the async
 /// batch API's discounted pricing. The `batch` tier matches only
 /// these, the way the `decision` tier matches only
-/// decisions-capable offerings.
+/// decisions-capable offerings — and every interactive leg
+/// (`free`/`low`/`think`/`decision`/`lowest`, routing and preview)
+/// excludes them: async pricing can't serve interactive requests.
+/// Explicit ids (direct model, pinned `model/<id>`) still resolve —
+/// the caller named the variant on purpose.
 fn is_batch_model(model_id: &str) -> bool {
     model_id.ends_with(":batch")
 }
@@ -651,6 +703,8 @@ pub fn tier_label(model_field: &str) -> &'static str {
         Some(VirtualTier::Free) => "free",
         Some(VirtualTier::Low) => "low",
         Some(VirtualTier::Think) => "think",
+        Some(VirtualTier::Coding) => "coding",
+        Some(VirtualTier::CodingThink) => "coding/think",
         Some(VirtualTier::Decision) => "decision",
         Some(VirtualTier::Batch) => "batch",
         Some(VirtualTier::Smart | VirtualTier::SmartMax) => "smart",
@@ -672,6 +726,47 @@ pub struct Router {
     /// deadlines (Iter 13). Never blocks routing alone: when every
     /// candidate is throttled, the least-stale one still serves.
     throttled: RwLock<HashMap<(String, String), Instant>>,
+    /// `low`/`think` ordering (Iter 47): score-first by default,
+    /// legacy on `ROUTING_DEFAULT=legacy`. Other legs ignore it.
+    default_ordering: OrderMode,
+}
+
+/// `low`/`think` ordering (Iter 47), from `ROUTING_DEFAULT`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OrderMode {
+    /// Score-first with legacy fallback (the default).
+    #[default]
+    ScoreFirst,
+    /// Pre-score legacy ordering over the full pool.
+    Legacy,
+}
+
+/// Parse `ROUTING_DEFAULT`: unset/empty means the default
+/// (`score_first`); anything else must be exactly `score_first` or
+/// `legacy` — anything unrecognized is an error, never a silent
+/// pick, so a typo fails closed at startup instead of routing on
+/// the wrong ordering.
+pub fn ordering_from_env() -> Result<OrderMode, String> {
+    parse_ordering(
+        std::env::var("ROUTING_DEFAULT")
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .as_deref(),
+    )
+}
+
+/// Pure half of `ordering_from_env`, so unit tests never touch the
+/// process environment (parallel tests share it).
+fn parse_ordering(value: Option<&str>) -> Result<OrderMode, String> {
+    match value {
+        None => Ok(OrderMode::ScoreFirst),
+        Some("score_first") => Ok(OrderMode::ScoreFirst),
+        Some("legacy") => Ok(OrderMode::Legacy),
+        Some(value) => Err(format!(
+            "ROUTING_DEFAULT must be 'score_first' or 'legacy', got {value:?}"
+        )),
+    }
 }
 
 /// Hard per-request price ceiling from the incoming `provider` object
@@ -874,6 +969,7 @@ impl Router {
             ranking: RwLock::new(ranking),
             sessions: RwLock::new(HashMap::new()),
             seed: fresh_seed(),
+            default_ordering: OrderMode::default(),
             throttled: RwLock::new(HashMap::new()),
         })
     }
@@ -891,6 +987,7 @@ impl Router {
             ranking: RwLock::new(None),
             sessions: RwLock::new(HashMap::new()),
             seed: fresh_seed(),
+            default_ordering: OrderMode::default(),
             throttled: RwLock::new(HashMap::new()),
         }
     }
@@ -916,6 +1013,35 @@ impl Router {
             snapshot.popular_apps.clone(),
             snapshot.popular_as_of.clone(),
         )
+    }
+
+    /// Score inputs for metrics (Iter 46): TOP rollup + fetch
+    /// health, cloned under one short read lock. Snapshot loads
+    /// and reloads are rare; the clone never sits on the request
+    /// path.
+    pub fn score_inputs(
+        &self,
+    ) -> (
+        HashMap<String, pennyrouter_catalog::TopModel>,
+        BTreeMap<String, String>,
+    ) {
+        let snapshot = self.snapshot.read().unwrap_or_else(|e| e.into_inner());
+        (snapshot.top_models.clone(), snapshot.fetch_health.clone())
+    }
+
+    /// True when this model field is a `lowest`-tag rewrite (Iter 44):
+    /// like virtual ids, its rejections fail closed instead of decaying
+    /// to passthrough, since the rewritten id would 404 opaquely
+    /// upstream. Unknown models are not rewrites (nothing matched, so
+    /// they pass through untouched). The substring pre-filter skips the
+    /// lock for ids that cannot match.
+    pub fn is_lowest_rewrite(&self, model_field: &str) -> bool {
+        if !model_field.contains("lowest") {
+            return false;
+        }
+        let snapshot = self.snapshot.read().unwrap_or_else(|e| e.into_inner());
+        split_model(&snapshot, model_field)
+            .is_some_and(|(_, tags)| orientation_from(&tags) == Orientation::Lowest)
     }
 
     /// Record a 429 from `(model_id, provider)` (Iter 13, header
@@ -1104,10 +1230,16 @@ impl Router {
         let model_signals = catalog
             .model_signals()
             .map_err(|e| RouteError(e.to_string()))?;
+        let bracket = pennyrouter_catalog::read_bracket_members(&catalog);
+        let top_models = pennyrouter_catalog::read_top_models(&catalog);
+        let fetch_health = pennyrouter_catalog::read_fetch_health(&catalog);
         Ok(Snapshot {
             models,
             aa_coding_index,
             model_signals,
+            bracket,
+            top_models,
+            fetch_health,
             artifact_version,
             popular_models,
             popular_apps,
@@ -1145,6 +1277,14 @@ impl Router {
     /// Atomically replace the ranking (ranking rebuild input).
     pub fn swap_ranking(&self, ranking: RankingDocument) {
         *self.ranking.write().unwrap_or_else(|e| e.into_inner()) = Some(ranking);
+    }
+
+    /// Builder: `low`/`think` ordering (Iter 47). Startup sets this
+    /// from `ROUTING_DEFAULT` (see `ordering_from_env`); tests use
+    /// it to pin an ordering deterministically.
+    pub fn with_ordering(mut self, mode: OrderMode) -> Self {
+        self.default_ordering = mode;
+        self
     }
 
     /// Best-effort ranking discovery for startup: a directory yields
@@ -1297,8 +1437,12 @@ impl Router {
         // degrades to passthrough only on the direct decide() path —
         // route_inner fails closed instead.
         if orientation == Orientation::Lowest {
+            // Tolerant path (mirrors `parse_virtual().ok()`):
+            // malformed floors decay to absent here; route_inner
+            // fails them closed.
+            let floor = lowest_minindex(&tags).unwrap_or(None);
             return self
-                .decide_lowest(&snapshot, authorization, constraints, model_field)
+                .decide_lowest(&snapshot, authorization, constraints, model_field, floor)
                 .ok();
         }
         let offerings = snapshot.models.get(&model_id)?;
@@ -1346,6 +1490,7 @@ impl Router {
                                 quantization: pick.quantization.clone(),
                                 orientation,
                                 sticky: true,
+                                ordering: "direct",
                                 minindex: None,
                             });
                         }
@@ -1415,6 +1560,7 @@ impl Router {
             quantization: pick.quantization.clone(),
             orientation,
             sticky: false,
+            ordering: "direct",
             minindex: None,
         })
     }
@@ -1459,7 +1605,25 @@ impl Router {
                 VirtualTier::Think,
                 minindex,
             ),
-            "lowest" => self.decide_lowest(snapshot, authorization, constraints, model_field),
+            "coding" => self.decide_ordered_virtual(
+                snapshot,
+                authorization,
+                constraints,
+                model_field,
+                VirtualTier::Coding,
+                minindex,
+            ),
+            "coding/think" => self.decide_ordered_virtual(
+                snapshot,
+                authorization,
+                constraints,
+                model_field,
+                VirtualTier::CodingThink,
+                minindex,
+            ),
+            "lowest" => {
+                self.decide_lowest(snapshot, authorization, constraints, model_field, minindex)
+            }
             "decision" => self.decide_decision(
                 snapshot,
                 authorization,
@@ -1819,14 +1983,21 @@ impl Router {
         // pick uses the same order as the fresh pick below. Prefer the
         // published ranking for this model/class when it covers the
         // candidates; otherwise fall back to inline cost (the same
-        // oriented sort the direct path uses for Default).
+        // oriented sort the direct path uses for Default). Long-tail
+        // (Iter 45): models outside the bracket skip the ranking and
+        // go cheapest-first; no bracket data means no long-tail.
+        let long_tail = !snapshot.bracket.is_empty() && !snapshot.bracket.contains(model_id);
         let ranking = self.ranking.read().unwrap_or_else(|e| e.into_inner());
         let class = majority_class_owned(&candidates);
-        let ranked = ranking
-            .as_ref()
-            .and_then(|r| r.models.get(model_id))
-            .and_then(|classes| classes.iter().find(|c| c.class == class))
-            .map(|c| &c.default);
+        let ranked = (!long_tail)
+            .then(|| {
+                ranking
+                    .as_ref()
+                    .and_then(|r| r.models.get(model_id))
+                    .and_then(|classes| classes.iter().find(|c| c.class == class))
+                    .map(|c| &c.default)
+            })
+            .flatten();
         if let Some(key) = &key {
             if let Some(pin) = self.lookup_pin(key) {
                 let mine: Vec<&Offering> = candidates
@@ -1872,6 +2043,7 @@ impl Router {
                             quantization: pick.quantization.clone(),
                             orientation: Orientation::Default,
                             sticky: true,
+                            ordering: "pinned",
                             minindex,
                         });
                     }
@@ -1908,6 +2080,8 @@ impl Router {
         if let Some(key) = key {
             let source = if ranked_used {
                 "published ranking order"
+            } else if long_tail {
+                "long-tail cheapest (outside the top-usage bracket)"
             } else {
                 "inline cheapest effective cost (balanced prompt/completion/cache blend, promo applied)"
             };
@@ -1928,6 +2102,7 @@ impl Router {
             quantization: pick.quantization.clone(),
             orientation: Orientation::Default,
             sticky: false,
+            ordering: "pinned",
             minindex,
         })
     }
@@ -1939,8 +2114,8 @@ impl Router {
     fn tier_floor(tier: VirtualTier) -> u8 {
         match tier {
             VirtualTier::Free => 0,
-            VirtualTier::Low => 1,
-            VirtualTier::Think => 3,
+            VirtualTier::Low | VirtualTier::Coding => 1,
+            VirtualTier::Think | VirtualTier::CodingThink => 3,
             // Decision never routes through the floored ordered path
             // (it has its own pick without a scored floor, like
             // `lowest`); the arm exists for exhaustiveness.
@@ -1954,12 +2129,29 @@ impl Router {
         }
     }
 
+    /// Display name for ordered-path tiers (low/think/coding family);
+    /// other arms exist for exhaustiveness, like `tier_floor`.
+    fn ordered_tier_name(tier: VirtualTier) -> &'static str {
+        match tier {
+            VirtualTier::Free => "free",
+            VirtualTier::Low => "low",
+            VirtualTier::Think => "think",
+            VirtualTier::Coding => "coding",
+            VirtualTier::CodingThink => "coding/think",
+            VirtualTier::Decision => "decision",
+            VirtualTier::Batch => "batch",
+            VirtualTier::Smart => "smart",
+            VirtualTier::SmartMax => "smart/max",
+        }
+    }
+
     /// Cross-model pick for the `low` (cheapest effective cost) and
     /// `think` (best quality signals) tiers. Eligibility filters
-    /// before price compares: caller restrictions, priceable, and a
+    /// before price compares: caller restrictions, priceable, a
     /// known precision class (unknown-class offerings are not eligible
     /// for tiered routing, so FP resolution never substitutes
-    /// silently).
+    /// silently), and non-batch model ids (`:batch` variants serve
+    /// the `batch` tier only).
     fn decide_ordered_virtual(
         &self,
         snapshot: &Snapshot,
@@ -1969,22 +2161,21 @@ impl Router {
         tier: VirtualTier,
         minindex: Option<u8>,
     ) -> Result<Decision, RouteRejection> {
-        let tier_name = match tier {
-            VirtualTier::Free => "free",
-            VirtualTier::Low => "low",
-            VirtualTier::Think => "think",
-            // Same note as `tier_floor`: unreachable via this path.
-            VirtualTier::Decision => "decision",
-            VirtualTier::Batch => "batch",
-            VirtualTier::Smart => "smart",
-            VirtualTier::SmartMax => "smart/max",
-        };
+        let tier_name = Self::ordered_tier_name(tier);
+        // Coding tiers scope to the most-used pool (Iter 48); an
+        // empty bracket means an empty pool — they fail closed
+        // instead of silently serving the full list.
+        let coding_only = matches!(tier, VirtualTier::Coding | VirtualTier::CodingThink);
         let base: Vec<&Offering> = snapshot
             .models
             .values()
             .flatten()
             .filter(|o| {
                 constraints.allows(&o.provider_name)
+                    // Batch variants serve the `batch` tier only: async
+                    // batch pricing can't serve interactive requests.
+                    && !is_batch_model(&o.model_id)
+                    && (!coding_only || snapshot.bracket.contains(o.model_id.as_str()))
                     // Tiers are disjoint by design: zero-cost serves `free`
                     // only, never `low`/`think`.
                     && inline_cost(o).is_some_and(|cost| cost > 0.0)
@@ -2019,7 +2210,103 @@ impl Router {
         if base.is_empty() {
             return Err(tools_unsupported());
         }
-        let floored: Vec<&Offering> = base
+        // Score-first path (Iter 44; Iter 47 gates it on the mode):
+        // when the artifact carries a bracket and scored offerings,
+        // low/think serve the bracket ends from the published
+        // numbers — no inline tier blending. Missing score data
+        // falls through to the legacy ordering below (the rollback
+        // path). Coding tiers stay legacy by design (Iter 48):
+        // popularity-first, not score-first.
+        let shortlist: Vec<&Offering> = if snapshot.bracket.is_empty()
+            || self.default_ordering != OrderMode::ScoreFirst
+            || !matches!(tier, VirtualTier::Low | VirtualTier::Think)
+        {
+            Vec::new()
+        } else {
+            base.iter()
+                .filter(|o| {
+                    snapshot.bracket.contains(o.model_id.as_str()) && o.rank_score.is_some()
+                })
+                .copied()
+                .collect()
+        };
+        if !shortlist.is_empty() {
+            return self.decide_scored_virtual(
+                authorization,
+                constraints,
+                session_ns,
+                tier,
+                minindex,
+                shortlist,
+            );
+        }
+        // Long-tail (Iter 45): with bracket data, in-bracket models
+        // take the legacy ordering and the rest fall back to
+        // cheapest-first with no tier floor. No bracket data — or
+        // legacy mode (Iter 47) — means pure legacy over the full
+        // pool (rollback path).
+        if snapshot.bracket.is_empty() || self.default_ordering != OrderMode::ScoreFirst {
+            return self.decide_legacy_ordered(
+                authorization,
+                constraints,
+                session_ns,
+                tier,
+                minindex,
+                base,
+            );
+        }
+        let (inside, outside): (Vec<&Offering>, Vec<&Offering>) = base
+            .into_iter()
+            .partition(|o| snapshot.bracket.contains(o.model_id.as_str()));
+        match self.decide_legacy_ordered(
+            authorization,
+            constraints,
+            session_ns,
+            tier,
+            minindex,
+            inside,
+        ) {
+            Ok(decision) => Ok(decision),
+            Err(first) => {
+                if outside.is_empty() {
+                    return Err(first);
+                }
+                match self.decide_longtail_ordered(
+                    authorization,
+                    constraints,
+                    session_ns,
+                    tier,
+                    minindex,
+                    outside,
+                ) {
+                    Ok(decision) => Ok(decision),
+                    Err(_) => Err(RouteRejection {
+                        code: first.code,
+                        message: format!(
+                            "{}; outside the top-usage bracket, falling back to cheapest",
+                            first.message
+                        ),
+                    }),
+                }
+            }
+        }
+    }
+
+    /// Legacy ordered pick (tiers/floors/inline cost): the pre-score
+    /// path over one pool — the whole pool without bracket data, the
+    /// in-bracket slice otherwise.
+    fn decide_legacy_ordered(
+        &self,
+        authorization: Option<&str>,
+        constraints: &ProviderConstraints,
+        session_ns: &str,
+        tier: VirtualTier,
+        minindex: Option<u8>,
+        pool: Vec<&Offering>,
+    ) -> Result<Decision, RouteRejection> {
+        let tier_name = Self::ordered_tier_name(tier);
+        let coding_only = matches!(tier, VirtualTier::Coding | VirtualTier::CodingThink);
+        let floored: Vec<&Offering> = pool
             .into_iter()
             .filter(|o| Self::quality_rank(o.quality_tier.as_deref()) >= Self::tier_floor(tier))
             .collect();
@@ -2054,7 +2341,7 @@ impl Router {
         if let Some(key) = &key {
             if let Some(pin) = self.lookup_pin(key) {
                 if let Some(pick) = Self::pinned_pick(&candidates, &pin, |a, b| match tier {
-                    VirtualTier::Low => inline_cost(a)
+                    VirtualTier::Low | VirtualTier::Coding => inline_cost(a)
                         .partial_cmp(&inline_cost(b))
                         .unwrap_or(std::cmp::Ordering::Equal)
                         .then_with(|| a.model_id.cmp(&b.model_id))
@@ -2073,13 +2360,14 @@ impl Router {
                         quantization: pick.quantization.clone(),
                         orientation: Orientation::Default,
                         sticky: true,
+                        ordering: "legacy",
                         minindex,
                     });
                 }
             }
         }
         let pick = match tier {
-            VirtualTier::Low => candidates.into_iter().min_by(|a, b| {
+            VirtualTier::Low | VirtualTier::Coding => candidates.into_iter().min_by(|a, b| {
                 inline_cost(a)
                     .partial_cmp(&inline_cost(b))
                     .unwrap_or(std::cmp::Ordering::Equal)
@@ -2100,7 +2388,7 @@ impl Router {
             message: format!("no offering is eligible for the {tier_name} tier"),
         })?;
         if let Some(key) = key {
-            let (rule, floor) = if tier == VirtualTier::Low {
+            let (rule, floor) = if matches!(tier, VirtualTier::Low | VirtualTier::Coding) {
                 (
                     "cheapest effective cost (balanced prompt/completion/cache blend, promo applied); tie-break cost, model id, provider",
                     "any scored tier",
@@ -2108,9 +2396,14 @@ impl Router {
             } else {
                 ("best quality signals (tier, then score, then cost)", "high")
             };
+            let pool = if coding_only {
+                "in-bracket (most-used) + "
+            } else {
+                ""
+            };
             let reason = format!(
                 "tier '{tier_name}': {rule}; quality floor = {floor}; \
-                 eligible = paid priceable + known precision class + provider allow + tools + context + budget; \
+                 eligible = {pool}paid priceable + known precision class + non-batch model + provider allow + tools + context + budget; \
                  throttle-skipped;{} later requests keep this provider (sticky).",
                 minindex_note(minindex),
             );
@@ -2124,6 +2417,251 @@ impl Router {
             quantization: pick.quantization.clone(),
             orientation: Orientation::Default,
             sticky: false,
+            ordering: "legacy",
+            minindex,
+        })
+    }
+
+    /// Long-tail pick (Iter 45): cheapest out-of-bracket offering
+    /// with no tier floor — unknown is cheapest-first, never
+    /// quality-first. Caller gates (context/budget), throttle, and
+    /// stickiness still apply. Caller passes out-of-bracket
+    /// offerings only.
+    fn decide_longtail_ordered(
+        &self,
+        authorization: Option<&str>,
+        constraints: &ProviderConstraints,
+        session_ns: &str,
+        tier: VirtualTier,
+        minindex: Option<u8>,
+        pool: Vec<&Offering>,
+    ) -> Result<Decision, RouteRejection> {
+        let tier_name = Self::ordered_tier_name(tier);
+        let price_order = |a: &&Offering, b: &&Offering| {
+            inline_cost(a)
+                .partial_cmp(&inline_cost(b))
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.model_id.cmp(&b.model_id))
+                .then_with(|| a.provider_name.cmp(&b.provider_name))
+        };
+        let fitting: Vec<&Offering> = pool
+            .into_iter()
+            .filter(|o| constraints.context_allows(o))
+            .collect();
+        if fitting.is_empty() {
+            return Err(context_exceeded(&format!("{tier_name} tier")));
+        }
+        let budgeted: Vec<&Offering> = fitting
+            .into_iter()
+            .filter(|o| constraints.budget_allows(o))
+            .collect();
+        if budgeted.is_empty() {
+            return Err(RouteRejection {
+                code: "budget_exceeded",
+                message: format!("no {tier_name} tier offering fits the price ceiling"),
+            });
+        }
+        let candidates = self.skip_throttled(budgeted);
+        let key = authorization.map(|auth| self.session_key(auth, session_ns));
+        if let Some(key) = &key {
+            if let Some(pin) = self.lookup_pin(key) {
+                if let Some(pick) = Self::pinned_pick(&candidates, &pin, price_order) {
+                    return Ok(Decision {
+                        model_id: pick.model_id.clone(),
+                        provider: pick.provider_name.clone(),
+                        tag: pick.tag.clone(),
+                        precision_class: pick.precision_class.clone(),
+                        quantization: pick.quantization.clone(),
+                        orientation: Orientation::Default,
+                        sticky: true,
+                        ordering: "longtail",
+                        minindex,
+                    });
+                }
+            }
+        }
+        let pick = candidates
+            .into_iter()
+            .min_by(price_order)
+            .ok_or_else(|| RouteRejection {
+                code: "no_eligible_offering",
+                message: format!("no offering is eligible for the {tier_name} tier"),
+            })?;
+        if let Some(key) = key {
+            let reason = format!(
+                "tier '{tier_name}': outside the top-usage bracket, falling back to cheapest; \
+                 eligible = out-of-bracket + paid priceable + known precision class + non-batch model + \
+                 provider allow + tools + context + budget; effective cost = balanced prompt/completion/cache blend, \
+                 promo applied; throttle-skipped;{} later requests keep this provider (sticky).",
+                minindex_note(minindex),
+            );
+            self.store_pin(key, Pin::from_pick(authorization, pick, reason));
+        }
+        Ok(Decision {
+            model_id: pick.model_id.clone(),
+            provider: pick.provider_name.clone(),
+            tag: pick.tag.clone(),
+            precision_class: pick.precision_class.clone(),
+            quantization: pick.quantization.clone(),
+            orientation: Orientation::Default,
+            sticky: false,
+            ordering: "longtail",
+            minindex,
+        })
+    }
+
+    /// Score-first ordering over the STORED v2 components (Iter 44,
+    /// exact, no recompute): cheapest task cost for `low`, best
+    /// performance for `think`, score then identity to break ties.
+    /// Shared by routing and preview. Missing components sort last —
+    /// the floor filters them first, so this only fires on
+    /// hand-built rows.
+    fn scored_order(tier: VirtualTier, a: &Offering, b: &Offering) -> std::cmp::Ordering {
+        let cost = |o: &Offering| o.rank_cost_task.unwrap_or(f64::INFINITY);
+        let quality = |o: &Offering| o.rank_quality.unwrap_or(f64::NEG_INFINITY);
+        let score = |o: &Offering| o.rank_score.unwrap_or(f64::NEG_INFINITY);
+        match tier {
+            VirtualTier::Low => cost(a)
+                .total_cmp(&cost(b))
+                .then_with(|| score(b).total_cmp(&score(a)))
+                .then_with(|| a.model_id.cmp(&b.model_id))
+                .then_with(|| a.provider_name.cmp(&b.provider_name)),
+            _ => quality(b)
+                .total_cmp(&quality(a))
+                .then_with(|| score(b).total_cmp(&score(a)))
+                .then_with(|| a.model_id.cmp(&b.model_id))
+                .then_with(|| a.provider_name.cmp(&b.provider_name)),
+        }
+    }
+
+    /// Score-first pick for the `low`/`think` tiers (Iter 44): the
+    /// bracket ends from the published numbers. `low` takes the
+    /// cheapest in-bracket offering at/above the performance floor;
+    /// `think` the best in-bracket performance under the spend cap.
+    /// Same tool/context/budget/throttle/sticky semantics as the
+    /// legacy path; an unmeetable floor/cap rejects instead of
+    /// serving outside the promise. Caller guarantees a non-empty
+    /// scored shortlist.
+    fn decide_scored_virtual(
+        &self,
+        authorization: Option<&str>,
+        constraints: &ProviderConstraints,
+        session_ns: &str,
+        tier: VirtualTier,
+        minindex: Option<u8>,
+        shortlist: Vec<&Offering>,
+    ) -> Result<Decision, RouteRejection> {
+        let tier_name = match tier {
+            VirtualTier::Low => "low",
+            _ => "think",
+        };
+        let floored: Vec<&Offering> = shortlist
+            .into_iter()
+            .filter(|o| match tier {
+                VirtualTier::Low => {
+                    o.rank_quality
+                        .is_some_and(|q| q >= pennyrouter_catalog::BRACKET_PERFORMANCE_FLOOR)
+                        && o.rank_cost_task.is_some()
+                }
+                _ => {
+                    o.rank_cost_task
+                        .is_some_and(|c| c <= pennyrouter_catalog::THINK_MAX_COST_TASK)
+                        && o.rank_quality.is_some()
+                }
+            })
+            .collect();
+        if floored.is_empty() {
+            let otherwise = if tier == VirtualTier::Low {
+                format!(
+                    "no in-bracket offering meets the low performance floor ({})",
+                    pennyrouter_catalog::BRACKET_PERFORMANCE_FLOOR
+                )
+            } else {
+                format!(
+                    "no in-bracket offering fits the think spend cap (${}/task)",
+                    pennyrouter_catalog::THINK_MAX_COST_TASK
+                )
+            };
+            return Err(RouteRejection {
+                code: "no_eligible_offering",
+                message: otherwise,
+            });
+        }
+        let fitting: Vec<&Offering> = floored
+            .into_iter()
+            .filter(|o| constraints.context_allows(o))
+            .collect();
+        if fitting.is_empty() {
+            return Err(context_exceeded(&format!("in-bracket {tier_name} tier")));
+        }
+        let budgeted: Vec<&Offering> = fitting
+            .into_iter()
+            .filter(|o| constraints.budget_allows(o))
+            .collect();
+        if budgeted.is_empty() {
+            return Err(RouteRejection {
+                code: "budget_exceeded",
+                message: format!("no in-bracket {tier_name} tier offering fits the price ceiling"),
+            });
+        }
+        let candidates = self.skip_throttled(budgeted);
+        let key = authorization.map(|auth| self.session_key(auth, session_ns));
+        if let Some(key) = &key {
+            if let Some(pin) = self.lookup_pin(key) {
+                if let Some(pick) =
+                    Self::pinned_pick(&candidates, &pin, |a, b| Self::scored_order(tier, a, b))
+                {
+                    return Ok(Decision {
+                        model_id: pick.model_id.clone(),
+                        provider: pick.provider_name.clone(),
+                        tag: pick.tag.clone(),
+                        precision_class: pick.precision_class.clone(),
+                        quantization: pick.quantization.clone(),
+                        orientation: Orientation::Default,
+                        sticky: true,
+                        ordering: "score",
+                        minindex,
+                    });
+                }
+            }
+        }
+        let pick = candidates
+            .into_iter()
+            .min_by(|a, b| Self::scored_order(tier, a, b))
+            .ok_or_else(|| RouteRejection {
+                code: "no_eligible_offering",
+                message: format!("no offering is eligible for the {tier_name} tier"),
+            })?;
+        if let Some(key) = key {
+            let rule = if tier == VirtualTier::Low {
+                format!(
+                    "cheapest in-bracket offering at/above performance floor {}",
+                    pennyrouter_catalog::BRACKET_PERFORMANCE_FLOOR
+                )
+            } else {
+                format!(
+                    "best in-bracket performance under ${}/task",
+                    pennyrouter_catalog::THINK_MAX_COST_TASK
+                )
+            };
+            let reason = format!(
+                "tier '{tier_name}': {rule} (score-first, rank-v2); \
+                 eligible = bracket + scored + paid + known class + non-batch + provider allow + \
+                 tools + context + budget; throttle-skipped;{} \
+                 later requests keep this provider (sticky).",
+                minindex_note(minindex),
+            );
+            self.store_pin(key, Pin::from_pick(authorization, pick, reason));
+        }
+        Ok(Decision {
+            model_id: pick.model_id.clone(),
+            provider: pick.provider_name.clone(),
+            tag: pick.tag.clone(),
+            precision_class: pick.precision_class.clone(),
+            quantization: pick.quantization.clone(),
+            orientation: Orientation::Default,
+            sticky: false,
+            ordering: "score",
             minindex,
         })
     }
@@ -2133,13 +2671,16 @@ impl Router {
     /// quality floor — the fallback when free turns run out. Same
     /// filters, budget, throttle, stickiness, and deterministic
     /// tie-breaks as the `low` tier, minus the scored-tier floor.
-    /// Exactly-once: tags never retry, only virtual ids do.
+    /// Exactly-once: tags never retry, only virtual ids do. Full
+    /// list, bracket or not (Iter 44); activity breaks price ties
+    /// and an optional `minindex` floor gates first.
     fn decide_lowest(
         &self,
         snapshot: &Snapshot,
         authorization: Option<&str>,
         constraints: &ProviderConstraints,
         session_ns: &str,
+        minindex: Option<u8>,
     ) -> Result<Decision, RouteRejection> {
         let base: Vec<&Offering> = snapshot
             .models
@@ -2150,12 +2691,23 @@ impl Router {
                     // Paid only: zero-cost serves the free paths.
                     && inline_cost(o).is_some_and(|cost| cost > 0.0)
                     && is_known_precision_class(o.precision_class.as_deref().unwrap_or("unknown"))
+                    // Batch variants serve the `batch` tier only.
+                    && !is_batch_model(&o.model_id)
+                    && meets_minindex(snapshot, &o.model_id, minindex)
             })
             .collect();
         if base.is_empty() {
             return Err(RouteRejection {
                 code: "no_eligible_offering",
-                message: "no paid offering is currently eligible".to_string(),
+                message: minindex.map_or_else(
+                    || "no paid offering is currently eligible".to_string(),
+                    |floor| {
+                        format!(
+                            "no paid offering meets minindex {floor} \
+                             (or none is otherwise eligible)"
+                        )
+                    },
+                ),
             });
         }
         let base: Vec<&Offering> = base
@@ -2187,13 +2739,9 @@ impl Router {
         if let Some(key) = &key {
             if let Some(pin) = self.lookup_pin(key) {
                 // Same cheapest-first comparator as the fresh pick below.
-                if let Some(pick) = Self::pinned_pick(&candidates, &pin, |a, b| {
-                    inline_cost(a)
-                        .partial_cmp(&inline_cost(b))
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                        .then_with(|| a.model_id.cmp(&b.model_id))
-                        .then_with(|| a.provider_name.cmp(&b.provider_name))
-                }) {
+                if let Some(pick) =
+                    Self::pinned_pick(&candidates, &pin, |a, b| Self::lowest_order(snapshot, a, b))
+                {
                     return Ok(Decision {
                         model_id: pick.model_id.clone(),
                         provider: pick.provider_name.clone(),
@@ -2202,31 +2750,28 @@ impl Router {
                         quantization: pick.quantization.clone(),
                         orientation: Orientation::Lowest,
                         sticky: true,
-                        minindex: None,
+                        ordering: "lowest",
+                        minindex,
                     });
                 }
             }
         }
         let pick = candidates
             .into_iter()
-            .min_by(|a, b| {
-                inline_cost(a)
-                    .partial_cmp(&inline_cost(b))
-                    .unwrap_or(std::cmp::Ordering::Equal)
-                    .then_with(|| a.model_id.cmp(&b.model_id))
-                    .then_with(|| a.provider_name.cmp(&b.provider_name))
-            })
+            .min_by(|a, b| Self::lowest_order(snapshot, a, b))
             .ok_or_else(|| RouteRejection {
                 code: "no_eligible_offering",
                 message: "no paid offering is currently eligible".to_string(),
             })?;
         if let Some(key) = key {
-            let reason = "cross-model 'lowest' tag: cheapest paid priceable offering with a known \
-                 precision class, no quality floor; eligible = paid + known class + provider allow + \
-                 tools + context + budget; effective cost = balanced prompt/completion/cache blend, \
-                 promo applied; tie-break cost, model id, provider; exactly-once; \
-                 later requests keep this provider (sticky)."
-                .to_string();
+            let reason = format!(
+                "cross-model 'lowest' tag: cheapest paid priceable offering with a known \
+                 precision class, no quality floor; eligible = paid + known class + non-batch model + \
+                 provider allow + tools + context + budget; effective cost = balanced prompt/completion/cache blend, \
+                 promo applied; tie-break cost, activity level, model id, provider; exactly-once;{} \
+                 later requests keep this provider (sticky).",
+                minindex_note(minindex),
+            );
             self.store_pin(key, Pin::from_pick(authorization, pick, reason));
         }
         Ok(Decision {
@@ -2237,8 +2782,28 @@ impl Router {
             quantization: pick.quantization.clone(),
             orientation: Orientation::Lowest,
             sticky: false,
-            minindex: None,
+            ordering: "lowest",
+            minindex,
         })
+    }
+
+    /// `lowest` ordering (Iter 44): cheapest first, activity level
+    /// breaks price ties (unmeasured sorts last so trending cheap
+    /// models surface), then identity. Shared by routing and preview.
+    fn lowest_order(snapshot: &Snapshot, a: &Offering, b: &Offering) -> std::cmp::Ordering {
+        let level = |o: &Offering| {
+            snapshot
+                .model_signals
+                .get(&o.model_id)
+                .and_then(|signals| signals.activity_level)
+                .unwrap_or(f64::NEG_INFINITY)
+        };
+        inline_cost(a)
+            .partial_cmp(&inline_cost(b))
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| level(b).total_cmp(&level(a)))
+            .then_with(|| a.model_id.cmp(&b.model_id))
+            .then_with(|| a.provider_name.cmp(&b.provider_name))
     }
 
     /// Cross-model pick for the `decision` tier (Iter 24): cheapest
@@ -2268,6 +2833,8 @@ impl Router {
             .filter(|o| {
                 constraints.allows(&o.provider_name)
                     && o.supports_decisions == Some(true)
+                    // Batch variants serve the `batch` tier only.
+                    && !is_batch_model(&o.model_id)
                     // Tiers are disjoint by design, like `low`/`think`:
                     // the bare scope serves paid only, zero-cost serves
                     // the `/free` scope.
@@ -2335,6 +2902,7 @@ impl Router {
                         quantization: pick.quantization.clone(),
                         orientation: Orientation::Default,
                         sticky: true,
+                        ordering: "decision",
                         minindex,
                     });
                 }
@@ -2362,7 +2930,7 @@ impl Router {
             let reason = format!(
                 "tier 'decision': cheapest decisions-capable offering ({cost_scope}); no quality floor, \
                  no precision-class requirement (capability match replaces it); \
-                 eligible = decisions-capable + provider allow + tools + context + budget; \
+                 eligible = decisions-capable + non-batch model + provider allow + tools + context + budget; \
                  effective cost = balanced prompt/completion/cache blend, promo applied; \
                  tie-break cost, model id, provider; throttle-skipped;{} \
                  later requests keep this provider (sticky).",
@@ -2378,19 +2946,21 @@ impl Router {
             quantization: pick.quantization.clone(),
             orientation: Orientation::Default,
             sticky: false,
+            ordering: "decision",
             minindex,
         })
     }
 
     /// Cross-model pick for the `batch` tier: cheapest `:batch`
-    ///-variant offering (async batch API pricing), paid only — tiers
-    /// are disjoint by design, like `low`/`think`, so a zero-cost
-    /// batch variant (if one ever appears) serves the `free` tier.
-    /// Same shape as [`Router::decide_decision`]: no quality floor
-    /// and no precision-class requirement (the `:batch` suffix is
-    /// the capability match), with the same tool, budget,
-    /// throttle, stickiness, and deterministic tie-breaks as the
-    /// other cross-model picks.
+    ///-variant offering (async batch API pricing), paid only.
+    /// Batch variants serve this tier exclusively — the interactive
+    /// tiers exclude them (even zero-cost ones), since async
+    /// pricing can't serve interactive requests. Same shape as
+    /// [`Router::decide_decision`]: no quality floor and no
+    /// precision-class requirement (the `:batch` suffix is the
+    /// capability match), with the same tool, budget, throttle,
+    /// stickiness, and deterministic tie-breaks as the other
+    /// cross-model picks.
     fn decide_batch(
         &self,
         snapshot: &Snapshot,
@@ -2468,6 +3038,7 @@ impl Router {
                         quantization: pick.quantization.clone(),
                         orientation: Orientation::Default,
                         sticky: true,
+                        ordering: "batch",
                         minindex,
                     });
                 }
@@ -2506,6 +3077,7 @@ impl Router {
             quantization: pick.quantization.clone(),
             orientation: Orientation::Default,
             sticky: false,
+            ordering: "batch",
             minindex,
         })
     }
@@ -2556,6 +3128,9 @@ impl Router {
                 offerings.iter().filter(|o| {
                     constraints.allows(&o.provider_name)
                         && free_eligible(ranking.as_ref(), model_id, o, now)
+                        // Batch variants serve the `batch` tier only,
+                        // even when zero-cost.
+                        && !is_batch_model(model_id)
                         && meets_minindex(snapshot, model_id, minindex)
                 })
             })
@@ -2592,9 +3167,9 @@ impl Router {
                     // on the full pool: a cooled pin re-serves only
                     // when nothing fresh remains).
                     let fresh_elsewhere = free.iter().any(|o| {
-                        !(o.provider_name == pin.provider
-                            && o.precision_class == pin.precision_class)
-                            && !self.is_throttled_pair(&o.model_id, &o.provider_name)
+                        !(self.is_throttled_pair(&o.model_id, &o.provider_name)
+                            || o.provider_name == pin.provider
+                                && o.precision_class == pin.precision_class)
                     });
                     let mine: Vec<&Offering> = if fresh_elsewhere {
                         mine.into_iter()
@@ -2656,7 +3231,7 @@ impl Router {
             };
             let reason = format!(
                 "{leg}: zero-cost offering (catalog zeros or unexpired promo window); \
-                 majority precision class '{}'; eligible = provider allow + free-eligible + tools; \
+                 majority precision class '{}'; eligible = provider allow + free-eligible + non-batch model + tools; \
                  order = {order} (effective cost = balanced prompt/completion/cache blend, promo applied); \
                  throttle-skipped;{} pin re-routes if it stops being free, else later requests keep \
                  this provider (sticky).",
@@ -2807,8 +3382,12 @@ impl Router {
             let snapshot = self.snapshot.read().unwrap_or_else(|e| e.into_inner());
             if let Some((_, tags)) = split_model(&snapshot, &model_field) {
                 if orientation_from(&tags) == Orientation::Lowest {
+                    let floor = lowest_minindex(&tags).map_err(|message| RouteRejection {
+                        code: "invalid_model",
+                        message,
+                    })?;
                     let decision =
-                        self.decide_lowest(&snapshot, auth, &constraints, &model_field)?;
+                        self.decide_lowest(&snapshot, auth, &constraints, &model_field, floor)?;
                     return Ok(finish(&model_field, json, decision));
                 }
             }
@@ -2902,6 +3481,8 @@ pub struct UiOffering {
     pub rank_quality: Option<f64>,
     pub rank_efficiency: Option<f64>,
     pub rank_popularity: Option<f64>,
+    pub rank_activity: Option<f64>,
+    pub rank_cost_task: Option<f64>,
     pub rank_basis: Option<String>,
     pub rank_ruleset: Option<String>,
     pub throughput_tps: Option<f64>,
@@ -2966,6 +3547,9 @@ pub struct UiSummary {
     /// Active session pins (Iter 37; Iter 39 adds backend model,
     /// live offering params, and the selection rule per pin).
     pub sessions: Vec<UiSession>,
+    /// TOP rollup entries (Iter 46): (model id, best score +
+    /// components + flags), unsorted — the models tab orders them.
+    pub top: Vec<(String, pennyrouter_catalog::TopModel)>,
 }
 
 impl Router {
@@ -3002,6 +3586,8 @@ impl Router {
                         rank_quality: o.rank_quality,
                         rank_efficiency: o.rank_efficiency,
                         rank_popularity: o.rank_popularity,
+                        rank_activity: o.rank_activity,
+                        rank_cost_task: o.rank_cost_task,
                         rank_basis: o.rank_basis.clone(),
                         rank_ruleset: o.rank_ruleset.clone(),
                         throughput_tps: o.throughput_tps,
@@ -3015,6 +3601,11 @@ impl Router {
             })
             .collect();
         models.sort_by(|a, b| a.0.cmp(&b.0));
+        let top: Vec<(String, pennyrouter_catalog::TopModel)> = snapshot
+            .top_models
+            .iter()
+            .map(|(id, entry)| (id.clone(), entry.clone()))
+            .collect();
         let artifact_version = snapshot.artifact_version.clone();
         drop(snapshot);
         let ranking = self.ranking.read().unwrap_or_else(|e| e.into_inner());
@@ -3123,6 +3714,7 @@ impl Router {
             ranking: rank_rows,
             free_offers: free_rows,
             sessions,
+            top,
         }
     }
 }
@@ -3138,16 +3730,20 @@ pub const MININDEX_PREVIEW_IDS: [&str; 2] = [
 /// Fixed inspector ids (Iter 29): the non-smart virtual menu. Smart ids
 /// need a live classifier leg, so they preview as an explanatory
 /// rejection instead of a candidate list.
-pub const FIXED_PREVIEW_IDS: [&str; 12] = [
+pub const FIXED_PREVIEW_IDS: [&str; 16] = [
     "openrouter/pair/free",
     "openrouter/pair/low",
     "openrouter/pair/think",
+    "openrouter/pair/coding",
+    "openrouter/pair/coding/think",
     "openrouter/pair/decision",
     "openrouter/pair/decision/free",
     "openrouter/pair/batch",
     "openrouter/pair/privacy/free",
     "openrouter/pair/privacy/low",
     "openrouter/pair/privacy/think",
+    "openrouter/pair/privacy/coding",
+    "openrouter/pair/privacy/coding/think",
     "openrouter/pair/privacy/decision",
     "openrouter/pair/privacy/decision/free",
     "openrouter/pair/privacy/batch",
@@ -3176,6 +3772,11 @@ pub struct PreviewCandidate {
     pub throttled: bool,
     pub rank_index: Option<usize>,
     pub sticky_match: bool,
+    /// Published value score, when the offering carries one.
+    pub rank_score: Option<f64>,
+    /// 1-based ordinal in score-desc order over the full preview
+    /// pool (Iter 46); `None` when unscored.
+    pub score_rank: Option<usize>,
 }
 
 /// The pick for one session view: backend model + provider.
@@ -3464,6 +4065,28 @@ impl Router {
         // `lowest` tag rewrites cross-model like the virtual tiers.
         if let Some((model_id, tags)) = split_model(&snapshot, model_field) {
             if orientation_from(&tags) == Orientation::Lowest {
+                // Malformed floors preview invalid, matching the
+                // request path.
+                let floor = match lowest_minindex(&tags) {
+                    Ok(floor) => floor,
+                    Err(message) => {
+                        return Preview {
+                            model_field: model_field.to_string(),
+                            session_namespace: model_field.to_string(),
+                            session_key_hash: authorization
+                                .map(|auth| self.session_key(auth, model_field).0),
+                            fresh: None,
+                            sticky: None,
+                            sticky_hit: false,
+                            candidates: Vec::new(),
+                            rejection: Some(RouteRejection {
+                                code: "invalid_model",
+                                message,
+                            }),
+                            note: None,
+                        };
+                    }
+                };
                 return self.preview_lowest_list(
                     &snapshot,
                     ranking.as_ref(),
@@ -3472,6 +4095,7 @@ impl Router {
                     &constraints,
                     now,
                     top,
+                    floor,
                 );
             }
             return self.preview_direct_list(
@@ -3549,6 +4173,28 @@ impl Router {
                 top,
                 None,
             ),
+            "coding" => self.preview_ordered_virtual_list(
+                snapshot,
+                ranking,
+                model_field,
+                authorization,
+                constraints,
+                now,
+                VirtualTier::Coding,
+                top,
+                None,
+            ),
+            "coding/think" => self.preview_ordered_virtual_list(
+                snapshot,
+                ranking,
+                model_field,
+                authorization,
+                constraints,
+                now,
+                VirtualTier::CodingThink,
+                top,
+                None,
+            ),
             "lowest" => self.preview_lowest_list(
                 snapshot,
                 ranking,
@@ -3557,6 +4203,7 @@ impl Router {
                 constraints,
                 now,
                 top,
+                None,
             ),
             "decision" => self.preview_decision_list(
                 snapshot,
@@ -3604,6 +4251,7 @@ impl Router {
         now: u64,
         rank_index: Option<usize>,
         sticky_match: bool,
+        score_rank: Option<usize>,
     ) -> PreviewCandidate {
         PreviewCandidate {
             model_id: offering.model_id.clone(),
@@ -3625,6 +4273,8 @@ impl Router {
             throttled: self.is_throttled_pair(&offering.model_id, &offering.provider_name),
             rank_index,
             sticky_match,
+            rank_score: offering.rank_score,
+            score_rank,
         }
     }
 
@@ -3737,16 +4387,43 @@ impl Router {
                 display.push(sticky);
             }
         }
+        // Score ranks (Iter 46): 1-based ordinals in score-desc
+        // order over the full pool; unscored rows get none. Ties
+        // break by identity so ranks are stable across rebuilds.
+        let mut scored_idx: Vec<usize> = (0..ordered_all.len())
+            .filter(|&i| ordered_all[i].0.rank_score.is_some_and(|s| s.is_finite()))
+            .collect();
+        scored_idx.sort_by(|&a, &b| {
+            let (oa, ob) = (&ordered_all[a].0, &ordered_all[b].0);
+            ob.rank_score
+                .partial_cmp(&oa.rank_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| oa.model_id.cmp(&ob.model_id))
+                .then_with(|| oa.provider_name.cmp(&ob.provider_name))
+                .then_with(|| oa.tag.cmp(&ob.tag))
+        });
+        let mut score_rank_by_pool: Vec<Option<usize>> = vec![None; ordered_all.len()];
+        for (pos, idx) in scored_idx.iter().enumerate() {
+            score_rank_by_pool[*idx] = Some(pos + 1);
+        }
         let candidates: Vec<PreviewCandidate> = display
             .into_iter()
-            .map(|(o, rank)| {
+            .map(|row| {
+                let (o, rank) = row;
                 let is_sticky = sticky_offering.is_some_and(|(s, _)| {
                     s.provider_name == o.provider_name
                         && s.precision_class == o.precision_class
                         && s.model_id == o.model_id
                         && s.tag == o.tag
                 });
-                self.preview_row(o, ranking, now, *rank, is_sticky)
+                // Display rows borrow from the pool: the rank rides
+                // along by position. Pointer equality is exact here
+                // (no clones between), and the pool is small.
+                let score_rank = ordered_all
+                    .iter()
+                    .position(|pool| std::ptr::eq(pool, row))
+                    .and_then(|idx| score_rank_by_pool[idx]);
+                self.preview_row(o, ranking, now, *rank, is_sticky, score_rank)
             })
             .collect();
         Preview {
@@ -3873,6 +4550,7 @@ impl Router {
                 offerings.iter().filter(|o| {
                     constraints.allows(&o.provider_name)
                         && free_eligible(ranking, model_id, o, now)
+                        && !is_batch_model(model_id)
                         && meets_minindex(snapshot, model_id, minindex)
                 })
             })
@@ -3951,11 +4629,8 @@ impl Router {
         top: usize,
         minindex: Option<u8>,
     ) -> Preview {
-        let tier_name = match tier {
-            VirtualTier::Low => "low",
-            VirtualTier::Think => "think",
-            _ => "low",
-        };
+        let tier_name = Self::ordered_tier_name(tier);
+        let coding_only = matches!(tier, VirtualTier::Coding | VirtualTier::CodingThink);
         let base: Vec<&Offering> = snapshot
             .models
             .values()
@@ -3964,6 +4639,8 @@ impl Router {
                 constraints.allows(&o.provider_name)
                     && inline_cost(o).is_some_and(|cost| cost > 0.0)
                     && is_known_precision_class(o.precision_class.as_deref().unwrap_or("unknown"))
+                    && !is_batch_model(&o.model_id)
+                    && (!coding_only || snapshot.bracket.contains(o.model_id.as_str()))
                     && meets_minindex(snapshot, &o.model_id, minindex)
             })
             .collect();
@@ -3983,11 +4660,77 @@ impl Router {
                 note: None,
             };
         }
-        let floored: Vec<&Offering> = base
+        // Score-first preview (Iter 44): the same cascade as routing —
+        // bracket ends when score data exists, legacy below. Coding
+        // tiers stay legacy by design (Iter 48), and legacy mode
+        // (Iter 47) skips the score path like routing does.
+        let shortlist: Vec<&Offering> = if snapshot.bracket.is_empty()
+            || self.default_ordering != OrderMode::ScoreFirst
+            || !matches!(tier, VirtualTier::Low | VirtualTier::Think)
+        {
+            Vec::new()
+        } else {
+            base.iter()
+                .filter(|o| {
+                    snapshot.bracket.contains(o.model_id.as_str()) && o.rank_score.is_some()
+                })
+                .copied()
+                .collect()
+        };
+        if !shortlist.is_empty() {
+            return self.preview_scored_virtual_list(
+                ranking,
+                model_field,
+                authorization,
+                shortlist,
+                tier,
+                top,
+                now,
+            );
+        }
+        // Long-tail preview (Iter 45): with bracket data the list
+        // shows in-bracket models in legacy order first, then
+        // out-of-bracket cheapest — mirroring the routing cascade.
+        // Without bracket data (or in legacy mode) the whole pool
+        // lists legacy.
+        let (inside, outside): (Vec<&Offering>, Vec<&Offering>) =
+            if snapshot.bracket.is_empty() || self.default_ordering != OrderMode::ScoreFirst {
+                (base, Vec::new())
+            } else {
+                base.into_iter()
+                    .partition(|o| snapshot.bracket.contains(o.model_id.as_str()))
+            };
+        let floored: Vec<&Offering> = inside
             .into_iter()
             .filter(|o| Self::quality_rank(o.quality_tier.as_deref()) >= Self::tier_floor(tier))
             .collect();
-        if floored.is_empty() {
+        let mut sorted: Vec<&Offering> = floored;
+        match tier {
+            VirtualTier::Low | VirtualTier::Coding => sorted.sort_by(|a, b| {
+                inline_cost(a)
+                    .partial_cmp(&inline_cost(b))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.model_id.cmp(&b.model_id))
+                    .then_with(|| a.provider_name.cmp(&b.provider_name))
+            }),
+            _ => sorted.sort_by(|a, b| {
+                compare_signals(
+                    &Self::virtual_signals(a),
+                    &Self::virtual_signals(b),
+                    RankOrientation::Quality,
+                )
+            }),
+        }
+        let mut tail: Vec<&Offering> = outside;
+        tail.sort_by(|a, b| {
+            inline_cost(a)
+                .partial_cmp(&inline_cost(b))
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.model_id.cmp(&b.model_id))
+                .then_with(|| a.provider_name.cmp(&b.provider_name))
+        });
+        sorted.extend(tail);
+        if sorted.is_empty() {
             return Preview {
                 model_field: model_field.to_string(),
                 session_namespace: model_field.to_string(),
@@ -4002,23 +4745,6 @@ impl Router {
                 }),
                 note: None,
             };
-        }
-        let mut sorted: Vec<&Offering> = floored;
-        match tier {
-            VirtualTier::Low => sorted.sort_by(|a, b| {
-                inline_cost(a)
-                    .partial_cmp(&inline_cost(b))
-                    .unwrap_or(std::cmp::Ordering::Equal)
-                    .then_with(|| a.model_id.cmp(&b.model_id))
-                    .then_with(|| a.provider_name.cmp(&b.provider_name))
-            }),
-            _ => sorted.sort_by(|a, b| {
-                compare_signals(
-                    &Self::virtual_signals(a),
-                    &Self::virtual_signals(b),
-                    RankOrientation::Quality,
-                )
-            }),
         }
         let ordered_all: Vec<(Offering, Option<usize>)> = sorted
             .into_iter()
@@ -4042,7 +4768,90 @@ impl Router {
         )
     }
 
-    /// Cross-model `lowest` preview: cheapest paid, no floor.
+    /// Score-first `low`/`think` preview (Iter 44): the bracket
+    /// ends over the stored v2 components — the same floor, cap,
+    /// and ordering as routing. Caller passes the scored shortlist.
+    #[allow(clippy::too_many_arguments)]
+    fn preview_scored_virtual_list(
+        &self,
+        ranking: Option<&RankingDocument>,
+        model_field: &str,
+        authorization: Option<&str>,
+        shortlist: Vec<&Offering>,
+        tier: VirtualTier,
+        top: usize,
+        now: u64,
+    ) -> Preview {
+        let tier_name = match tier {
+            VirtualTier::Low => "low",
+            _ => "think",
+        };
+        let mut sorted: Vec<&Offering> = shortlist
+            .into_iter()
+            .filter(|o| match tier {
+                VirtualTier::Low => {
+                    o.rank_quality
+                        .is_some_and(|q| q >= pennyrouter_catalog::BRACKET_PERFORMANCE_FLOOR)
+                        && o.rank_cost_task.is_some()
+                }
+                _ => {
+                    o.rank_cost_task
+                        .is_some_and(|c| c <= pennyrouter_catalog::THINK_MAX_COST_TASK)
+                        && o.rank_quality.is_some()
+                }
+            })
+            .collect();
+        if sorted.is_empty() {
+            let message = if tier == VirtualTier::Low {
+                format!(
+                    "no in-bracket offering meets the low performance floor ({})",
+                    pennyrouter_catalog::BRACKET_PERFORMANCE_FLOOR
+                )
+            } else {
+                format!(
+                    "no in-bracket offering fits the think spend cap (${}/task)",
+                    pennyrouter_catalog::THINK_MAX_COST_TASK
+                )
+            };
+            return Preview {
+                model_field: model_field.to_string(),
+                session_namespace: model_field.to_string(),
+                session_key_hash: authorization.map(|auth| self.session_key(auth, model_field).0),
+                fresh: None,
+                sticky: None,
+                sticky_hit: false,
+                candidates: Vec::new(),
+                rejection: Some(RouteRejection {
+                    code: "no_eligible_offering",
+                    message,
+                }),
+                note: None,
+            };
+        }
+        sorted.sort_by(|a, b| Self::scored_order(tier, a, b));
+        let ordered_all: Vec<(Offering, Option<usize>)> = sorted
+            .into_iter()
+            .enumerate()
+            .map(|(i, o)| (o.clone(), Some(i)))
+            .collect();
+        self.finish_preview(
+            model_field,
+            model_field,
+            authorization,
+            ordered_all,
+            ranking,
+            now,
+            top,
+            Some(RouteRejection {
+                code: "no_eligible_offering",
+                message: format!("no offering is eligible for the {tier_name} tier"),
+            }),
+            None,
+        )
+    }
+
+    /// Cross-model `lowest` preview: cheapest paid, no floor —
+    /// same minindex gate and activity tie-break as routing.
     #[allow(clippy::too_many_arguments)]
     fn preview_lowest_list(
         &self,
@@ -4053,6 +4862,7 @@ impl Router {
         constraints: &ProviderConstraints,
         now: u64,
         top: usize,
+        minindex: Option<u8>,
     ) -> Preview {
         let base: Vec<&Offering> = snapshot
             .models
@@ -4062,6 +4872,8 @@ impl Router {
                 constraints.allows(&o.provider_name)
                     && inline_cost(o).is_some_and(|cost| cost > 0.0)
                     && is_known_precision_class(o.precision_class.as_deref().unwrap_or("unknown"))
+                    && !is_batch_model(&o.model_id)
+                    && meets_minindex(snapshot, &o.model_id, minindex)
             })
             .collect();
         if base.is_empty() {
@@ -4075,19 +4887,21 @@ impl Router {
                 candidates: Vec::new(),
                 rejection: Some(RouteRejection {
                     code: "no_eligible_offering",
-                    message: "no paid offering is currently eligible".to_string(),
+                    message: minindex.map_or_else(
+                        || "no paid offering is currently eligible".to_string(),
+                        |floor| {
+                            format!(
+                                "no paid offering meets minindex {floor} \
+                                 (or none is otherwise eligible)"
+                            )
+                        },
+                    ),
                 }),
                 note: None,
             };
         }
         let mut sorted: Vec<&Offering> = base;
-        sorted.sort_by(|a, b| {
-            inline_cost(a)
-                .partial_cmp(&inline_cost(b))
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.model_id.cmp(&b.model_id))
-                .then_with(|| a.provider_name.cmp(&b.provider_name))
-        });
+        sorted.sort_by(|a, b| Self::lowest_order(snapshot, a, b));
         let ordered_all: Vec<(Offering, Option<usize>)> = sorted
             .into_iter()
             .enumerate()
@@ -4131,6 +4945,7 @@ impl Router {
             .filter(|o| {
                 constraints.allows(&o.provider_name)
                     && o.supports_decisions == Some(true)
+                    && !is_batch_model(&o.model_id)
                     && (free_only || inline_cost(o).is_some_and(|cost| cost > 0.0))
                     && (!free_only || free_eligible(ranking, &o.model_id, o, now))
                     && meets_minindex(snapshot, &o.model_id, minindex)
@@ -4310,10 +5125,17 @@ impl Router {
             );
         }
         let class = majority_class_owned(&budgeted);
-        let ranked = ranking
-            .and_then(|r| r.models.get(model_id))
-            .and_then(|classes| classes.iter().find(|c| c.class == class))
-            .map(|c| &c.default);
+        // Long-tail (Iter 45): models outside the bracket skip the
+        // ranking and list cheapest-first, like routing.
+        let long_tail = !snapshot.bracket.is_empty() && !snapshot.bracket.contains(model_id);
+        let ranked = (!long_tail)
+            .then(|| {
+                ranking
+                    .and_then(|r| r.models.get(model_id))
+                    .and_then(|classes| classes.iter().find(|c| c.class == class))
+                    .map(|c| &c.default)
+            })
+            .flatten();
         let mut ordered_all: Vec<(Offering, Option<usize>)> = if let Some(entries) = ranked {
             let mut order: Vec<&Offering> = Vec::with_capacity(budgeted.len());
             let mut rest: Vec<&Offering> = budgeted.clone();
@@ -4425,6 +5247,7 @@ pub fn route_pinned(model_field: &str, mut json: serde_json::Value) -> Option<(V
             quantization: None,
             orientation: Orientation::Default,
             sticky: false,
+            ordering: "direct",
             minindex: None,
         },
     ))
@@ -4562,6 +5385,8 @@ fn offering_from(
         rank_quality: rank.and_then(|rank| rank.rank_quality),
         rank_efficiency: rank.and_then(|rank| rank.rank_efficiency),
         rank_popularity: rank.and_then(|rank| rank.rank_popularity),
+        rank_activity: rank.and_then(|rank| rank.rank_activity),
+        rank_cost_task: rank.and_then(|rank| rank.rank_cost_task),
         rank_basis: rank.and_then(|rank| rank.rank_basis.clone()),
         rank_ruleset: rank.and_then(|rank| rank.rank_ruleset.clone()),
         throughput_tps: speed.and_then(|speed| speed.throughput_tps),
@@ -4587,6 +5412,7 @@ fn free_decision(
         orientation,
         sticky,
         minindex,
+        ordering: "free",
     }
 }
 
@@ -4853,6 +5679,8 @@ mod tests {
             rank_quality: None,
             rank_efficiency: None,
             rank_popularity: None,
+            rank_activity: None,
+            rank_cost_task: None,
             rank_basis: None,
             rank_ruleset: None,
             throughput_tps: None,
@@ -4886,6 +5714,9 @@ mod tests {
             artifact_version: None,
             aa_coding_index: HashMap::new(),
             model_signals: HashMap::new(),
+            bracket: HashSet::new(),
+            top_models: HashMap::new(),
+            fetch_health: BTreeMap::new(),
             popular_models: Vec::new(),
             popular_apps: Vec::new(),
             popular_as_of: None,
@@ -4903,6 +5734,7 @@ mod tests {
             ranking: RwLock::new(None),
             sessions: RwLock::new(HashMap::new()),
             seed: 0,
+            default_ordering: OrderMode::default(),
             throttled: RwLock::new(HashMap::new()),
         }
     }
@@ -5006,6 +5838,9 @@ mod tests {
             artifact_version: None,
             aa_coding_index: HashMap::new(),
             model_signals: HashMap::new(),
+            bracket: HashSet::new(),
+            top_models: HashMap::new(),
+            fetch_health: BTreeMap::new(),
             popular_models: Vec::new(),
             popular_apps: Vec::new(),
             popular_as_of: None,
@@ -5044,6 +5879,9 @@ mod tests {
             artifact_version: None,
             aa_coding_index: HashMap::new(),
             model_signals: HashMap::new(),
+            bracket: HashSet::new(),
+            top_models: HashMap::new(),
+            fetch_health: BTreeMap::new(),
             popular_models: Vec::new(),
             popular_apps: Vec::new(),
             popular_as_of: None,
@@ -5080,6 +5918,9 @@ mod tests {
             artifact_version: None,
             aa_coding_index: HashMap::new(),
             model_signals: HashMap::new(),
+            bracket: HashSet::new(),
+            top_models: HashMap::new(),
+            fetch_health: BTreeMap::new(),
             popular_models: Vec::new(),
             popular_apps: Vec::new(),
             popular_as_of: None,
@@ -5186,6 +6027,9 @@ mod tests {
             artifact_version: None,
             aa_coding_index: HashMap::new(),
             model_signals: HashMap::new(),
+            bracket: HashSet::new(),
+            top_models: HashMap::new(),
+            fetch_health: BTreeMap::new(),
             popular_models: Vec::new(),
             popular_apps: Vec::new(),
             popular_as_of: None,
@@ -5215,6 +6059,9 @@ mod tests {
                 artifact_version: None,
                 aa_coding_index: HashMap::new(),
                 model_signals: HashMap::new(),
+                bracket: HashSet::new(),
+                top_models: HashMap::new(),
+                fetch_health: BTreeMap::new(),
                 popular_models: Vec::new(),
                 popular_apps: Vec::new(),
                 popular_as_of: None,
@@ -5222,6 +6069,7 @@ mod tests {
             ranking: RwLock::new(None),
             sessions: RwLock::new(HashMap::new()),
             seed: 0,
+            default_ordering: OrderMode::default(),
             throttled: RwLock::new(HashMap::new()),
         };
         let d = router.decide("openrouter/free", None).unwrap();
@@ -5250,6 +6098,9 @@ mod tests {
                     artifact_version: None,
                     aa_coding_index: HashMap::new(),
                     model_signals: HashMap::new(),
+                    bracket: HashSet::new(),
+                    top_models: HashMap::new(),
+                    fetch_health: BTreeMap::new(),
                     popular_models: Vec::new(),
                     popular_apps: Vec::new(),
                     popular_as_of: None,
@@ -5257,6 +6108,7 @@ mod tests {
                 ranking: RwLock::new(None),
                 sessions: RwLock::new(HashMap::new()),
                 seed: 0,
+                default_ordering: OrderMode::default(),
                 throttled: RwLock::new(HashMap::new()),
             };
             router.swap_ranking(RankingDocument {
@@ -5300,6 +6152,9 @@ mod tests {
                 artifact_version: None,
                 aa_coding_index: HashMap::new(),
                 model_signals: HashMap::new(),
+                bracket: HashSet::new(),
+                top_models: HashMap::new(),
+                fetch_health: BTreeMap::new(),
                 popular_models: Vec::new(),
                 popular_apps: Vec::new(),
                 popular_as_of: None,
@@ -5307,6 +6162,7 @@ mod tests {
             ranking: RwLock::new(None),
             sessions: RwLock::new(HashMap::new()),
             seed: 0,
+            default_ordering: OrderMode::default(),
             throttled: RwLock::new(HashMap::new()),
         };
         assert_eq!(
@@ -5333,6 +6189,9 @@ mod tests {
                 artifact_version: None,
                 aa_coding_index: HashMap::new(),
                 model_signals: HashMap::new(),
+                bracket: HashSet::new(),
+                top_models: HashMap::new(),
+                fetch_health: BTreeMap::new(),
                 popular_models: Vec::new(),
                 popular_apps: Vec::new(),
                 popular_as_of: None,
@@ -5340,6 +6199,7 @@ mod tests {
             ranking: RwLock::new(None),
             sessions: RwLock::new(HashMap::new()),
             seed: 0,
+            default_ordering: OrderMode::default(),
             throttled: RwLock::new(HashMap::new()),
         };
         let auth = Some("Bearer key");
@@ -5357,6 +6217,9 @@ mod tests {
             artifact_version: None,
             aa_coding_index: HashMap::new(),
             model_signals: HashMap::new(),
+            bracket: HashSet::new(),
+            top_models: HashMap::new(),
+            fetch_health: BTreeMap::new(),
             popular_models: Vec::new(),
             popular_apps: Vec::new(),
             popular_as_of: None,
@@ -5386,6 +6249,9 @@ mod tests {
             artifact_version: None,
             aa_coding_index: HashMap::new(),
             model_signals: HashMap::new(),
+            bracket: HashSet::new(),
+            top_models: HashMap::new(),
+            fetch_health: BTreeMap::new(),
             popular_models: Vec::new(),
             popular_apps: Vec::new(),
             popular_as_of: None,
@@ -5417,6 +6283,9 @@ mod tests {
             artifact_version: None,
             aa_coding_index: HashMap::new(),
             model_signals: HashMap::new(),
+            bracket: HashSet::new(),
+            top_models: HashMap::new(),
+            fetch_health: BTreeMap::new(),
             popular_models: Vec::new(),
             popular_apps: Vec::new(),
             popular_as_of: None,
@@ -5561,6 +6430,9 @@ mod tests {
             models: HashMap::from([("m/q".to_string(), vec![o])]),
             aa_coding_index: HashMap::new(),
             model_signals: HashMap::new(),
+            bracket: HashSet::new(),
+            top_models: HashMap::new(),
+            fetch_health: BTreeMap::new(),
             artifact_version: None,
             popular_models: Vec::new(),
             popular_apps: Vec::new(),
@@ -5702,6 +6574,40 @@ mod tests {
             })
         );
         assert_eq!(
+            parse_virtual("openrouter/pair/coding"),
+            Some(VirtualModel {
+                tier: VirtualTier::Coding,
+                privacy: false,
+                free_only: false,
+                fallback: None,
+                pinned_model: None,
+                minindex: None,
+            })
+        );
+        assert_eq!(
+            parse_virtual("openrouter/pair/privacy/coding/think"),
+            Some(VirtualModel {
+                tier: VirtualTier::CodingThink,
+                privacy: true,
+                free_only: false,
+                fallback: None,
+                pinned_model: None,
+                minindex: None,
+            })
+        );
+        assert_eq!(
+            parse_virtual("openrouter/pair/coding/minindex/50")
+                .unwrap()
+                .minindex,
+            Some(50)
+        );
+        // No `/fallback/` suffix of their own, like `low`/`think`.
+        assert_eq!(parse_virtual("openrouter/pair/coding/fallback/low"), None);
+        assert_eq!(
+            parse_virtual("openrouter/pair/coding/think/fallback/low"),
+            None
+        );
+        assert_eq!(
             parse_virtual("openrouter/pair/decision/free/fallback/low"),
             Some(VirtualModel {
                 tier: VirtualTier::Decision,
@@ -5755,7 +6661,7 @@ mod tests {
         assert_eq!(parse_virtual("openrouter/pair/free/extra"), None);
         assert_eq!(parse_virtual("openrouter/free"), None);
         assert_eq!(parse_virtual("meta/muse-spark"), None);
-        assert_eq!(VIRTUAL_MODELS.len(), 16);
+        assert_eq!(VIRTUAL_MODELS.len(), 20);
         assert!(VIRTUAL_MODELS.iter().all(|id| parse_virtual(id).is_some()));
     }
 
@@ -5883,6 +6789,9 @@ mod tests {
                 artifact_version: None,
                 aa_coding_index: HashMap::new(),
                 model_signals: HashMap::new(),
+                bracket: HashSet::new(),
+                top_models: HashMap::new(),
+                fetch_health: BTreeMap::new(),
                 popular_models: Vec::new(),
                 popular_apps: Vec::new(),
                 popular_as_of: None,
@@ -5890,6 +6799,7 @@ mod tests {
             ranking: RwLock::new(None),
             sessions: RwLock::new(HashMap::new()),
             seed: 0,
+            default_ordering: OrderMode::default(),
             throttled: RwLock::new(HashMap::new()),
         }
     }
@@ -5987,6 +6897,9 @@ mod tests {
                 artifact_version: None,
                 aa_coding_index: HashMap::new(),
                 model_signals: HashMap::new(),
+                bracket: HashSet::new(),
+                top_models: HashMap::new(),
+                fetch_health: BTreeMap::new(),
                 popular_models: Vec::new(),
                 popular_apps: Vec::new(),
                 popular_as_of: None,
@@ -5994,6 +6907,7 @@ mod tests {
             ranking: RwLock::new(None),
             sessions: RwLock::new(HashMap::new()),
             seed: 0,
+            default_ordering: OrderMode::default(),
             throttled: RwLock::new(HashMap::new()),
         }
     }
@@ -6057,6 +6971,9 @@ mod tests {
                 artifact_version: None,
                 aa_coding_index: HashMap::new(),
                 model_signals: HashMap::new(),
+                bracket: HashSet::new(),
+                top_models: HashMap::new(),
+                fetch_health: BTreeMap::new(),
                 popular_models: Vec::new(),
                 popular_apps: Vec::new(),
                 popular_as_of: None,
@@ -6064,6 +6981,7 @@ mod tests {
             ranking: RwLock::new(None),
             sessions: RwLock::new(HashMap::new()),
             seed: 0,
+            default_ordering: OrderMode::default(),
             throttled: RwLock::new(HashMap::new()),
         };
         assert!(r.decide("m/c/lowest", None).is_none());
@@ -6109,6 +7027,9 @@ mod tests {
                 artifact_version: None,
                 aa_coding_index: HashMap::new(),
                 model_signals: HashMap::new(),
+                bracket: HashSet::new(),
+                top_models: HashMap::new(),
+                fetch_health: BTreeMap::new(),
                 popular_models: Vec::new(),
                 popular_apps: Vec::new(),
                 popular_as_of: None,
@@ -6116,6 +7037,7 @@ mod tests {
             ranking: RwLock::new(None),
             sessions: RwLock::new(HashMap::new()),
             seed: 0,
+            default_ordering: OrderMode::default(),
             throttled: RwLock::new(HashMap::new()),
         };
         let d = r.decide("m/x/lowest", None).unwrap();
@@ -6161,6 +7083,9 @@ mod tests {
                 artifact_version: None,
                 aa_coding_index: HashMap::new(),
                 model_signals: HashMap::new(),
+                bracket: HashSet::new(),
+                top_models: HashMap::new(),
+                fetch_health: BTreeMap::new(),
                 popular_models: Vec::new(),
                 popular_apps: Vec::new(),
                 popular_as_of: None,
@@ -6168,6 +7093,7 @@ mod tests {
             ranking: RwLock::new(None),
             sessions: RwLock::new(HashMap::new()),
             seed: 0,
+            default_ordering: OrderMode::default(),
             throttled: RwLock::new(HashMap::new()),
         };
         let d = r
@@ -6189,6 +7115,9 @@ mod tests {
                 artifact_version: None,
                 aa_coding_index: HashMap::new(),
                 model_signals: HashMap::new(),
+                bracket: HashSet::new(),
+                top_models: HashMap::new(),
+                fetch_health: BTreeMap::new(),
                 popular_models: Vec::new(),
                 popular_apps: Vec::new(),
                 popular_as_of: None,
@@ -6196,6 +7125,7 @@ mod tests {
             ranking: RwLock::new(None),
             sessions: RwLock::new(HashMap::new()),
             seed: 0,
+            default_ordering: OrderMode::default(),
             throttled: RwLock::new(HashMap::new()),
         };
         let body = routed_body("openrouter/pair/free/fallback/nope", serde_json::json!({}));
@@ -6343,6 +7273,41 @@ mod tests {
         assert_eq!(parse_virtual("openrouter/pair/low").unwrap().minindex, None);
     }
 
+    /// Iter 44: the `lowest` tag reads a `/minindex/<n>` floor from
+    /// its own segments — first `minindex` wins, malformed fails.
+    #[test]
+    fn lowest_minindex_parses_from_tags() {
+        let tags = |parts: &[&str]| parts.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            lowest_minindex(&tags(&["lowest", "minindex", "50"])).unwrap(),
+            Some(50)
+        );
+        assert_eq!(lowest_minindex(&tags(&["lowest"])).unwrap(), None);
+        assert_eq!(
+            lowest_minindex(&tags(&["minindex", "70", "lowest"])).unwrap(),
+            Some(70)
+        );
+        assert!(lowest_minindex(&tags(&["lowest", "minindex", "abc"])).is_err());
+        assert!(lowest_minindex(&tags(&["lowest", "minindex", "101"])).is_err());
+        assert!(lowest_minindex(&tags(&["lowest", "minindex"])).is_err());
+    }
+
+    /// Iter 47: unset/empty means score-first; anything else must be
+    /// exactly one of the two documented values.
+    #[test]
+    fn ordering_flag_defaults_and_rejects_unknown() {
+        assert_eq!(parse_ordering(None), Ok(OrderMode::ScoreFirst));
+        assert_eq!(
+            parse_ordering(Some("score_first")),
+            Ok(OrderMode::ScoreFirst)
+        );
+        assert_eq!(parse_ordering(Some("legacy")), Ok(OrderMode::Legacy));
+        assert_eq!(OrderMode::default(), OrderMode::ScoreFirst);
+        for bad in ["Score_First", "LEGACY", "both", "0"] {
+            assert!(parse_ordering(Some(bad)).is_err(), "{bad} rejected");
+        }
+    }
+
     /// Iter 33: unusable floors fail closed with `invalid_model` — never
     /// silent passthrough of a gateway-owned id.
     #[test]
@@ -6392,6 +7357,9 @@ mod tests {
             artifact_version: None,
             aa_coding_index: HashMap::from([("m/low".to_string(), 30), ("m/high".to_string(), 60)]),
             model_signals: HashMap::new(),
+            bracket: HashSet::new(),
+            top_models: HashMap::new(),
+            fetch_health: BTreeMap::new(),
             popular_models: Vec::new(),
             popular_apps: Vec::new(),
             popular_as_of: None,

@@ -1,12 +1,13 @@
-//! Schema v9: fixed core columns + raw JSON payloads + indexed columns
+//! Schema v10: fixed core columns + raw JSON payloads + indexed columns
 //! (deterministic from Phase 2a, model-scored from Phase 2b, tool
 //! support from Iter 22, decision-modality support from Iter 24,
 //! Artificial Analysis indexes from Iter 31, scoring-audit rename
 //! from Iter 32, speed/availability + value score from Iter 34,
-//! exact raw quantization from Iter 36).
+//! exact raw quantization from Iter 36, score-v2 activity +
+//! intel-version columns from Iter 43).
 
 /// Current schema version, recorded in `sync_meta` on init.
-pub const SCHEMA_VERSION: u32 = 9;
+pub const SCHEMA_VERSION: u32 = 10;
 
 pub const DDL: &str = "
 CREATE TABLE IF NOT EXISTS models (
@@ -19,6 +20,9 @@ CREATE TABLE IF NOT EXISTS models (
     aa_coding_index       INTEGER,
     aa_agentic_index      INTEGER,
     aa_cost_per_task      REAL,
+    aa_intel_version      TEXT,
+    activity_level        REAL,
+    activity_trend        REAL,
     popularity_tokens     INTEGER,
     popularity_share      REAL
 );
@@ -51,6 +55,8 @@ CREATE TABLE IF NOT EXISTS endpoints (
     rank_quality      REAL,
     rank_efficiency   REAL,
     rank_popularity   REAL,
+    rank_activity     REAL,
+    rank_cost_task    REAL,
     rank_basis        TEXT,
     rank_ruleset      TEXT,
     ranked_at         TEXT,
@@ -90,6 +96,8 @@ pub const ENDPOINT_INDEXED_COLUMNS: &[(&str, &str)] = &[
     ("rank_quality", "REAL"),
     ("rank_efficiency", "REAL"),
     ("rank_popularity", "REAL"),
+    ("rank_activity", "REAL"),
+    ("rank_cost_task", "REAL"),
     ("rank_basis", "TEXT"),
     ("rank_ruleset", "TEXT"),
     ("ranked_at", "TEXT"),
@@ -103,6 +111,9 @@ pub const MODEL_INDEXED_COLUMNS: &[(&str, &str)] = &[
     ("aa_coding_index", "INTEGER"),
     ("aa_agentic_index", "INTEGER"),
     ("aa_cost_per_task", "REAL"),
+    ("aa_intel_version", "TEXT"),
+    ("activity_level", "REAL"),
+    ("activity_trend", "REAL"),
     ("popularity_tokens", "INTEGER"),
     ("popularity_share", "REAL"),
 ];

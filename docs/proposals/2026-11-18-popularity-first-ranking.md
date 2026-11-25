@@ -1,6 +1,6 @@
 # Proposal: Catalog score + popularity-first ranking
 
-**Date:** 2026-11-18 · **Revised:** 2026-11-20
+**Date:** 2026-11-18 · **Revised:** 2026-11-20, 2026-11-24
 **Status:** Proposed
 **Authors:** leandro
 
@@ -11,6 +11,11 @@
 > the routing input, moves the TOP view into the catalog UI, and
 > drops the `coding/*` virtual ids — `low`/`think` already are the
 > popular-bracket tiers.
+>
+> 2026-11-24: the `coding/*` family is restored (Iter 48) with new
+> semantics — not per-app popularity (still impossible) but the
+> `low`/`think` legacy orderings scoped to the most-used bracket:
+> popularity-first picks alongside the score-first tiers.
 
 ## Executive Summary
 
@@ -179,9 +184,13 @@ rank_score   = performance × efficiency × activity
 - **`free` / `decision` / `batch`**: unchanged scopes (zero-cost,
   decisions-capable, `:batch` suffix). They read the same score
   where it exists but keep their own eligibility rules.
-- No new `coding/*` virtual ids: `low`/`think` already are the
-  popular-bracket tiers, and a parallel family would split the
-  contract for no routing gain.
+- **`coding` / `coding/think`** (restored 2026-11-24, Iter 48):
+  the `low`/`think` legacy orderings (cheapest / best quality
+  signals) scoped to the most-used bracket — popularity-first
+  picks alongside the score-first tiers. No bracket data means
+  no pool (fail closed). The 2026-11-20 draft had dropped this
+  family as redundant; operator demand restored it with
+  bracket-scoped (not per-app) semantics.
 
 Top of the activity list never means "best" by itself — the score
 always blends performance × price efficiency × activity, and the

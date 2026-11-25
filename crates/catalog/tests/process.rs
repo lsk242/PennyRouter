@@ -307,7 +307,7 @@ fn migration_v1_to_current_preserves_data() {
     assert_eq!(eps[0].quantization, None);
     assert_eq!(
         catalog.get_meta("schema_version").unwrap().as_deref(),
-        Some("9")
+        Some("10")
     );
 
     // Migrated models carry the new AA columns (NULL until reprocessed).
@@ -919,7 +919,7 @@ fn migration_v6_to_v7_renames_scoring_columns() {
     assert_eq!(catalog.get_meta("judged_count").unwrap(), None);
     assert_eq!(
         catalog.get_meta("schema_version").unwrap().as_deref(),
-        Some("9")
+        Some("10")
     );
 }
 
@@ -958,12 +958,13 @@ fn migration_v8_to_v9_adds_quantization_column() {
     assert_eq!(catalog.endpoints_for("m/id").unwrap()[0].quantization, None);
     assert_eq!(
         catalog.get_meta("schema_version").unwrap().as_deref(),
-        Some("9")
+        Some("10")
     );
 }
 
-/// Iter 34: processing writes the value score from the AA index, the
-/// effective price, the precision class, and the popularity window.
+/// Iter 34 (v2 since Iter 43): processing writes the value score
+/// from the AA index, the effective price, the precision class, and
+/// the activity window (neutral when unmeasured).
 #[test]
 fn processing_writes_value_scores() {
     let dir = common::scratch("rank-score");
@@ -1023,7 +1024,7 @@ fn processing_writes_value_scores() {
                 "latency_last_30m":250,"throughput_last_30m":120,"uptime_last_30m":99.5}"#,
         ))
         .unwrap();
-    // Free: efficiency is 1, so the score is quality × popularity.
+    // Free: efficiency is 1, so the score is quality × activity.
     catalog
         .insert_endpoint(&endpoint(
             "a/cheap",
@@ -1066,7 +1067,7 @@ fn processing_writes_value_scores() {
     let ranks = catalog.endpoint_ranks().unwrap();
     let rank = &ranks[&priced.id];
     assert_eq!(rank.rank_basis.as_deref(), Some("coding"));
-    assert_eq!(rank.rank_ruleset.as_deref(), Some("rank-v1"));
+    assert_eq!(rank.rank_ruleset.as_deref(), Some("rank-v2"));
     assert_eq!(rank.ranked_at.as_deref(), Some(PROCESSED_AT));
     // quality = 60 × 0.97 (fp8)
     assert!((rank.rank_quality.unwrap() - 58.2).abs() < 1e-9);
@@ -1074,21 +1075,24 @@ fn processing_writes_value_scores() {
     let cost_task = 0.02565;
     let efficiency = 0.01 / (cost_task + 0.01);
     assert!((rank.rank_efficiency.unwrap() - efficiency).abs() < 1e-9);
-    // Top model: share 1.0 → factor 1.0.
-    assert!((rank.rank_popularity.unwrap() - 1.0).abs() < 1e-9);
-    assert!((rank.rank_score.unwrap() - 58.2 * efficiency).abs() < 1e-6);
+    // No activity data: the neutral factor, and v2 leaves the v1
+    // popularity column NULL.
+    assert_eq!(rank.rank_popularity, None);
+    assert!((rank.rank_activity.unwrap() - 1.0 / 1.1).abs() < 1e-9);
+    assert!((rank.rank_cost_task.unwrap() - cost_task).abs() < 1e-9);
+    assert!((rank.rank_score.unwrap() - 58.2 * efficiency / 1.1).abs() < 1e-6);
 
     // Free offering: full price credit.
     let free = &eps[1];
     let free_rank = &ranks[&free.id];
     assert_eq!(free_rank.rank_efficiency, Some(1.0));
-    assert!((free_rank.rank_score.unwrap() - 58.2).abs() < 1e-9);
+    assert!((free_rank.rank_score.unwrap() - 58.2 / 1.1).abs() < 1e-9);
 
     // Unpriced offering: evaluated, but no score.
     let unpriced = &eps[2];
     let unpriced_rank = &ranks[&unpriced.id];
     assert_eq!(unpriced_rank.rank_score, None);
-    assert_eq!(unpriced_rank.rank_ruleset.as_deref(), Some("rank-v1"));
+    assert_eq!(unpriced_rank.rank_ruleset.as_deref(), Some("rank-v2"));
 
     // No index: no score even though it is priced.
     let none = &catalog.endpoints_for("b/none").unwrap()[0];
@@ -1108,7 +1112,307 @@ fn processing_writes_value_scores() {
     );
     assert_eq!(
         catalog.get_meta("rank_ruleset").unwrap().as_deref(),
-        Some("rank-v1")
+        Some("rank-v2")
+    );
+}
+
+/// Iter 43 helpers: version-gated models with priced fp16
+/// endpoints, no coding index (isolates the intel path).
+fn v2_db(test: &str) -> (std::path::PathBuf, Catalog) {
+    let dir = common::scratch(test);
+    let db = dir.join("work.db");
+    let catalog = Catalog::open(&db).unwrap();
+    catalog.init().unwrap();
+    (dir, catalog)
+}
+
+fn v2_model(id: &str, aa: &str) -> ModelRow {
+    ModelRow {
+        model_id: id.into(),
+        name: id.into(),
+        source: "test".into(),
+        payload: format!(
+            "{{\"id\":\"{id}\",\"canonical_slug\":\"{id}\",\
+             \"benchmarks\":{{\"artificial_analysis\":{{{aa}}}}}}}"
+        ),
+        fetched_at: "t".into(),
+    }
+}
+
+fn v2_endpoint(model_id: &str, provider: &str, price: Option<&str>) -> EndpointRow {
+    let payload = match price {
+        Some(price) => format!(
+            "{{\"tag\":\"t/fp16\",\"quantization\":\"fp16\",\
+             \"pricing\":{{\"prompt\":\"{price}\",\"completion\":\"{price}\"}}}}"
+        ),
+        None => r#"{"tag":"t/fp16","quantization":"fp16"}"#.to_string(),
+    };
+    EndpointRow {
+        id: 0,
+        model_id: model_id.into(),
+        provider_name: provider.into(),
+        payload,
+        fetched_at: "t".into(),
+        price_prompt: None,
+        price_completion: None,
+        price_cache_read: None,
+        price_cache_write: None,
+        precision_class: None,
+        quantization: None,
+        promo_discount: None,
+        processed_at: None,
+        supports_tools: None,
+        supports_decisions: None,
+        quality_tier: None,
+        quality_score: None,
+        scored_at: None,
+        score_model: None,
+        score_prompt: None,
+        price_override_tokens: None,
+    }
+}
+
+/// Iter 43: the version gate admits current intel, NULLs stale or
+/// unversioned intel once a current version is known, and flags the
+/// reason per model.
+#[test]
+fn version_gate_current_in_stale_out_missing_null() {
+    let (_dir, catalog) = v2_db("v2-gate");
+    for (id, aa) in [
+        (
+            "m/current",
+            "\"intelligence_index\":70,\"intelligence_index_version\":\"5\"",
+        ),
+        (
+            "m/stale",
+            "\"intelligence_index\":70,\"intelligence_index_version\":\"4\"",
+        ),
+        ("m/unversioned", "\"intelligence_index\":70"),
+        ("m/none", ""),
+    ] {
+        catalog.insert_model(&v2_model(id, aa)).unwrap();
+        catalog
+            .insert_endpoint(&v2_endpoint(id, "P", Some("0.000001")))
+            .unwrap();
+    }
+    catalog.set_meta("aa_intel_version", "5").unwrap();
+
+    run_processing(&catalog, PROCESSED_AT).unwrap();
+
+    // Current in: scored on the intel basis, version stored.
+    let signals = catalog.model_signals().unwrap();
+    assert_eq!(signals["m/current"].aa_intelligence_index, Some(70));
+    assert_eq!(signals["m/current"].aa_intel_version.as_deref(), Some("5"));
+    let ranks = catalog.endpoint_ranks().unwrap();
+    let current = &catalog.endpoints_for("m/current").unwrap()[0];
+    let rank = &ranks[&current.id];
+    assert_eq!(rank.rank_basis.as_deref(), Some("intel"));
+    assert!(rank.rank_score.is_some());
+    // Stale out: gated to NULL, flagged.
+    assert_eq!(signals["m/stale"].aa_intelligence_index, None);
+    assert_eq!(signals["m/stale"].aa_intel_version, None);
+    let stale = &catalog.endpoints_for("m/stale").unwrap()[0];
+    assert_eq!(ranks[&stale.id].rank_score, None);
+    // Unversioned under a known current: gated out too.
+    assert_eq!(signals["m/unversioned"].aa_intelligence_index, None);
+    let unv = &catalog.endpoints_for("m/unversioned").unwrap()[0];
+    assert_eq!(ranks[&unv.id].rank_score, None);
+    // Flags explain each outcome.
+    let top: serde_json::Value =
+        serde_json::from_str(&catalog.get_meta("top_models").unwrap().unwrap()).unwrap();
+    assert!(top["m/current"]["flags"].as_array().unwrap().is_empty());
+    assert_eq!(
+        top["m/stale"]["flags"],
+        serde_json::json!(["stale-version"])
+    );
+    assert_eq!(
+        top["m/unversioned"]["flags"],
+        serde_json::json!(["no-current-score"])
+    );
+}
+
+/// Iter 43: without a known current version the gate stays open —
+/// keyless syncs score unversioned intel like v1 and flag nothing.
+#[test]
+fn version_gate_open_without_current() {
+    let (_dir, catalog) = v2_db("v2-gate-open");
+    catalog
+        .insert_model(&v2_model("m/plain", "\"intelligence_index\":70"))
+        .unwrap();
+    catalog
+        .insert_endpoint(&v2_endpoint("m/plain", "P", Some("0.000001")))
+        .unwrap();
+
+    run_processing(&catalog, PROCESSED_AT).unwrap();
+
+    let signals = catalog.model_signals().unwrap();
+    assert_eq!(signals["m/plain"].aa_intelligence_index, Some(70));
+    let ep = &catalog.endpoints_for("m/plain").unwrap()[0];
+    let ranks = catalog.endpoint_ranks().unwrap();
+    assert_eq!(ranks[&ep.id].rank_basis.as_deref(), Some("intel"));
+    assert!(ranks[&ep.id].rank_score.is_some());
+    let top: serde_json::Value =
+        serde_json::from_str(&catalog.get_meta("top_models").unwrap().unwrap()).unwrap();
+    assert!(top["m/plain"]["flags"].as_array().unwrap().is_empty());
+}
+
+/// Iter 43: AA direct records join by exact slug or normalized id,
+/// override embedded values, and their cost/task wins the efficiency.
+#[test]
+fn aa_direct_join_overrides_and_cost_wins() {
+    let (_dir, catalog) = v2_db("v2-aa-join");
+    catalog
+        .insert_model(&v2_model("m/aa-exact", "\"coding_index\":50"))
+        .unwrap();
+    catalog
+        .insert_endpoint(&v2_endpoint("m/aa-exact", "P", Some("0.000002")))
+        .unwrap();
+    catalog
+        .insert_model(&v2_model("vnd/dated-model-20260101", "\"coding_index\":50"))
+        .unwrap();
+    catalog
+        .insert_endpoint(&v2_endpoint(
+            "vnd/dated-model-20260101",
+            "P",
+            Some("0.000002"),
+        ))
+        .unwrap();
+    catalog
+        .set_meta(
+            "aa_models",
+            r#"{"m/aa-exact":{"aa_intel_index":80,"aa_coding_index":70,
+                "aa_cost_per_task":0.005,"aa_pricing":{"input":1.0,"output":4.0}},
+                "dated-model":{"aa_coding_index":70,"aa_cost_per_task":0.005}}"#,
+        )
+        .unwrap();
+    catalog.set_meta("aa_intel_version", "5").unwrap();
+
+    run_processing(&catalog, PROCESSED_AT).unwrap();
+
+    let signals = catalog.model_signals().unwrap();
+    // Exact slug: AA coding wins over embedded, intel joins too.
+    assert_eq!(signals["m/aa-exact"].aa_coding_index, Some(70));
+    assert_eq!(signals["m/aa-exact"].aa_intelligence_index, Some(80));
+    // Normalized slug: dated id meets the bare AA slug.
+    assert_eq!(
+        signals["vnd/dated-model-20260101"].aa_coding_index,
+        Some(70)
+    );
+    // AA cost/task wins over the catalog blend ($20/M → $0.20/task).
+    let ranks = catalog.endpoint_ranks().unwrap();
+    let ep = &catalog.endpoints_for("m/aa-exact").unwrap()[0];
+    assert_eq!(ranks[&ep.id].rank_cost_task, Some(0.005));
+    assert!((ranks[&ep.id].rank_efficiency.unwrap() - 0.01 / 0.015).abs() < 1e-9);
+}
+
+/// Iter 43: the bracket takes top usage with absolute share and a
+/// score; ends, flags, and the TOP rollup follow.
+#[test]
+fn brackets_ends_flags_and_top_rollup() {
+    let (_dir, catalog) = v2_db("v2-bracket");
+    // big: popular, good, cheap. mid: popular, best, pricier. tiny:
+    // scored but below the share floor. ghost: popular but
+    // unpriceable (unscored). quiet: scored but unmeasured.
+    for (id, coding, price) in [
+        ("m/big", 60, Some("0.0000002")),
+        ("m/mid", 90, Some("0.000001")),
+        ("m/tiny", 80, Some("0.0000002")),
+        ("m/quiet", 70, Some("0.0000005")),
+    ] {
+        catalog
+            .insert_model(&v2_model(id, &format!("\"coding_index\":{coding}")))
+            .unwrap();
+        catalog
+            .insert_endpoint(&v2_endpoint(id, "P", price))
+            .unwrap();
+    }
+    // Ghost is popular but unpriceable: no pricing block at all.
+    catalog
+        .insert_model(&v2_model("m/ghost", "\"coding_index\":95"))
+        .unwrap();
+    catalog
+        .insert_endpoint(&v2_endpoint("m/ghost", "P", None))
+        .unwrap();
+    catalog
+        .set_meta(
+            "popular_tokens",
+            r#"{"m/big":9000,"m/mid":500,"m/tiny":9,"m/ghost":400,"m/quiet":1}"#,
+        )
+        .unwrap();
+    catalog
+        .set_meta(
+            "activity_tokens",
+            r#"{"m/big":{"level":1.0,"trend":1.2},"m/mid":{"level":0.5,"trend":1.0},
+                "m/tiny":{"level":0.4,"trend":1.0},"m/ghost":{"level":0.45,"trend":1.0}}"#,
+        )
+        .unwrap();
+
+    run_processing(&catalog, PROCESSED_AT).unwrap();
+
+    let bracket: serde_json::Value =
+        serde_json::from_str(&catalog.get_meta("bracket").unwrap().unwrap()).unwrap();
+    // tiny (0.09% share) misses the 0.5% floor; ghost is unscored.
+    assert_eq!(bracket["members"], serde_json::json!(["m/big", "m/mid"]));
+    // low end: cheapest at/above quality 40 → big ($0.002/task).
+    assert_eq!(bracket["low_end"]["model"], serde_json::json!("m/big"));
+    // think end: best performance under $0.05/task → mid (90).
+    assert_eq!(bracket["think_end"]["model"], serde_json::json!("m/mid"));
+    let top: serde_json::Value =
+        serde_json::from_str(&catalog.get_meta("top_models").unwrap().unwrap()).unwrap();
+    assert_eq!(top["m/big"]["bracket"], serde_json::json!(true));
+    assert!(top["m/big"]["flags"].as_array().unwrap().is_empty());
+    assert_eq!(top["m/tiny"]["bracket"], serde_json::json!(false));
+    assert_eq!(
+        top["m/ghost"]["flags"],
+        serde_json::json!(["no-price", "popular-but-unscored"])
+    );
+    assert_eq!(top["m/quiet"]["flags"], serde_json::json!(["no-activity"]));
+}
+
+/// Iter 43: the v9→v10 jump adds the activity, version, and v2 rank
+/// columns (NULL until the next processing run) and bumps the
+/// version. Re-init is idempotent.
+#[test]
+fn migration_v9_to_v10_adds_score_columns() {
+    use rusqlite::{params, Connection};
+
+    let dir = common::scratch("migrate-v10");
+    let db = dir.join("v9.db");
+    {
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(pennyrouter_catalog::V1_DDL).unwrap();
+        conn.execute(
+            "INSERT INTO models (model_id, name, source, payload, fetched_at)
+             VALUES (?1, 'n', 'openrouter', '{}', 't')",
+            params!["m/id"],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO endpoints (model_id, provider_name, payload, fetched_at)
+             VALUES (?1, 'p', '{}', 't')",
+            params!["m/id"],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_meta (key, value) VALUES ('schema_version', '9')",
+            [],
+        )
+        .unwrap();
+    }
+
+    let catalog = Catalog::open(&db).unwrap();
+    catalog.init().unwrap();
+    catalog.init().unwrap();
+    let signals = catalog.model_signals().unwrap();
+    assert_eq!(signals["m/id"].activity_level, None);
+    assert_eq!(signals["m/id"].aa_intel_version, None);
+    let ranks = catalog.endpoint_ranks().unwrap();
+    let ep = &catalog.endpoints_for("m/id").unwrap()[0];
+    assert_eq!(ranks[&ep.id].rank_activity, None);
+    assert_eq!(ranks[&ep.id].rank_cost_task, None);
+    assert_eq!(
+        catalog.get_meta("schema_version").unwrap().as_deref(),
+        Some("10")
     );
 }
 

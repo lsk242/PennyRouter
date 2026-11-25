@@ -90,27 +90,36 @@ pub struct EndpointSpeed {
     pub uptime_pct: Option<f64>,
 }
 
-/// Value-score components for one endpoint (Iter 34). Stored rather
-/// than recomputed so the UI can show the arithmetic and a later
-/// gateway can read the score with one column.
+/// Value-score components for one endpoint (Iter 34; activity +
+/// cost-task from Iter 43). Stored rather than recomputed so the UI
+/// can show the arithmetic and a later gateway can read the score
+/// with one column. `rank-v1` rows carry `rank_popularity`;
+/// `rank-v2` rows carry `rank_activity` + `rank_cost_task` and leave
+/// popularity NULL — `rank_ruleset` tells which is live.
 #[derive(Clone, Default)]
 pub struct EndpointRank {
     pub rank_score: Option<f64>,
     pub rank_quality: Option<f64>,
     pub rank_efficiency: Option<f64>,
     pub rank_popularity: Option<f64>,
+    pub rank_activity: Option<f64>,
+    pub rank_cost_task: Option<f64>,
     pub rank_basis: Option<String>,
     pub rank_ruleset: Option<String>,
     pub ranked_at: Option<String>,
 }
 
-/// Per-model signals the value score reads (Iter 34).
+/// Per-model signals the value score reads (Iter 34; activity +
+/// intel version from Iter 43).
 #[derive(Clone, Debug, Default)]
 pub struct ModelSignals {
     pub aa_intelligence_index: Option<i64>,
     pub aa_coding_index: Option<i64>,
     pub aa_agentic_index: Option<i64>,
     pub aa_cost_per_task: Option<f64>,
+    pub aa_intel_version: Option<String>,
+    pub activity_level: Option<f64>,
+    pub activity_trend: Option<f64>,
     pub popularity_tokens: Option<i64>,
     pub popularity_share: Option<f64>,
 }
@@ -497,13 +506,16 @@ impl Catalog {
     pub fn update_endpoint_rank(&self, id: i64, rank: &EndpointRank) -> Result<(), Error> {
         self.conn.execute(
             "UPDATE endpoints SET rank_score = ?1, rank_quality = ?2,
-             rank_efficiency = ?3, rank_popularity = ?4, rank_basis = ?5,
-             rank_ruleset = ?6, ranked_at = ?7 WHERE id = ?8",
+             rank_efficiency = ?3, rank_popularity = ?4, rank_activity = ?5,
+             rank_cost_task = ?6, rank_basis = ?7, rank_ruleset = ?8,
+             ranked_at = ?9 WHERE id = ?10",
             params![
                 rank.rank_score,
                 rank.rank_quality,
                 rank.rank_efficiency,
                 rank.rank_popularity,
+                rank.rank_activity,
+                rank.rank_cost_task,
                 rank.rank_basis,
                 rank.rank_ruleset,
                 rank.ranked_at,
@@ -527,6 +539,37 @@ impl Catalog {
                 popularity.popularity_share,
                 model_id
             ],
+        )?;
+        Ok(())
+    }
+
+    /// Fill the activity columns of one model (Iter 43): level +
+    /// trend from the rankings window, NULL when unmeasured.
+    pub fn update_model_activity(
+        &self,
+        model_id: &str,
+        level: Option<f64>,
+        trend: Option<f64>,
+    ) -> Result<(), Error> {
+        self.conn.execute(
+            "UPDATE models SET activity_level = ?1, activity_trend = ?2
+             WHERE model_id = ?3",
+            params![level, trend, model_id],
+        )?;
+        Ok(())
+    }
+
+    /// Fill the intel-version column of one model (Iter 43): the
+    /// test version behind its stored intelligence index, NULL when
+    /// the index is unversioned or absent.
+    pub fn update_model_intel_version(
+        &self,
+        model_id: &str,
+        version: Option<&str>,
+    ) -> Result<(), Error> {
+        self.conn.execute(
+            "UPDATE models SET aa_intel_version = ?1 WHERE model_id = ?2",
+            params![version, model_id],
         )?;
         Ok(())
     }
@@ -555,7 +598,7 @@ impl Catalog {
     pub fn endpoint_ranks(&self) -> Result<HashMap<i64, EndpointRank>, Error> {
         let mut stmt = self.conn.prepare(
             "SELECT id, rank_score, rank_quality, rank_efficiency, rank_popularity,
-             rank_basis, rank_ruleset, ranked_at FROM endpoints",
+             rank_activity, rank_cost_task, rank_basis, rank_ruleset, ranked_at FROM endpoints",
         )?;
         let rows = stmt.query_map([], |r| {
             Ok((
@@ -565,9 +608,11 @@ impl Catalog {
                     rank_quality: r.get(2)?,
                     rank_efficiency: r.get(3)?,
                     rank_popularity: r.get(4)?,
-                    rank_basis: r.get(5)?,
-                    rank_ruleset: r.get(6)?,
-                    ranked_at: r.get(7)?,
+                    rank_activity: r.get(5)?,
+                    rank_cost_task: r.get(6)?,
+                    rank_basis: r.get(7)?,
+                    rank_ruleset: r.get(8)?,
+                    ranked_at: r.get(9)?,
                 },
             ))
         })?;
@@ -580,7 +625,8 @@ impl Catalog {
     pub fn model_signals(&self) -> Result<HashMap<String, ModelSignals>, Error> {
         let mut stmt = self.conn.prepare(
             "SELECT model_id, aa_intelligence_index, aa_coding_index, aa_agentic_index,
-             aa_cost_per_task, popularity_tokens, popularity_share FROM models",
+             aa_cost_per_task, aa_intel_version, activity_level, activity_trend,
+             popularity_tokens, popularity_share FROM models",
         )?;
         let rows = stmt.query_map([], |r| {
             Ok((
@@ -590,8 +636,11 @@ impl Catalog {
                     aa_coding_index: r.get(2)?,
                     aa_agentic_index: r.get(3)?,
                     aa_cost_per_task: r.get(4)?,
-                    popularity_tokens: r.get(5)?,
-                    popularity_share: r.get(6)?,
+                    aa_intel_version: r.get(5)?,
+                    activity_level: r.get(6)?,
+                    activity_trend: r.get(7)?,
+                    popularity_tokens: r.get(8)?,
+                    popularity_share: r.get(9)?,
                 },
             ))
         })?;
@@ -690,7 +739,7 @@ mod tests {
         catalog.init().unwrap();
         assert_eq!(
             catalog.get_meta("schema_version").unwrap().as_deref(),
-            Some("9")
+            Some("10")
         );
         assert_eq!(catalog.counts().unwrap(), (0, 0));
     }

@@ -484,8 +484,11 @@ impl AppState {
     }
 
     /// State with provider routing: recognized models are rewritten to
-    /// the stripped model id with a forced provider.
+    /// the stripped model id with a forced provider. Refreshes the
+    /// score gauges from the router's snapshot (Iter 46).
     pub fn with_router(mut self, router: Arc<routing::Router>) -> Self {
+        let (top, fetch) = router.score_inputs();
+        self.metrics.score_snapshot(&top, &fetch);
         self.router = Some(router);
         self
     }
@@ -521,6 +524,10 @@ impl AppState {
     /// `UPSTREAM_MAX_QUEUED`, defaulting to the compiled defaults on
     /// missing or unparsable values.
     pub fn from_env() -> Self {
+        // Ordering default (Iter 47): invalid values fail closed at
+        // startup (panic before serving anything) instead of routing
+        // on a silently-wrong ordering.
+        let ordering = routing::ordering_from_env().unwrap_or_else(|e| panic!("gateway: {e}"));
         let base = std::env::var("OPENROUTER_BASE_URL")
             .unwrap_or_else(|_| "https://openrouter.ai/api".to_string());
         let limits = ConcurrencyLimits {
@@ -580,10 +587,12 @@ impl AppState {
         match std::env::var("CATALOG_DB") {
             Err(_) => state,
             Ok(path) => match routing::Router::load(&path) {
-                Ok(router) => state.with_router(Arc::new(router)),
+                Ok(router) => state.with_router(Arc::new(router.with_ordering(ordering))),
                 Err(e) => {
                     eprintln!("gateway: routing standby ({e}), passing through until reload heals");
-                    state.with_router(Arc::new(routing::Router::standby(&path)))
+                    state.with_router(Arc::new(
+                        routing::Router::standby(&path).with_ordering(ordering),
+                    ))
                 }
             },
         }
@@ -676,7 +685,11 @@ pub fn spawn_reload_task(
                 .await
                 .unwrap_or_else(|e| Err(routing::RouteError(format!("reload task panicked: {e}"))))
             {
-                Ok(()) => metrics.reload_report(true),
+                Ok(()) => {
+                    metrics.reload_report(true);
+                    let (top, fetch) = router.score_inputs();
+                    metrics.score_snapshot(&top, &fetch);
+                }
                 Err(e) => {
                     metrics.reload_report(false);
                     eprintln!("gateway: catalog reload failed ({e}), keeping last good snapshot");
@@ -930,6 +943,8 @@ fn preview_json(preview: &routing::Preview) -> serde_json::Value {
             "throttled": c.throttled,
             "availability": if c.throttled { "cool-down" } else { "available" },
             "rank_index": c.rank_index,
+            "rank_score": c.rank_score,
+            "score_rank": c.score_rank,
             "sticky_match": c.sticky_match,
         })).collect::<Vec<_>>(),
     })
@@ -945,13 +960,15 @@ fn preview_json(preview: &routing::Preview) -> serde_json::Value {
 const UI_TEMPLATE: &str = include_str!("../templates/ui.html");
 
 /// Debug-UI query: the models tab mirrors the catalog UI models page,
-/// so it takes the same tab (`models_tab`: free/tiers/batch/decision,
-/// default tiers) and `q` model-id filter. Tab links carry `#models`
-/// so the page reopens on the tab after the reload.
+/// so it takes the same tab (`models_tab`: free/tiers/batch/decision/
+/// top, default tiers), `q` model-id filter, and TOP `min` score
+/// floor. Tab links carry `#models` so the page reopens on the tab
+/// after the reload.
 #[derive(Debug, Deserialize)]
 struct UiParams {
     models_tab: Option<String>,
     q: Option<String>,
+    min: Option<String>,
 }
 
 async fn ui_page(State(state): State<AppState>, Query(params): Query<UiParams>) -> Response {
@@ -1024,7 +1041,10 @@ async fn ui_page(State(state): State<AppState>, Query(params): Query<UiParams>) 
         }
     }
     /// The full arithmetic behind one row, from the stored components —
-    /// the same text as the catalog UI models page.
+    /// the same text as the catalog UI models page. `rank-v1` rows
+    /// show the popularity line; `rank-v2` rows (those carrying
+    /// `rank_activity`) show the stored cost/task and the activity
+    /// line instead.
     fn breakdown(entry: &routing::UiOffering) -> String {
         let cost = offering_cost(entry);
         let index = offering_index(entry);
@@ -1043,6 +1063,9 @@ async fn ui_page(State(state): State<AppState>, Query(params): Query<UiParams>) 
             };
             return format!("no score: {why}");
         };
+        if entry.rank_activity.is_some() {
+            return breakdown_v2(entry, index, factor, score);
+        }
         let quality = entry.rank_quality.unwrap_or(0.0);
         let efficiency = entry.rank_efficiency.unwrap_or(0.0);
         let popularity = entry.rank_popularity.unwrap_or(0.0);
@@ -1094,6 +1117,222 @@ async fn ui_page(State(state): State<AppState>, Query(params): Query<UiParams>) 
             lines.push(format!("ruleset    = {ruleset}"));
         }
         lines.join("\n")
+    }
+    /// v2 arithmetic: the stored cost/task (AA's number when the fetch
+    /// carried it, else the catalog blend) and the activity factor.
+    fn breakdown_v2(
+        entry: &routing::UiOffering,
+        index: Option<i64>,
+        factor: f64,
+        score: f64,
+    ) -> String {
+        let quality = entry.rank_quality.unwrap_or(0.0);
+        let efficiency = entry.rank_efficiency.unwrap_or(0.0);
+        let activity = entry.rank_activity.unwrap_or(0.0);
+        let cost_task = entry.rank_cost_task.unwrap_or(0.0);
+        let max_boost = pennyrouter_catalog::TREND_BOOST_MAX;
+        let activity_line = match (entry.signals.activity_level, entry.signals.activity_trend) {
+            (Some(level), Some(trend)) => {
+                let boost = (trend - 1.0).clamp(-max_boost, max_boost);
+                format!(
+                    "activity   = {:.4} × (1 + {:+.4}) / {:.2} = {:.4}",
+                    level,
+                    boost,
+                    1.0 + max_boost,
+                    activity
+                )
+            }
+            _ => format!("activity   = {activity:.4} (neutral, unmeasured)"),
+        };
+        let mut lines = vec![
+            format!(
+                "quality    = {} ({}) × {:.2} ({}) = {:.2}",
+                index.unwrap_or(0),
+                entry.rank_basis.as_deref().unwrap_or("-"),
+                factor,
+                entry.precision_class.as_deref().unwrap_or("unknown"),
+                quality
+            ),
+            format!("cost/task  = ${cost_task:.6} (stored)"),
+            format!(
+                "efficiency = {:.2} / ({:.6} + {:.2}) = {:.4}",
+                pennyrouter_catalog::COST_HALF_CREDIT,
+                cost_task,
+                pennyrouter_catalog::COST_HALF_CREDIT,
+                efficiency
+            ),
+            activity_line,
+            format!(
+                "rank_score = {:.2} × {:.4} × {:.4} = {:.1}",
+                quality, efficiency, activity, score
+            ),
+            format!(
+                "tie-breaks = {} tok/s · {} ms · {}% uptime",
+                num(entry.throughput_tps, 0),
+                num(entry.latency_ms, 0),
+                num(entry.uptime_pct, 1)
+            ),
+        ];
+        if let Some(ruleset) = entry.rank_ruleset.as_deref() {
+            lines.push(format!("ruleset    = {ruleset}"));
+        }
+        lines.join("\n")
+    }
+    /// Finite values only: corrupt stored floats display as `-`,
+    /// never NaN or inf.
+    fn fin(value: Option<f64>) -> Option<f64> {
+        value.filter(|v| v.is_finite())
+    }
+    /// TOP tab table (Iter 46): the same model-level rollup as the
+    /// catalog UI page — bracket members score-desc, then flagged
+    /// outsiders slug-asc — over the live snapshot. Model cells are
+    /// plain text (no per-model endpoints page here, as everywhere
+    /// in this tab).
+    fn render_top_table(
+        page: &mut String,
+        summary: &routing::UiSummary,
+        search: &str,
+        min: Option<&str>,
+    ) {
+        if summary.top.is_empty() {
+            page.push_str("<p>No TOP data in this artifact (sync without scoring).</p>");
+            return;
+        }
+        let floor: Option<f64> = min.and_then(|m| m.parse().ok());
+        let mut bracket: Vec<&(String, pennyrouter_catalog::TopModel)> = Vec::new();
+        let mut flagged: Vec<&(String, pennyrouter_catalog::TopModel)> = Vec::new();
+        for row in summary.top.iter() {
+            if !search.is_empty() && !row.0.to_lowercase().contains(search) {
+                continue;
+            }
+            if let Some(floor) = floor {
+                if row.1.score.is_none_or(|s| s < floor) {
+                    continue;
+                }
+            }
+            if row.1.bracket {
+                bracket.push(row);
+            } else if !row.1.flags.is_empty() {
+                flagged.push(row);
+            }
+        }
+        bracket.sort_by(|a, b| {
+            b.1.score
+                .partial_cmp(&a.1.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.cmp(&b.0))
+        });
+        flagged.sort_by(|a, b| a.0.cmp(&b.0));
+        let rows: Vec<&(String, pennyrouter_catalog::TopModel)> =
+            bracket.into_iter().chain(flagged).collect();
+        if rows.is_empty() {
+            page.push_str("<p>No models match this tab.</p>");
+            return;
+        }
+        page.push_str("<div class=\"table-scroll\">");
+        page.push_str(
+            "<table><tr><th>#</th><th>model</th><th>score</th><th>quality</th>\
+            <th>efficiency</th><th>activity</th><th>cost/task</th><th>basis</th>\
+            <th>level</th><th>trend</th><th>bracket</th><th>flags</th></tr>",
+        );
+        const COLUMNS: usize = 12;
+        for (position, (id, entry)) in rows.iter().enumerate() {
+            let flags = if entry.flags.is_empty() {
+                "<span class=\"muted\">-</span>".to_string()
+            } else {
+                esc(&entry.flags.join(", "))
+            };
+            page.push_str(&format!(
+                "<tr><td><a class=\"ranknum\" href=\"#calc-{}\" title=\"show calculation\">{}</a></td>\
+                <td>{}</td>\
+                <td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td>\
+                <td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+                position + 1,
+                position + 1,
+                esc(id),
+                score_cell(fin(entry.score)),
+                num(fin(entry.quality), 2),
+                num(fin(entry.efficiency), 3),
+                num(fin(entry.activity), 3),
+                fin(entry.cost_task)
+                    .map(|cost| format!("${cost:.6}"))
+                    .unwrap_or_else(|| "-".to_string()),
+                esc(entry.basis.as_deref().unwrap_or("-")),
+                num(fin(entry.level), 4),
+                num(fin(entry.trend), 3),
+                if entry.bracket {
+                    "yes"
+                } else {
+                    "<span class=\"muted\">no</span>"
+                },
+                flags,
+            ));
+            page.push_str(&format!(
+                "<tr id=\"calc-{}\" class=\"calc-row\"><td colspan=\"{}\">\
+                <div class=\"calc\">calc — {}<br>{}</div>\
+                <a href=\"#\" class=\"muted\">close</a></td></tr>",
+                position + 1,
+                COLUMNS,
+                esc(id),
+                esc(&top_breakdown(entry)).replace('\n', "<br>")
+            ));
+        }
+        page.push_str("</table></div>");
+    }
+    /// Model-level arithmetic from one TOP entry: the stored
+    /// components plus bracket membership and flags. Same text as
+    /// the catalog UI page.
+    fn top_breakdown(entry: &pennyrouter_catalog::TopModel) -> String {
+        let flags = if entry.flags.is_empty() {
+            "none".to_string()
+        } else {
+            entry.flags.join(", ")
+        };
+        let bracket = if entry.bracket { "yes" } else { "no" };
+        let Some(score) = fin(entry.score) else {
+            return format!("no score\nflags      = {flags}\nbracket    = {bracket}");
+        };
+        let quality = fin(entry.quality).unwrap_or(0.0);
+        let efficiency = fin(entry.efficiency).unwrap_or(0.0);
+        let activity = fin(entry.activity).unwrap_or(0.0);
+        let cost_task = fin(entry.cost_task).unwrap_or(0.0);
+        let max_boost = pennyrouter_catalog::TREND_BOOST_MAX;
+        let activity_line = match (fin(entry.level), fin(entry.trend)) {
+            (Some(level), Some(trend)) => {
+                let boost = (trend - 1.0).clamp(-max_boost, max_boost);
+                format!(
+                    "activity   = {:.4} × (1 + {:+.4}) / {:.2} = {:.4}",
+                    level,
+                    boost,
+                    1.0 + max_boost,
+                    activity
+                )
+            }
+            _ => format!("activity   = {activity:.4} (neutral, unmeasured)"),
+        };
+        [
+            format!(
+                "quality    = {:.2} ({})",
+                quality,
+                entry.basis.as_deref().unwrap_or("-")
+            ),
+            format!("cost/task  = ${cost_task:.6} (stored)"),
+            format!(
+                "efficiency = {:.2} / ({:.6} + {:.2}) = {:.4}",
+                pennyrouter_catalog::COST_HALF_CREDIT,
+                cost_task,
+                pennyrouter_catalog::COST_HALF_CREDIT,
+                efficiency
+            ),
+            activity_line,
+            format!(
+                "rank_score = {:.2} × {:.4} × {:.4} = {:.1}",
+                quality, efficiency, activity, score
+            ),
+            format!("bracket    = {bracket}"),
+            format!("flags      = {flags}"),
+        ]
+        .join("\n")
     }
     // One buffer per tab panel; each region below shadows `page` to
     // its buffer so the existing builders move over unchanged.
@@ -1229,7 +1468,7 @@ async fn ui_page(State(state): State<AppState>, Query(params): Query<UiParams>) 
                 // live, and the free tab is one click away.
                 let tab = params.models_tab.as_deref().unwrap_or("tiers");
                 let tab = match tab {
-                    "free" | "batch" | "decision" => tab,
+                    "free" | "batch" | "decision" | "top" => tab,
                     _ => "tiers",
                 };
                 let search = params.q.as_deref().unwrap_or_default().to_lowercase();
@@ -1291,21 +1530,45 @@ async fn ui_page(State(state): State<AppState>, Query(params): Query<UiParams>) 
                         "<a href=\"/ui?models_tab={name}#models\"{active}>{label} ({count})</a>"
                     )
                 };
-                page.push_str(&format!(
-                    "<nav class=\"subtabs\">{}{}{}{}</nav>\
-                    <form method=\"get\" action=\"/ui#models\">\
-                    <input type=\"hidden\" name=\"models_tab\" value=\"{}\">\
-                    <input type=\"search\" name=\"q\" value=\"{}\" placeholder=\"filter model id\"> \
-                    <button type=\"submit\" class=\"action\">filter</button></form>",
+                let top_count = summary
+                    .top
+                    .iter()
+                    .filter(|(_, entry)| entry.bracket || !entry.flags.is_empty())
+                    .count();
+                let subtabs = format!(
+                    "<nav class=\"subtabs\">{}{}{}{}{}</nav>",
                     tab_link("free", "free", free_count),
                     tab_link("tiers", "tiers", tier_count),
                     tab_link("batch", "batch", batch_count),
                     tab_link("decision", "decision", decision_count),
-                    esc(tab),
-                    esc(&search),
-                ));
+                    tab_link("top", "top", top_count),
+                );
+                if tab == "top" {
+                    page.push_str(&format!(
+                        "{subtabs}\
+                        <form method=\"get\" action=\"/ui#models\">\
+                        <input type=\"hidden\" name=\"models_tab\" value=\"top\">\
+                        <input type=\"search\" name=\"q\" value=\"{}\" placeholder=\"filter model id\"> \
+                        <input type=\"text\" name=\"min\" value=\"{}\" placeholder=\"min score\" size=\"8\"> \
+                        <button type=\"submit\" class=\"action\">filter</button></form>",
+                        esc(&search),
+                        esc(params.min.as_deref().unwrap_or("")),
+                    ));
+                } else {
+                    page.push_str(&format!(
+                        "{subtabs}\
+                        <form method=\"get\" action=\"/ui#models\">\
+                        <input type=\"hidden\" name=\"models_tab\" value=\"{}\">\
+                        <input type=\"search\" name=\"q\" value=\"{}\" placeholder=\"filter model id\"> \
+                        <button type=\"submit\" class=\"action\">filter</button></form>",
+                        esc(tab),
+                        esc(&search),
+                    ));
+                }
 
-                if rows.is_empty() {
+                if tab == "top" {
+                    render_top_table(page, &summary, &search, params.min.as_deref());
+                } else if rows.is_empty() {
                     page.push_str("<p>No offerings in this tab.</p>");
                 } else {
                     page.push_str("<div class=\"table-scroll\">");
@@ -1440,7 +1703,7 @@ async fn ui_page(State(state): State<AppState>, Query(params): Query<UiParams>) 
                     <th>cache-write $/M</th><th>effective $/M</th><th>promo</th><th>class</th>\
                     <th>quant</th>\
                     <th>tier</th><th>score</th><th>tools</th><th>decisions</th>\
-                    <th>free</th><th>availability</th><th>rank</th></tr></thead>",
+                    <th>free</th><th>availability</th><th>rank</th><th>score rank</th></tr></thead>",
                 );
                     page.push_str(&format!("<tbody id=\"{prefix}-{i}-rows\">"));
                     for (n, c) in preview.candidates.iter().enumerate() {
@@ -1448,7 +1711,7 @@ async fn ui_page(State(state): State<AppState>, Query(params): Query<UiParams>) 
                             "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td>\
                         <td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td>\
                         <td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td>\
-                        <td>{}</td><td>{}</td><td>{}</td></tr>",
+                        <td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
                             n + 1,
                             esc(&c.provider),
                             esc(&c.model_id),
@@ -1478,6 +1741,11 @@ async fn ui_page(State(state): State<AppState>, Query(params): Query<UiParams>) 
                             c.rank_index
                                 .map(|r| r.to_string())
                                 .unwrap_or_else(|| "-".to_string()),
+                            match (c.score_rank, c.rank_score) {
+                                (Some(rank), Some(score)) => format!("#{rank} ({score:.1})"),
+                                (Some(rank), None) => format!("#{rank}"),
+                                _ => "-".to_string(),
+                            },
                         ));
                     }
                     page.push_str("</tbody></table>");
@@ -1523,12 +1791,18 @@ async fn ui_page(State(state): State<AppState>, Query(params): Query<UiParams>) 
         +'</td><td>'+insBool(c.supports_tools)+'</td><td>'+insBool(c.supports_decisions)+'</td><td>'\
         +(c.free_eligible?'yes':'no')+'</td><td>'+insEsc(c.availability)+'</td><td>'\
         +((c.rank_index===null||c.rank_index===undefined)?'-':c.rank_index)+'</td><td>'\
+        +insScoreRank(c)+'</td><td>'\
         +(c.sticky_match?'pinned':'-')+'</td></tr>';}\
+        function insScoreRank(c){\
+        if(c.score_rank===null||c.score_rank===undefined)return '-';\
+        var s='#'+c.score_rank;\
+        if(c.rank_score!==null&&c.rank_score!==undefined){s+=' ('+Number(c.rank_score).toFixed(1)+')';}\
+        return s;}\
         function insTable(data){\
         var h='<table><thead><tr><th>#</th><th>provider</th><th>backend model</th><th>tag</th>'\
         +'<th>prompt $/M</th><th>completion $/M</th><th>cache-read $/M</th><th>cache-write $/M</th>'\
         +'<th>effective $/M</th><th>promo</th><th>class</th><th>quant</th><th>tier</th><th>score</th><th>tools</th>'\
-        +'<th>decisions</th><th>free</th><th>availability</th><th>rank</th><th>session</th></tr></thead><tbody>';\
+        +'<th>decisions</th><th>free</th><th>availability</th><th>rank</th><th>score rank</th><th>session</th></tr></thead><tbody>';\
         for(var i=0;i<data.candidates.length;i++){h+=insRow(data.candidates[i],i);}\
         return h+'</tbody></table>';}\
         function insHead(data){\
@@ -1564,7 +1838,8 @@ async fn ui_page(State(state): State<AppState>, Query(params): Query<UiParams>) 
         +((c.quality_score===null||c.quality_score===undefined)?'-':Number(c.quality_score).toFixed(3))\
         +'</td><td>'+insBool(c.supports_tools)+'</td><td>'+insBool(c.supports_decisions)+'</td><td>'\
         +(c.free_eligible?'yes':'no')+'</td><td>'+insEsc(c.availability)+'</td><td>'\
-        +((c.rank_index===null||c.rank_index===undefined)?'-':c.rank_index)+'</td></tr>';}\
+        +((c.rank_index===null||c.rank_index===undefined)?'-':c.rank_index)+'</td><td>'\
+        +insScoreRank(c)+'</td></tr>';}\
         rows.innerHTML=h;}\
         if(pick){if(data.sticky){pick.innerHTML='With this key'+(data.sticky_hit?' (sticky)':' (fresh)')\
         +': <strong>'+insEsc(data.sticky.provider)+'</strong> ('+insEsc(data.sticky.model_id)+')';}}\
@@ -1572,9 +1847,12 @@ async fn ui_page(State(state): State<AppState>, Query(params): Query<UiParams>) 
         catch(e){}}}\
         document.getElementById('inspector-refresh').onclick=async function(){\
         await insRefreshGroup('fixed',['openrouter/pair/free','openrouter/pair/low','openrouter/pair/think',\
+        'openrouter/pair/coding','openrouter/pair/coding/think',\
         'openrouter/pair/decision','openrouter/pair/decision/free','openrouter/pair/batch',\
         'openrouter/pair/privacy/free',\
-        'openrouter/pair/privacy/low','openrouter/pair/privacy/think','openrouter/pair/privacy/decision',\
+        'openrouter/pair/privacy/low','openrouter/pair/privacy/think',\
+        'openrouter/pair/privacy/coding','openrouter/pair/privacy/coding/think',\
+        'openrouter/pair/privacy/decision',\
         'openrouter/pair/privacy/decision/free','openrouter/pair/privacy/batch']);\
         await insRefreshGroup('minindex',['openrouter/pair/low/minindex/40',\
         'openrouter/pair/privacy/think/minindex/70']);};\
@@ -1947,6 +2225,17 @@ async fn routed_decisions(
         || model
             .as_deref()
             .is_some_and(|model| routing::invalid_virtual(model).is_some());
+    // `lowest`-tag rewrites fail closed like virtual ids (Iter 44):
+    // the rewritten id would 404 opaquely upstream. Retry stays
+    // virtual-only (tags are exactly-once), so this flag feeds
+    // only the rejection arm below.
+    let fail_closed = is_virtual
+        || model.as_deref().is_some_and(|model| {
+            state
+                .router
+                .as_ref()
+                .is_some_and(|router| router.is_lowest_rewrite(model))
+        });
     // Q06-B: privacy virtual ids fail closed on the decisions route.
     // The decisions API has no verified zero-retention field, so
     // serving would send the payload on a promise the gateway cannot
@@ -1983,7 +2272,7 @@ async fn routed_decisions(
             }
             Ok(None) => (buffered, None, None),
             Err(rejection) => {
-                if is_virtual {
+                if fail_closed {
                     note_minindex(
                         &state,
                         model.as_deref().unwrap_or_default(),
@@ -2128,6 +2417,10 @@ async fn routed_decisions(
         }
     }
     if let Some(decision) = decision {
+        // Ordering served (Iter 47): the A/B comparison between
+        // score-first and legacy. Counted once per served request.
+        let tier = model.as_deref().map(routing::tier_label).unwrap_or("none");
+        state.metrics.routing_order(decision.ordering, tier);
         response = with_routed_headers(response, &decision);
     }
     response
@@ -2179,6 +2472,17 @@ async fn routed_completion(
         || model
             .as_deref()
             .is_some_and(|model| routing::invalid_virtual(model).is_some());
+    // `lowest`-tag rewrites fail closed like virtual ids (Iter 44):
+    // the rewritten id would 404 opaquely upstream. Retry stays
+    // virtual-only (tags are exactly-once), so this flag feeds
+    // only the rejection arm below.
+    let fail_closed = is_virtual
+        || model.as_deref().is_some_and(|model| {
+            state
+                .router
+                .as_ref()
+                .is_some_and(|router| router.is_lowest_rewrite(model))
+        });
     // Free-fallback chains (Iter 21) resolve here: (original model id,
     // fallback tier) for the post-retry leg below.
     let fallback_request: Option<(String, String)> = match (&model, &virtual_model) {
@@ -2246,7 +2550,7 @@ async fn routed_completion(
             }
             Ok(None) => (buffered, None, None),
             Err(rejection) => {
-                if is_virtual {
+                if fail_closed {
                     note_minindex(
                         &state,
                         model.as_deref().unwrap_or_default(),
@@ -2407,6 +2711,10 @@ async fn routed_completion(
         }
     }
     if let Some(decision) = decision {
+        // Ordering served (Iter 47): the A/B comparison between
+        // score-first and legacy. Counted once per served request.
+        let tier = model.as_deref().map(routing::tier_label).unwrap_or("none");
+        state.metrics.routing_order(decision.ordering, tier);
         response = with_routed_headers(response, &decision);
     }
     response
@@ -2719,12 +3027,16 @@ async fn smart_completion(
                     )
                     .await;
                     record_throttle(state, router, &retry_decision, &response);
+                    state
+                        .metrics
+                        .routing_order(retry_decision.ordering, "smart");
                     return with_smart_headers(
                         with_routed_headers(response, &retry_decision),
                         &ctx,
                     );
                 }
             }
+            state.metrics.routing_order(decision.ordering, "smart");
             with_smart_headers(with_routed_headers(response, &decision), &ctx)
         }
         ClassifierOutcome::Failed {
@@ -2787,6 +3099,7 @@ async fn smart_completion(
                     )
                     .await;
                     record_throttle(state, router, &decision, &response);
+                    state.metrics.routing_order(decision.ordering, "smart");
                     with_smart_headers(with_routed_headers(response, &decision), &ctx)
                 }
                 Err(rejection) => with_smart_headers(rejection_response(&rejection), &ctx),

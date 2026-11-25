@@ -210,8 +210,106 @@ fn artifact_dir(test: &str) -> std::path::PathBuf {
                 rank_quality: Some(80.0),
                 rank_efficiency: Some(1.0),
                 rank_popularity: Some(1.0),
+                rank_activity: None,
+                rank_cost_task: None,
                 rank_basis: Some("coding".to_string()),
                 rank_ruleset: Some("rank-v1".to_string()),
+                ranked_at: Some("t".to_string()),
+            },
+        )
+        .unwrap();
+
+    // A v2-scored offering: rank_activity + rank_cost_task set,
+    // popularity NULL — the breakdown must render the v2 formula.
+    catalog
+        .insert_model(&ModelRow {
+            model_id: "v2/model".to_string(),
+            name: "v2/model".to_string(),
+            source: "test".to_string(),
+            payload: "{}".to_string(),
+            fetched_at: "t".to_string(),
+        })
+        .unwrap();
+    catalog
+        .update_model_index(
+            "v2/model",
+            &ModelIndex {
+                aa_intelligence_index: None,
+                aa_coding_index: Some(80),
+                aa_agentic_index: None,
+                aa_cost_per_task: None,
+            },
+        )
+        .unwrap();
+    catalog
+        .update_model_activity("v2/model", Some(0.99), Some(1.0))
+        .unwrap();
+    catalog
+        .insert_endpoint(&EndpointRow {
+            id: 0,
+            model_id: "v2/model".to_string(),
+            provider_name: "V2Provider".to_string(),
+            payload: "{}".to_string(),
+            fetched_at: "t".to_string(),
+            price_prompt: Some(1.0),
+            price_completion: Some(2.0),
+            price_cache_read: None,
+            price_cache_write: None,
+            precision_class: Some("fp16".to_string()),
+            quantization: None,
+            promo_discount: None,
+            processed_at: Some("t".to_string()),
+            supports_tools: None,
+            supports_decisions: None,
+            quality_tier: None,
+            quality_score: None,
+            scored_at: None,
+            score_model: None,
+            score_prompt: None,
+            price_override_tokens: None,
+        })
+        .unwrap();
+    let v2 = &catalog.endpoints_for("v2/model").unwrap()[0];
+    catalog
+        .update_endpoint_index(
+            v2.id,
+            &EndpointIndex {
+                price_prompt: Some(1.0),
+                price_completion: Some(2.0),
+                price_cache_read: None,
+                price_cache_write: None,
+                precision_class: Some("fp16".to_string()),
+                quantization: None,
+                promo_discount: None,
+                processed_at: "t".to_string(),
+                supports_tools: None,
+                supports_decisions: None,
+                price_override_tokens: None,
+            },
+        )
+        .unwrap();
+    catalog
+        .update_endpoint_speed(
+            v2.id,
+            &EndpointSpeed {
+                latency_ms: Some(300.0),
+                throughput_tps: Some(120.0),
+                uptime_pct: Some(99.5),
+            },
+        )
+        .unwrap();
+    catalog
+        .update_endpoint_rank(
+            v2.id,
+            &EndpointRank {
+                rank_score: Some(36.0),
+                rank_quality: Some(80.0),
+                rank_efficiency: Some(0.5),
+                rank_popularity: None,
+                rank_activity: Some(0.9),
+                rank_cost_task: Some(0.01),
+                rank_basis: Some("coding".to_string()),
+                rank_ruleset: Some("rank-v2".to_string()),
                 ranked_at: Some("t".to_string()),
             },
         )
@@ -252,6 +350,35 @@ fn artifact_dir(test: &str) -> std::path::PathBuf {
             score_prompt: None,
             price_override_tokens: None,
         })
+        .unwrap();
+    // TOP rollup + bracket + fetch health (Iter 46): two bracket
+    // members plus one flagged outsider.
+    catalog
+        .set_meta(
+            "top_models",
+            r#"{"top/alpha":{"score":36.0,"quality":80.0,"efficiency":0.5,"activity":0.9,"cost_task":0.01,"basis":"coding","level":0.9,"trend":1.1,"bracket":true,"flags":[]},
+                "top/beta":{"score":24.0,"quality":60.0,"efficiency":0.5,"activity":0.8,"cost_task":0.01,"basis":"coding","level":0.88,"trend":1.0,"bracket":true,"flags":[]},
+                "top/ghost":{"score":null,"quality":null,"efficiency":null,"activity":null,"cost_task":null,"basis":null,"level":0.4,"trend":1.0,"bracket":false,"flags":["no-price","popular-but-unscored"]}}"#,
+        )
+        .unwrap();
+    catalog
+        .set_meta(
+            "bracket",
+            r#"{"ruleset":"rank-v2","members":["top/alpha","top/beta"]}"#,
+        )
+        .unwrap();
+    catalog
+        .set_meta("aa_as_of", "2026-11-24T10:00:00Z")
+        .unwrap();
+    catalog.set_meta("aa_intel_version", "5").unwrap();
+    catalog
+        .set_meta("popular_as_of", "2026-11-24T09:00:00Z")
+        .unwrap();
+    catalog
+        .set_meta(
+            "fetch_health",
+            r#"{"aa":"2026-11-24T10:00:00Z","popularity":"2026-11-24T09:30:00Z"}"#,
+        )
         .unwrap();
     drop(catalog);
     let out = dir.join("out");
@@ -543,8 +670,12 @@ fn overview_explains_the_score_and_models_tabs_split_free_from_tiers() {
         "formula section present"
     );
     assert!(
-        index.contains("rank_score = quality × efficiency × popularity"),
-        "formula spelled out"
+        index.contains("rank_score = quality × efficiency × activity"),
+        "v2 formula spelled out"
+    );
+    assert!(
+        index.contains("Legacy <code>rank-v1</code>"),
+        "v1 formula kept for old artifacts"
     );
     assert!(index.contains("Worked example"), "worked example present");
     assert!(
@@ -688,6 +819,145 @@ fn batch_tab_lists_batch_models_and_rank_number_opens_calc_row() {
         batch.contains(".wrap{width:100%;margin:0}"),
         "layout uses the full screen width, got: {batch}"
     );
+}
+
+/// Iter 43: v2 rows (activity + stored cost/task) render the v2
+/// arithmetic; v1 rows keep the popularity line.
+#[test]
+fn v2_rows_render_activity_arithmetic() {
+    let out = artifact_dir("v2-breakdown");
+    let log = out.join("pipe.log");
+    std::fs::write(&log, "").unwrap();
+    let server = spawn(&out, &log);
+
+    let tiers = get(&server, "/models?tab=tiers");
+    assert!(tiers.contains("200 OK"), "got: {tiers}");
+    assert!(tiers.contains("v2/model"), "v2 row listed");
+    for line in [
+        "quality    = 80 (coding) × 1.00 (fp16) = 80.00",
+        "cost/task  = $0.010000 (stored)",
+        "efficiency = 0.01 / (0.010000 + 0.01) = 0.5000",
+        "activity   = 0.9900 × (1 + +0.0000) / 1.10 = 0.9000",
+        "rank_score = 80.00 × 0.5000 × 0.9000 = 36.0",
+        "ruleset    = rank-v2",
+    ] {
+        assert!(tiers.contains(line), "v2 line present: {line}");
+    }
+    // Scoped to the v2 calc row: no v1 popularity line there.
+    let calc = tiers
+        .split_once("calc — v2/model")
+        .map(|(_, tail)| &tail[..tail.len().min(1200)])
+        .unwrap();
+    assert!(!calc.contains("popularity ="), "no v1 line in v2 row");
+}
+
+/// Iter 46: TOP tab lists bracket members score-desc with per-row
+/// arithmetic, then flagged outsiders; flags render exactly when
+/// set, and `?q=` + `?min=` filter.
+#[test]
+fn top_tab_lists_bracket_with_arithmetic_and_flags() {
+    let out = artifact_dir("top-tab");
+    let log = out.join("pipe.log");
+    std::fs::write(&log, "").unwrap();
+    let server = spawn(&out, &log);
+
+    let top = get(&server, "/models?tab=top");
+    assert!(top.contains("200 OK"), "got: {top}");
+    assert!(top.contains("top (3)"), "tab count");
+    let alpha = top.find("top/alpha").unwrap();
+    let beta = top.find("top/beta").unwrap();
+    let ghost = top.find("top/ghost").unwrap();
+    assert!(
+        alpha < beta && beta < ghost,
+        "bracket score-desc, flagged last"
+    );
+    for line in [
+        "rank_score = 80.00 × 0.5000 × 0.9000 = 36.0",
+        "activity   = 0.9000 × (1 + +0.1000) / 1.10 = 0.9000",
+        "cost/task  = $0.010000 (stored)",
+        "bracket    = yes",
+        "flags      = none",
+    ] {
+        assert!(top.contains(line), "alpha arithmetic: {line}");
+    }
+    assert!(top.contains("no score"), "ghost unscored");
+    assert!(
+        top.contains("flags      = no-price, popular-but-unscored"),
+        "ghost flags render"
+    );
+    assert!(top.contains("bracket    = no"), "ghost outside");
+    // Filters: q narrows, min floors (unscored fail a set floor).
+    let beta_only = get(&server, "/models?tab=top&q=beta");
+    assert!(beta_only.contains("top/beta"));
+    assert!(!beta_only.contains("top/alpha"));
+    let min = get(&server, "/models?tab=top&min=30");
+    assert!(min.contains("top/alpha"));
+    assert!(!min.contains("top/beta"));
+    assert!(!min.contains("top/ghost"));
+    let none = get(&server, "/models?tab=top&q=zzz");
+    assert!(none.contains("No models match this tab."));
+    assert!(!top.contains("NaN"), "no NaN anywhere");
+}
+
+/// Iter 46: overview shows bracket counts and per-source fetch
+/// health from the artifact metas.
+#[test]
+fn overview_shows_bracket_counts_and_fetch_health() {
+    let out = artifact_dir("top-overview");
+    let log = out.join("pipe.log");
+    std::fs::write(&log, "").unwrap();
+    let server = spawn(&out, &log);
+
+    let index = get(&server, "/");
+    assert!(index.contains("Top-usage bracket"), "bracket section");
+    assert!(
+        index.contains("<td>2</td><td>0</td><td>1</td>"),
+        "2 in, 0 stale, 1 popular"
+    );
+    assert!(index.contains("Fetch health"), "health section");
+    assert!(index.contains("Artificial Analysis"), "AA row");
+    assert!(index.contains("2026-11-24T10:00:00Z"), "AA citation");
+    assert!(index.contains("OpenRouter Data API"), "OR row");
+    assert!(index.contains("2026-11-24T09:00:00Z"), "OR citation");
+    assert!(index.contains("2026-11-24T09:30:00Z"), "OR last ok");
+}
+
+/// Bare published artifact: no scores, no rollup, no health.
+fn bare_artifact_dir(test: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("catalog-ui-{test}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let work = dir.join("work.db");
+    let catalog = Catalog::open(&work).unwrap();
+    catalog.init().unwrap();
+    drop(catalog);
+    let out = dir.join("out");
+    publish(&work, &out, "test", 1, 1).unwrap();
+    out
+}
+
+/// Iter 46: an unscored artifact degrades gracefully — explanatory
+/// text, no tables, no NaN.
+#[test]
+fn top_tab_empty_artifact_degrades_gracefully() {
+    let out = bare_artifact_dir("top-empty");
+    let log = out.join("pipe.log");
+    std::fs::write(&log, "").unwrap();
+    let server = spawn(&out, &log);
+
+    let top = get(&server, "/models?tab=top");
+    assert!(top.contains("200 OK"), "got: {top}");
+    assert!(
+        top.contains("No TOP data in this artifact"),
+        "explains itself"
+    );
+    assert!(!top.contains("NaN"), "no NaN");
+    let index = get(&server, "/");
+    assert!(
+        index.contains("No TOP data in this artifact"),
+        "overview explains"
+    );
+    assert!(index.contains("never"), "health reads never fetched");
 }
 
 #[test]
