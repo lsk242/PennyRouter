@@ -35,6 +35,7 @@ services:
     restart: unless-stopped
   catalog-sync:
     image: ${CATALOG_IMAGE:-ghcr.io/lsk242/pennyrouter-catalog:latest}
+    container_name: catalog-sync
     volumes:
       - catalog-data:/catalog
     env_file:
