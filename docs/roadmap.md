@@ -1251,4 +1251,21 @@ only when pulled forward deliberately.
   for route and preview; full workspace green (425 passed).
   fmt + clippy `-D warnings` via the extracted toolchain, clean.
 
-## After Iter 61
+## Iter 62 — Session app labels + expandable rows (done)
+
+- Goal: the sessions tab names the calling application per pin,
+  and the selection rule stops hogging a column.
+- Value: operators see which client (agent, UI, script) holds
+  each pin; the table stays readable with rules one click away.
+- Shipped: `Pin.app` + `Router::note_app` stamp live pins from
+  `X-Title`, else referer (scheme/query stripped), else
+  user-agent — post-route, refresh-per-request, display-only,
+  never creating sessions. Sessions tab gains an Application
+  column; the Why-selected column becomes a hidden detail row
+  toggled by clicking the model name.
+- Test: new `crates/gateway/tests/sessions.rs` (precedence,
+  referer trim, empty, refresh, UI shape); existing sessions UI
+  test moved to the new contract; full workspace green
+  (430 passed). fmt via the extracted toolchain, clean.
+
+## After Iter 62

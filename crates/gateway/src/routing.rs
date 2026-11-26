@@ -177,6 +177,10 @@ struct Pin {
     /// Human-readable selection rule (Iter 39): which eligibility
     /// gates and ordering calculation picked this offering.
     reason: String,
+    /// Client application label (Iter 62): `X-Title`, else referer,
+    /// else user-agent, refreshed on every request of the key.
+    /// Display-only — routing never reads it.
+    pub app: Option<String>,
 }
 
 impl Pin {
@@ -192,6 +196,7 @@ impl Pin {
             tag: pick.tag.clone(),
             quantization: pick.quantization.clone(),
             reason,
+            app: None,
         }
     }
 }
@@ -1216,6 +1221,62 @@ impl Router {
             }
         }
         sessions.insert(key, (pin, Instant::now()));
+    }
+
+    /// Client application label from request headers (Iter 62):
+    /// `X-Title`, else referer, else user-agent — OpenRouter's own
+    /// attribution convention. Trimmed, capped, display-only.
+    /// Referers collapse to host+path: scheme and query/fragment
+    /// (which can carry tokens) never reach the table.
+    fn app_label_from_headers(headers: &axum::http::HeaderMap) -> Option<String> {
+        for name in ["x-title", "referer", "user-agent"] {
+            if let Some(value) = headers
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+            {
+                let value = if name == "referer" {
+                    value
+                        .split_once("://")
+                        .map(|(_, rest)| rest)
+                        .unwrap_or(value)
+                        .split(['?', '#'])
+                        .next()
+                        .unwrap_or(value)
+                } else {
+                    value
+                };
+                let mut label = value.chars().take(80).collect::<String>();
+                if label.len() < value.len() {
+                    label.push('…');
+                }
+                return Some(label);
+            }
+        }
+        None
+    }
+
+    /// Stamp live pins of this credential with the request's app
+    /// label (Iter 62): `X-Title`, else referer, else user-agent.
+    /// Runs after routing succeeds; entries that don't exist (yet,
+    /// or anymore) are a no-op — labels refresh on every request
+    /// but never create sessions. Display-only.
+    pub fn note_app(&self, headers: &axum::http::HeaderMap) {
+        let auth = headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok());
+        let label = Self::app_label_from_headers(headers);
+        let (Some(auth), Some(label)) = (auth, label) else {
+            return;
+        };
+        let hash = self.session_key(auth, "").0;
+        let mut sessions = self.sessions.write().unwrap_or_else(|e| e.into_inner());
+        for ((h, _), (pin, used)) in sessions.iter_mut() {
+            if *h == hash && used.elapsed() < SESSION_TTL {
+                pin.app = Some(label.clone());
+            }
+        }
     }
 
     /// Extract the last 4 alphanumeric characters from an Authorization header
@@ -3379,6 +3440,22 @@ impl Router {
         finish: BodyFinish,
         allow_pin: bool,
     ) -> Result<Option<(Vec<u8>, Decision)>, RouteRejection> {
+        let out = self.route_inner_impl(headers, body, extra, finish, allow_pin);
+        // Stamp the session with the calling application (Iter 62).
+        if out.is_ok() {
+            self.note_app(headers);
+        }
+        out
+    }
+
+    fn route_inner_impl(
+        &self,
+        headers: &axum::http::HeaderMap,
+        body: &[u8],
+        extra: Option<&ProviderConstraints>,
+        finish: BodyFinish,
+        allow_pin: bool,
+    ) -> Result<Option<(Vec<u8>, Decision)>, RouteRejection> {
         let json: serde_json::Value = serde_json::from_slice(body).map_err(|_| RouteRejection {
             code: "invalid_body",
             message: "request body is not valid JSON".to_string(),
@@ -3564,6 +3641,9 @@ pub struct UiSession {
     pub live: bool,
     /// Selection rule recorded when the pin was stored (Iter 39).
     pub reason: String,
+    /// Client application label, refreshed on every request of the
+    /// key (Iter 62). `None` when no request carried one.
+    pub app: Option<String>,
 }
 
 /// Default-orientation provider order for one (model, class).
@@ -3706,6 +3786,7 @@ impl Router {
                     UiSession {
                         key_suffix: pin.key_suffix.clone(),
                         model: model.clone(),
+                        app: pin.app.clone(),
                         provider: pin.provider.clone(),
                         precision_class: pin.precision_class.clone(),
                         pinned_at: pinned_at
@@ -5866,6 +5947,7 @@ mod tests {
                 tag: None,
                 quantization: Some("fp16".to_string()),
                 reason: "test pin".to_string(),
+                app: None,
             },
         );
         let body = serde_json::json!({

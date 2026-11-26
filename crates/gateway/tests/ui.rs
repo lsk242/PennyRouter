@@ -1534,9 +1534,19 @@ async fn ui_sessions_tab_shows_backend_model_params_and_reason() {
         body.contains("<th>Backend model</th>"),
         "backend model column, got: {body}"
     );
+    // Iter 62: the rule left the column grid for an expandable
+    // detail row; the freed slot shows the calling application.
     assert!(
-        body.contains("<th>Why selected</th>"),
-        "reason column, got: {body}"
+        body.contains("<th>Application</th>"),
+        "app column, got: {body}"
+    );
+    assert!(
+        !body.contains("<th>Why selected</th>"),
+        "no reason column, got: {body}"
+    );
+    assert!(
+        body.contains("Why selected:"),
+        "rule in the detail row, got: {body}"
     );
     // Virtual row: namespace differs from the pinned backend model.
     assert!(

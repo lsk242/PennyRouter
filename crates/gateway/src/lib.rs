@@ -1574,18 +1574,21 @@ async fn ui_page(State(state): State<AppState>, Query(params): Query<UiParams>) 
             } else {
                 page.push_str(
                     "<p>One row per live pin: the requested session id, the exact backend model \
-                    serving it with its current catalog params, and the rule that selected it. \
+                    serving it with its current catalog params, and the calling application \
+                    (from <code>X-Title</code>, referer, or user-agent headers, refreshed on \
+                    every request). Click a model name to expand the rule that selected it. \
                     A <em>stale</em> backend id means the pinned offering left the catalog \
                     (reload changed the set) — the next request re-routes.</p>",
                 );
                 page.push_str(
                     "<div class=\"table-scroll\"><table><thead><tr><th>Key suffix</th><th>Model</th>\
-                    <th>Backend model</th><th>Provider</th><th>Tag</th><th>Precision</th><th>Quant</th>\
+                    <th>Application</th><th>Backend model</th><th>Provider</th><th>Tag</th>\
+                    <th>Precision</th><th>Quant</th>\
                     <th>Prompt $/M</th><th>Completion $/M</th><th>Effective $/M</th><th>Tier</th>\
                     <th>Score</th><th>Tools</th><th>Decisions</th><th>Pinned at (UTC)</th>\
-                    <th>Why selected</th></tr></thead><tbody>",
+                    </tr></thead><tbody>",
                 );
-                for session in &summary.sessions {
+                for (i, session) in summary.sessions.iter().enumerate() {
                     let tools = match session.supports_tools {
                         Some(true) => "yes",
                         Some(false) => "no",
@@ -1602,11 +1605,17 @@ async fn ui_page(State(state): State<AppState>, Query(params): Query<UiParams>) 
                         format!("{} <em>(stale)</em>", esc(&session.backend_model))
                     };
                     page.push_str(&format!(
-                        "<tr><td><code>{}</code></td><td>{}</td><td>{}</td><td>{}</td><td>{}</td>\
+                        "<tr><td><code>{}</code></td>\
+                        <td><a href=\"#\" onclick=\"document.getElementById('sess-{i}').hidden=\
+                        !document.getElementById('sess-{i}').hidden;return false;\">{}</a></td>\
+                        <td>{}</td><td>{}</td><td>{}</td><td>{}</td>\
                         <td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td>\
-                        <td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+                        <td>{}</td><td>{}</td><td>{}</td></tr>\
+                        <tr id=\"sess-{i}\" hidden><td></td>\
+                        <td colspan=\"15\"><em>Why selected:</em> {}</td></tr>",
                         esc(&session.key_suffix),
                         esc(&session.model),
+                        text(&session.app),
                         backend,
                         esc(&session.provider),
                         text(&session.tag),
@@ -2019,6 +2028,8 @@ async fn routed_decisions(
             match router.route_decision_fallback(fallback_body, model_field, target, auth, ignore) {
                 Err(rejection) => return rejection_response(&rejection),
                 Ok(Some((rewritten, fb_decision))) => {
+                    // The fallback leg re-pinned: restore the app label.
+                    router.note_app(&headers);
                     let permit = match acquire_upstream_slot(&state).await {
                         Some(permit) => permit,
                         None => {
@@ -2314,6 +2325,8 @@ async fn routed_completion(
             if let Some((rewritten, fb_decision)) =
                 router.route_fallback(fallback_body, model_field, target, auth, ignore)
             {
+                // The fallback leg re-pinned: restore the app label.
+                router.note_app(&headers);
                 let permit = match acquire_upstream_slot(&state).await {
                     Some(permit) => permit,
                     None => {

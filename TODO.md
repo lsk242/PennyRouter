@@ -428,5 +428,12 @@ cheap judge model, classifier-based routing.
       scopes judge and order on prompt price (no output tokens),
       so prompt-only models serve. Test: prompt-only fixture
       for both scopes; full workspace green (425 passed).
+- [x] **Iter 62 — Session app labels + expandable rows.** Pins
+      carry the calling app (`X-Title`, else referer host+path,
+      else user-agent), stamped after routing and refreshed per
+      request; the sessions tab shows an Application column and
+      the rule hides in a row toggled by the model name. Test:
+      new `tests/sessions.rs` (5); full workspace green
+      (430 passed).
 
-## After Iter 61
+## After Iter 62
